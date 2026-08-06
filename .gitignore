@@ -21,6 +21,9 @@ config/settings.yaml
 # macOS
 .DS_Store
 
-# IDE
+# IDE / 工具
 .idea/
 .vscode/
+
+# Claude Code 本地会话配置（机器相关，不入库）
+.claude/
