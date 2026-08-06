@@ -1,12 +1,13 @@
-"""主窗口：左导航 + 右侧内容区 + 顶部搜索栏 + 底部状态栏（DEVELOPMENT.md §6）。
+"""主窗口：顶部导航 + 搜索栏 + 内容区 + 底部状态栏（DEVELOPMENT.md §6）。
 
 页面全部占位视图，逐模块替换为真实实现。
 """
 import logging
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QHBoxLayout,
     QLineEdit,
+    QListView,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
@@ -22,7 +23,7 @@ from .snippets_view import SnippetsView
 
 logger = logging.getLogger(__name__)
 
-# 左导航：显示名 → 页面视图类
+# 顶部导航：显示名 → 页面视图类
 _NAV_PAGES: list[tuple[str, type]] = [
     ("History", HistoryView),
     ("Collections", CollectionsView),
@@ -35,9 +36,10 @@ class MainWindow(QMainWindow):
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
         self.setWindowTitle("Clipboard Workspace")
-        # 唤起类工具：允许缩到较小尺寸，避免遮挡当前工作内容
-        self.resize(900, 560)
-        self.setMinimumSize(560, 360)
+        # 唤起类工具：允许缩到较小尺寸，避免遮挡当前工作内容。
+        # 顶部导航布局下宽度不再被侧边栏占用，可做得比之前窄。
+        self.resize(440, 560)
+        self.setMinimumSize(400, 420)
         self.statusBar().setSizeGripEnabled(False)
         self._build_ui()
         self.statusBar().showMessage("就绪")
@@ -45,19 +47,24 @@ class MainWindow(QMainWindow):
     def _build_ui(self) -> None:
         central = QWidget()
         self.setCentralWidget(central)
-        layout = QHBoxLayout(central)
+        layout = QVBoxLayout(central)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # 左导航（Apple 风格侧边栏，objectName 供 QSS 定位）
+        # 顶部导航：水平分段式（Apple 工具栏风格，objectName 供 QSS 定位）
         self._nav = QListWidget()
-        self._nav.setObjectName("sidebar")
-        self._nav.setFixedWidth(170)
+        self._nav.setObjectName("topnav")
+        self._nav.setFlow(QListView.Flow.LeftToRight)
+        self._nav.setFixedHeight(38)
+        self._nav.setSpacing(2)
         self._nav.setFrameShape(QListWidget.Shape.NoFrame)
+        self._nav.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._nav.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        layout.addWidget(self._nav)
 
-        # 右侧：搜索栏 + 页面栈
+        # 内容区：搜索栏 + 页面栈
         right = QVBoxLayout()
-        right.setContentsMargins(10, 10, 10, 0)
+        right.setContentsMargins(10, 8, 10, 0)
         right.setSpacing(6)
         self._search = QLineEdit()
         self._search.setObjectName("searchBox")
@@ -75,7 +82,6 @@ class MainWindow(QMainWindow):
         self._nav.setCurrentRow(0)
         right.addWidget(self._pages, 1)
 
-        layout.addWidget(self._nav)
         layout.addLayout(right, 1)
 
     def closeEvent(self, event) -> None:

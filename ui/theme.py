@@ -58,23 +58,24 @@ QWidget { color: $text; }
 /* ⚠️ 不要加 QWidget { outline: none; }：实测会干扰 QListView::item:selected
    的背景绘制（选中态渲染成浅色 tint），详见 git 历史 commit 说明 */
 
-/* 左侧导航：Finder/音乐风格侧边栏
+/* 顶部导航：水平分段式（Apple 工具栏风格）
    ⚠️ 选择器必须用 QListView#id（实测 Qt 6.11 macOS 风格忽略
    QListWidget#id::item:selected，选中背景不生效） */
-QListView#sidebar {
+QListView#topnav {
     background: $sidebar;
     border: none;
+    border-bottom: 1px solid $separator;
     font-size: 13px;
-    padding: 8px 0;
+    padding: 4px 8px;
 }
-QListView#sidebar::item {
-    height: 30px;
-    margin: 1px 8px;
-    padding-left: 12px;
+QListView#topnav::item {
+    height: 28px;
+    padding: 0 14px;
+    margin: 0 2px;
     border-radius: 6px;
 }
-QListView#sidebar::item:hover { background: $hover; }
-QListView#sidebar::item:selected {
+QListView#topnav::item:hover { background: $hover; }
+QListView#topnav::item:selected {
     background: $accent;
     color: $accent_text;
 }

@@ -97,7 +97,7 @@ clipboard-workspace/
 │   ├── action_service.py    # Action 注册与执行（复用 app/actions 接口）
 │   └── image_service.py     # 图片落盘、缩略图缓存、懒加载
 ├── ui/
-│   ├── main_window.py       # 主窗口（左导航 + 右内容 + 顶部搜索 + 底部状态栏）
+│   ├── main_window.py       # 主窗口（顶部导航 + 搜索栏 + 内容区 + 底部状态栏）
 │   ├── quick_paste_popup.py # ⌘⇧V 弹出层
 │   ├── history_view.py
 │   ├── collections_view.py

@@ -21,7 +21,7 @@ def test_apply_light_theme():
     qss = pytest_app.styleSheet()
     assert "#007AFF" in qss  # 强调色
     assert "#FFFFFF" in qss  # 窗口底色
-    assert "QListView#sidebar" in qss  # 选择器必须用 QListView（QListWidget 变体不生效）
+    assert "QListView#topnav" in qss  # 选择器必须用 QListView（QListWidget 变体不生效）
     assert pytest_app.palette().color(QPalette.ColorRole.Highlight) == QColor("#007AFF")
 
 
