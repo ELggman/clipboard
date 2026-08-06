@@ -9,8 +9,8 @@ import logging
 from PySide6.QtCore import QModelIndex, QRect, Qt, Signal
 from PySide6.QtGui import QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
+    QDialog,
     QHBoxLayout,
-    QInputDialog,
     QListView,
     QListWidget,
     QListWidgetItem,
@@ -142,9 +142,14 @@ class CollectionsView(QWidget):
     # ---- 收藏夹操作 ----
 
     def _create(self) -> None:
-        name, ok = QInputDialog.getText(self, "新建收藏夹", "名称：")
-        if ok and name.strip() and self._engine is not None:
-            collection_service.create_collection(self._engine, name.strip())
+        if self._engine is None:
+            return
+        from ui.dialogs import NameDialog
+
+        dialog = NameDialog("新建收藏夹", "名称：", placeholder="如：工作 / Prompt",
+                            confirm_text="创建")
+        if dialog.exec() == QDialog.DialogCode.Accepted and dialog.text():
+            collection_service.create_collection(self._engine, dialog.text())
             self.reload()
 
     def _rename(self, item: QListWidgetItem) -> None:
@@ -152,9 +157,12 @@ class CollectionsView(QWidget):
         coll = next((c for c in self._collections if c["id"] == cid), None)
         if coll is None or self._engine is None:
             return
-        name, ok = QInputDialog.getText(self, "重命名", "名称：", text=coll["name"])
-        if ok and name.strip():
-            collection_service.rename_collection(self._engine, cid, name.strip())
+        from ui.dialogs import NameDialog
+
+        dialog = NameDialog("重命名收藏夹", "名称：", initial=coll["name"],
+                            confirm_text="保存")
+        if dialog.exec() == QDialog.DialogCode.Accepted and dialog.text():
+            collection_service.rename_collection(self._engine, cid, dialog.text())
             self.reload()
 
     def _on_list_menu(self, pos) -> None:

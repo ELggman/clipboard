@@ -23,6 +23,7 @@ from PySide6.QtGui import (
     QStandardItemModel,
 )
 from PySide6.QtWidgets import (
+    QDialog,
     QListView,
     QMenu,
     QStyledItemDelegate,
@@ -343,9 +344,26 @@ class HistoryView(QWidget):
         pin_label = "取消置顶" if item.pinned else "置顶"
         menu.addAction(pin_label).triggered.connect(
             lambda: self._toggle_flag(item, "pinned"))
-        fav_label = "取消收藏" if item.favorite else "收藏"
-        menu.addAction(fav_label).triggered.connect(
+
+        # 收藏：单一入口（快速收藏 ★ / 具体收藏夹 / 新建收藏夹）
+        fav_menu = menu.addMenu("收藏")
+        self._active_menus.append(fav_menu)
+        quick_label = "★ 取消收藏" if item.favorite else "★ 快速收藏"
+        fav_menu.addAction(quick_label).triggered.connect(
             lambda: self._toggle_flag(item, "favorite"))
+        if self._engine is not None:
+            fav_menu.addSeparator()
+            from services import collection_service
+
+            collections = collection_service.list_collections(self._engine)
+            if collections:
+                for coll in collections:
+                    fav_menu.addAction(coll["name"]).triggered.connect(
+                        lambda _=False, c=coll: self._add_to_collection(c, item))
+            else:
+                fav_menu.addAction("暂无收藏夹").setEnabled(False)
+            fav_menu.addAction("新建收藏夹…").triggered.connect(
+                lambda: self._create_collection_and_add(item))
 
         if self._actions is not None:
             submenu = menu.addMenu("Actions")
@@ -357,19 +375,6 @@ class HistoryView(QWidget):
                         lambda _=False, a=action: self._run_action(a, item))
             else:
                 submenu.addAction("无可用 Action").setEnabled(False)
-
-        if self._engine is not None:
-            coll_menu = menu.addMenu("加入收藏夹")
-            self._active_menus.append(coll_menu)
-            from services import collection_service
-
-            collections = collection_service.list_collections(self._engine)
-            if collections:
-                for coll in collections:
-                    coll_menu.addAction(coll["name"]).triggered.connect(
-                        lambda _=False, c=coll: self._add_to_collection(c, item))
-            else:
-                coll_menu.addAction("暂无收藏夹（先到收藏夹页创建）").setEnabled(False)
         return menu
 
     def _run_copy(self, item) -> None:
@@ -409,6 +414,19 @@ class HistoryView(QWidget):
 
         if item.id and collection_service.add_item(self._engine, coll["id"], item.id):
             logger.info("已加入收藏夹「%s」: item=%s", coll["name"], item.id)
+            self.feedback.emit(f"已收藏到「{coll['name']}」")
+
+    def _create_collection_and_add(self, item) -> None:
+        """新建收藏夹并立即把当前条目加入。"""
+        from services import collection_service
+        from ui.dialogs import NameDialog
+
+        dialog = NameDialog("新建收藏夹", "名称：", confirm_text="创建")
+        if dialog.exec() == QDialog.DialogCode.Accepted and dialog.text():
+            cid = collection_service.create_collection(self._engine, dialog.text())
+            collection_service.add_item(self._engine, cid, item.id)
+            logger.info("新建收藏夹并加入: %s (item=%s)", dialog.text(), item.id)
+            self.feedback.emit(f"已收藏到「{dialog.text()}」")
 
     # ---- 数据 ----
 

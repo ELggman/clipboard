@@ -10,7 +10,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PIL import Image
 from PySide6.QtCore import QRect, Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QStyleOptionViewItem
+from PySide6.QtWidgets import QApplication, QDialog, QPushButton, QStyleOptionViewItem
 
 from app.types import ClipboardItem
 from ui.history_view import ROLE_ITEM, ROW_HEIGHT, THUMB_ROW_HEIGHT, HistoryView
@@ -455,14 +455,17 @@ def test_history_menu_add_to_collection(tmp_path):
     view.set_menu_context(engine, None, None)
     menu = view._build_menu(item)
 
-    coll_action = next(a for a in menu.actions()
-                       if a.menu() is not None
-                       and any(x.text() == "加入收藏夹" for x in menu.actions()))
-    # 找到「加入收藏夹」子菜单动作
-    sub = next(a.menu() for a in menu.actions() if a.text() == "加入收藏夹")
+    # 「收藏」子菜单：★ 快速收藏 + 收藏夹列表 + 新建收藏夹…
+    # （用 view 持有的引用，shiboken 对 QAction.menu() 重新包装会失效）
+    sub = view._active_menus[1]
     names = [a.text() for a in sub.actions()]
+    assert names[0] == "★ 快速收藏"
     assert "收藏夹A" in names
-    sub.actions()[0].trigger()
+    assert names[-1] == "新建收藏夹…"
+
+    # 触发收藏夹 A（跳过首项快速收藏与分隔符）
+    coll_action = next(a for a in sub.actions() if a.text() == "收藏夹A")
+    coll_action.trigger()
     assert collection_service.list_items(engine, cid)[0].content == "collect me"
 
 
@@ -482,14 +485,15 @@ def test_favorite_feedback_and_virtual_collection(tmp_path):
     item.hash = hashlib.sha256(b"fav target").hexdigest()
     history_service.save_item(engine, item)
 
-    # 历史页：收藏 → feedback 信号 + 条目 ★ 标记
+    # 历史页：收藏子菜单「★ 快速收藏」→ feedback 信号 + 条目 ★ 标记
     view = HistoryView()
     view.add_item(item)
     view.set_menu_context(engine, None, None)
     messages = []
     view.feedback.connect(messages.append)
     menu = view._build_menu(item)
-    menu.actions()[2].trigger()  # 收藏
+    fav_menu = view._active_menus[1]  # 「收藏」子菜单（持有引用）
+    fav_menu.actions()[0].trigger()  # ★ 快速收藏
     assert messages == ["已收藏"]
     assert item.favorite == 1
     from ui.history_view import HistoryDelegate
@@ -504,6 +508,25 @@ def test_favorite_feedback_and_virtual_collection(tmp_path):
     assert cv._model.rowCount() == 1
     assert cv._model.index(0, 0).data(ROLE_ITEM).content == "fav target"
     cv.close()
+
+
+def test_name_dialog_chinese_buttons_and_return():
+    """Apple 风格命名对话框：中文按钮、回车确认、text() 取值。"""
+    from PySide6.QtTest import QTest
+
+    from ui.dialogs import NameDialog
+
+    dlg = NameDialog("新建收藏夹", "名称：", confirm_text="创建")
+    dlg.show()
+    pytest_app.processEvents()
+    btn_texts = [b.text() for b in dlg.findChildren(QPushButton)]
+    assert "取消" in btn_texts and "创建" in btn_texts  # 无英文 OK
+
+    dlg._edit.setText("工作")
+    QTest.keyClick(dlg._edit, Qt.Key.Key_Return)  # 回车确认
+    assert dlg.result() == QDialog.DialogCode.Accepted
+    assert dlg.text() == "工作"
+    dlg.deleteLater()
 
 
 def test_theme_scrollbar_qss():
