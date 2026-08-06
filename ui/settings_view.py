@@ -14,4 +14,6 @@ class SettingsView(QWidget):
         super().__init__(parent)
         layout = QFormLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
-        layout.addRow("Settings", QLabel("TODO: 历史数量 / 图片保存 / 自动删除 / 开机启动 / 快捷键 / 字体 / 主题"))
+        label = QLabel("TODO: 历史数量 / 图片保存 / 自动删除 / 开机启动 / 快捷键 / 字体 / 主题")
+        label.setObjectName("placeholder")
+        layout.addRow("Settings", label)

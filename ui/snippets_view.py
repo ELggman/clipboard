@@ -15,6 +15,6 @@ class SnippetsView(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         label = QLabel("Snippets（TODO: 增删改 + {{date}}/{{time}}/{{uuid}} 变量）")
-        label.setStyleSheet("color: gray;")
+        label.setObjectName("placeholder")
         layout.addWidget(label)
         layout.addStretch(1)

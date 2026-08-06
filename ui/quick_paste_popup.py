@@ -18,8 +18,11 @@ class QuickPastePopup(QWidget):
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent, Qt.FramelessWindowHint | Qt.Popup)
+        self.setObjectName("quickPaste")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self._items: list = []
         self._list = QListWidget(self)
+        self._list.setObjectName("historyList")
         self._list.setUniformItemSizes(True)
         self.resize(420, 320)
 

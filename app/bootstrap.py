@@ -20,6 +20,16 @@ IMAGES_DIR = ROOT_DIR / "images"
 def start_workspace(app: QApplication) -> None:
     config = load_config()
 
+    # 主题（浅/深/跟随系统；跟随系统时监听系统外观变化动态切换）
+    from ui.theme import apply_theme
+
+    theme = config["app"]["theme"]
+    apply_theme(app, theme)
+    if theme == "system":
+        app.styleHints().colorSchemeChanged.connect(
+            lambda _scheme: apply_theme(app, "system")
+        )
+
     # 数据库
     from database.engine import create_db_engine
     from database.migrations import migrate

@@ -12,6 +12,6 @@ class CollectionsView(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         label = QLabel("Collections（TODO: 创建/删除/重命名收藏夹）")
-        label.setStyleSheet("color: gray;")
+        label.setObjectName("placeholder")
         layout.addWidget(label)
         layout.addStretch(1)

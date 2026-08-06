@@ -5,6 +5,7 @@ TODO(V1 打磨): 换成 QListView + 自定义 delegate（分页加载、缩略�
 """
 import logging
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QListWidget, QVBoxLayout, QWidget
 
 logger = logging.getLogger(__name__)
@@ -14,8 +15,10 @@ class HistoryView(QWidget):
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
         self._list = QListWidget()
+        self._list.setObjectName("historyList")
         self._list.setUniformItemSizes(True)
         self._list.setWordWrap(True)
+        self._list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self._list)

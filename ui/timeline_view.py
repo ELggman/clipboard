@@ -12,6 +12,6 @@ class TimelineView(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         label = QLabel("Timeline（TODO: 按今天/昨天/本周分组）")
-        label.setStyleSheet("color: gray;")
+        label.setObjectName("placeholder")
         layout.addWidget(label)
         layout.addStretch(1)

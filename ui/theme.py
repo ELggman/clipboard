@@ -1,41 +1,148 @@
-"""主题：浅色 / 深色 / 跟随系统（DEVELOPMENT.md §6 界面设计）。
+"""主题：浅色 / 深色 / 跟随系统（Apple 风格，DEVELOPMENT.md §6 界面设计）。
 
-TODO: 完整调色板与 qss（resources/theme/*.qss），此处为最小骨架。
+设计要点：
+- 调色板取自 macOS 系统色（正文 #1D1D1F / 次要 #6E6E73 / 强调 #007AFF 等）
+- QSS 由调色板用 string.Template 生成（QSS 含 {}，不能走 %-format）
+- 只样式化自定义区域（侧边栏/搜索框/列表/状态栏/占位提示），
+  其余控件保持 Qt 原生 macOS 外观
+- 跟随系统：bootstrap 里监听 colorSchemeChanged 动态重应用
 """
 import logging
+import string
 
 from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import QApplication
 
 logger = logging.getLogger(__name__)
 
-_DARK_PALETTE = {
-    "window": QColor("#1e1e1e"),
-    "windowText": QColor("#e8e8e8"),
-    "base": QColor("#252526"),
-    "alternateBase": QColor("#2d2d30"),
-    "text": QColor("#e8e8e8"),
-    "button": QColor("#333337"),
-    "buttonText": QColor("#e8e8e8"),
-    "highlight": QColor("#0a84ff"),
-    "highlightedText": QColor("#ffffff"),
+# ---- 调色板（macOS 系统色） ----
+
+LIGHT = {
+    "window": "#FFFFFF",      # 主内容背景
+    "sidebar": "#F0F0F2",     # 左侧导航底（接近 Finder 侧边栏）
+    "content": "#F5F5F7",     # 备用面
+    "text": "#1D1D1F",
+    "secondary": "#6E6E73",
+    "separator": "#E3E3E6",
+    "search_bg": "#E9E9EB",   # NSSearchField 底色
+    "accent": "#007AFF",      # 系统蓝
+    "accent_text": "#FFFFFF",
+    "hover": "rgba(0, 0, 0, 0.06)",
+    "hover_item": "rgba(0, 0, 0, 0.04)",
 }
 
+DARK = {
+    "window": "#1E1E1E",
+    "sidebar": "#26262A",
+    "content": "#2C2C2E",
+    "text": "#F5F5F7",
+    "secondary": "#98989D",
+    "separator": "#3A3A3C",
+    "search_bg": "#3A3A3C",
+    "accent": "#0A84FF",
+    "accent_text": "#FFFFFF",
+    "hover": "rgba(255, 255, 255, 0.08)",
+    "hover_item": "rgba(255, 255, 255, 0.06)",
+}
 
-def apply_theme(app: QApplication, mode: str = "system") -> None:
-    """mode: system / light / dark。system 跟随系统外观。"""
-    if mode == "system":
-        scheme = app.styleHints().colorScheme()
-        mode = "dark" if scheme == 1 else "light"  # Qt.ColorScheme.Dark == 1
-        logger.info("跟随系统主题: %s", mode)
+_QSS = string.Template("""
+QMainWindow, QDialog, QWidget#quickPaste {
+    background: $window;
+}
+QWidget { color: $text; }
 
-    if mode == "dark":
-        palette = QPalette()
-        for role_name, color in _DARK_PALETTE.items():
-            role = getattr(QPalette.ColorRole, role_name.capitalize(), None)
-            if role is not None:
-                palette.setColor(role, color)
-        app.setPalette(palette)
-    else:
-        app.setPalette(app.style().standardPalette())
-    logger.info("主题已应用: %s", mode)
+/* ⚠️ 不要加 QWidget { outline: none; }：实测会干扰 QListView::item:selected
+   的背景绘制（选中态渲染成浅色 tint），详见 git 历史 commit 说明 */
+
+/* 左侧导航：Finder/音乐风格侧边栏
+   ⚠️ 选择器必须用 QListView#id（实测 Qt 6.11 macOS 风格忽略
+   QListWidget#id::item:selected，选中背景不生效） */
+QListView#sidebar {
+    background: $sidebar;
+    border: none;
+    font-size: 13px;
+    padding: 8px 0;
+}
+QListView#sidebar::item {
+    height: 30px;
+    margin: 1px 8px;
+    padding-left: 12px;
+    border-radius: 6px;
+}
+QListView#sidebar::item:hover { background: $hover; }
+QListView#sidebar::item:selected {
+    background: $accent;
+    color: $accent_text;
+}
+
+/* 搜索框：NSSearchField 风格 */
+QLineEdit#searchBox {
+    background: $search_bg;
+    border: none;
+    border-radius: 8px;
+    padding: 6px 10px;
+    font-size: 13px;
+    selection-background-color: $accent;
+}
+
+/* 历史列表 */
+QListView#historyList {
+    background: transparent;
+    border: none;
+    font-size: 13px;
+    padding: 4px 6px;
+}
+QListView#historyList::item {
+    padding: 8px 12px;
+    border-radius: 8px;
+    margin: 1px 2px;
+}
+QListView#historyList::item:hover { background: $hover_item; }
+QListView#historyList::item:selected {
+    background: $accent;
+    color: $accent_text;
+}
+
+/* 占位提示（未实现的页面） */
+QLabel#placeholder { color: $secondary; font-size: 13px; }
+
+/* 状态栏 */
+QStatusBar { color: $secondary; font-size: 11px; background: transparent; }
+QStatusBar::item { border: none; }
+""")
+
+
+def _resolve_mode(app: QApplication, mode: str) -> str:
+    """把 system 解析为 light/dark；返回实际模式。"""
+    if mode != "system":
+        return mode
+    resolved = "dark" if app.styleHints().colorScheme() == 1 else "light"
+    logger.info("跟随系统主题: %s", resolved)
+    return resolved
+
+
+def build_stylesheet(palette: dict) -> str:
+    return _QSS.substitute(**palette)
+
+
+def _build_palette(p: dict) -> QPalette:
+    pal = QPalette()
+    pal.setColor(QPalette.ColorRole.Window, QColor(p["window"]))
+    pal.setColor(QPalette.ColorRole.WindowText, QColor(p["text"]))
+    pal.setColor(QPalette.ColorRole.Base, QColor(p["window"]))
+    pal.setColor(QPalette.ColorRole.AlternateBase, QColor(p["content"]))
+    pal.setColor(QPalette.ColorRole.Text, QColor(p["text"]))
+    pal.setColor(QPalette.ColorRole.PlaceholderText, QColor(p["secondary"]))
+    pal.setColor(QPalette.ColorRole.Highlight, QColor(p["accent"]))
+    pal.setColor(QPalette.ColorRole.HighlightedText, QColor(p["accent_text"]))
+    return pal
+
+
+def apply_theme(app: QApplication, mode: str = "system") -> str:
+    """应用主题（mode: system / light / dark），返回实际生效的模式。"""
+    resolved = _resolve_mode(app, mode)
+    palette = LIGHT if resolved == "light" else DARK
+    app.setPalette(_build_palette(palette))
+    app.setStyleSheet(build_stylesheet(palette))
+    logger.info("主题已应用: %s", resolved)
+    return resolved

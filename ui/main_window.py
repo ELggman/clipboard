@@ -36,6 +36,8 @@ class MainWindow(QMainWindow):
         super().__init__(parent)
         self.setWindowTitle("Clipboard Workspace")
         self.resize(1000, 640)
+        self.setMinimumSize(760, 480)
+        self.statusBar().setSizeGripEnabled(False)
         self._build_ui()
         self.statusBar().showMessage("就绪")
 
@@ -46,14 +48,19 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # 左导航
+        # 左导航（Apple 风格侧边栏，objectName 供 QSS 定位）
         self._nav = QListWidget()
-        self._nav.setFixedWidth(160)
+        self._nav.setObjectName("sidebar")
+        self._nav.setFixedWidth(170)
+        self._nav.setFrameShape(QListWidget.Shape.NoFrame)
 
         # 右侧：搜索栏 + 页面栈
         right = QVBoxLayout()
-        right.setContentsMargins(0, 0, 0, 0)
+        right.setContentsMargins(12, 12, 12, 0)
+        right.setSpacing(8)
         self._search = QLineEdit()
+        self._search.setObjectName("searchBox")
+        self._search.setFixedHeight(30)
         self._search.setPlaceholderText("搜索历史…")
         self._search.setClearButtonEnabled(True)
         self._search.textChanged.connect(self._on_search)
