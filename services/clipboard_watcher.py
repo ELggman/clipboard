@@ -1,0 +1,100 @@
+"""剪贴板监听：NSPasteboard changeCount 轮询。
+
+选型依据（DEVELOPMENT.md §3.1）：
+- 进程内 API、无 TCC 权限需求（pasteboard 不受 TCC 保护）
+- 不用 pyperclip 轮询（其走 pbpaste/pbcopy 子进程，不适合常驻）
+解析顺序与需求一致：File → Image → URL → Text。
+"""
+import hashlib
+import logging
+from pathlib import Path
+from urllib.parse import urlparse
+
+from AppKit import NSPasteboard
+from PySide6.QtCore import QObject, QTimer, Signal
+
+from app.types import FILE, IMAGE, TEXT, URL, ClipboardItem
+
+logger = logging.getLogger(__name__)
+
+
+class ClipboardWatcher(QObject):
+    """轮询剪贴板变化，解析类型后发出 changed 信号（携带 ClipboardItem，未入库）。"""
+
+    changed = Signal(object)  # ClipboardItem
+
+    def __init__(self, poll_interval: float = 0.2, parent: QObject | None = None):
+        super().__init__(parent)
+        self._last_change = NSPasteboard.generalPasteboard().changeCount()
+        self._timer = QTimer(self)
+        self._timer.setInterval(int(poll_interval * 1000))
+        self._timer.timeout.connect(self._poll)
+
+    def start(self) -> None:
+        self._timer.start()
+        logger.info("剪贴板监听启动（轮询 %ds）", self._timer.interval() / 1000)
+
+    def stop(self) -> None:
+        self._timer.stop()
+
+    # ---- 内部 ----
+
+    def _poll(self) -> None:
+        pb = NSPasteboard.generalPasteboard()
+        change = pb.changeCount()
+        if change == self._last_change:
+            return
+        self._last_change = change
+        item = self._parse(pb)
+        if item is None:
+            logger.debug("剪贴板变化，但无可解析内容")
+            return
+        logger.info("剪贴板变化: type=%s hash=%s", item.type, item.hash[:12])
+        self.changed.emit(item)
+
+    @staticmethod
+    def _parse(pb: NSPasteboard) -> ClipboardItem | None:
+        # 1) File：public.file-url 可能返回单个字符串或数组，兼容两者
+        raw = pb.propertyListForType(NSPasteboard.NSPasteboardTypeFileURL)
+        urls = raw if isinstance(raw, list) else ([raw] if raw else [])
+        if urls:
+            path = Path(urlparse(urls[0]).path)
+            return ClipboardItem(
+                type=FILE,
+                content=path.name,
+                file_path=str(path),
+                hash=ClipboardWatcher._digest(str(path)),
+            )
+
+        # 2) Image：PNG 优先，TIFF 兜底
+        data = pb.dataForType(NSPasteboard.NSPasteboardTypePNG)
+        if data is None:
+            data = pb.dataForType(NSPasteboard.NSPasteboardTypeTIFF)
+        if data is not None:
+            return ClipboardItem(
+                type=IMAGE,
+                data=bytes(data),
+                hash=ClipboardWatcher._digest(bytes(data)),
+            )
+
+        # 3) URL / Text
+        url = pb.stringForType(NSPasteboard.NSPasteboardTypeURL)
+        if url:
+            return ClipboardItem(
+                type=URL, content=url, hash=ClipboardWatcher._digest(url)
+            )
+        text = pb.stringForType(NSPasteboard.NSPasteboardTypeString)
+        if text is None or not text.strip():
+            return None
+        # 简化启发式：http(s) 开头视为 URL（完整判断可后续加强）
+        if text.startswith(("http://", "https://")):
+            return ClipboardItem(
+                type=URL, content=text, hash=ClipboardWatcher._digest(text)
+            )
+        return ClipboardItem(type=TEXT, content=text, hash=ClipboardWatcher._digest(text))
+
+    @staticmethod
+    def _digest(payload: str | bytes) -> str:
+        if isinstance(payload, str):
+            payload = payload.encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()

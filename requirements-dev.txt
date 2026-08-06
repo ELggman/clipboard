@@ -1,0 +1,5 @@
+# 开发/打包依赖
+# 安装：pip install -r requirements-dev.txt
+-r requirements.txt
+pyinstaller>=6.10.0
+pytest>=8.0.0

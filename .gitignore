@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+
+# 构建产物（PyInstaller）
+build/
+dist/
+*.log
+
+# 运行时数据（目录由应用运行时创建）
+logs/
+images/
+data/
+
+# 用户配置（含本机路径，不入库；defaults.yaml 入库）
+config/settings.yaml
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/

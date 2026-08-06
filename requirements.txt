@@ -1,0 +1,8 @@
+# Clipboard Workspace 核心依赖（Python 3.12+）
+# 安装：pip install -r requirements.txt
+PySide6>=6.9.0
+SQLAlchemy>=2.0.0
+PyYAML>=6.0.0
+Pillow>=11.0.0
+pyobjc-framework-Quartz>=12.0.0
+pyperclip>=1.9.0

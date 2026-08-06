@@ -1,0 +1,25 @@
+# Clipboard Workspace 默认配置（打包内置，禁止删除）
+# 用户覆盖写入 config/settings.yaml，缺失字段回退本文件
+
+app:
+  theme: system            # system / light / dark
+  font_size: 13
+  launch_at_login: false   # 开机启动（写入 LaunchAgent）
+
+history:
+  max_items: 500           # 100 / 500 / 1000 / -1(无限)
+  save_images: true
+  auto_delete_days: 30     # 7 / 30 / 90 / -1(永不)
+  poll_interval: 0.2       # 剪贴板轮询间隔（秒）
+
+hotkey:
+  enabled: true
+  keycode: 9               # 物理键 vk 码：V = 9（不依赖键盘布局）
+  flags: [command, shift]  # ⌘⇧V
+
+snippet:
+  date_format: "%Y-%m-%d"
+  time_format: "%H:%M:%S"
+
+search:
+  page_size: 100
