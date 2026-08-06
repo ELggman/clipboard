@@ -58,8 +58,12 @@ def save_item(engine: Engine, item: ClipboardItem, max_items: int = 500) -> bool
     """去重落库 + FTS 索引。返回 True=新增；False=重复（仅刷新 updated_at）。
 
     重复判定用 hash（sha256）；图片重复时会复用已落盘的图片文件。
+    副作用：回填 item.created_at / item.preview —— 实时 UI 刷新依赖这两个
+    展示字段（否则当前进程内列表不显示时间/文件名，重启恢复才有）。
     """
     now = datetime.now()
+    item.created_at = now.strftime("%m-%d %H:%M")
+    item.preview = compute_preview(item)
     with engine.begin() as conn:
         row = conn.execute(
             text("SELECT id FROM clipboard_items WHERE hash = :h"), {"h": item.hash}

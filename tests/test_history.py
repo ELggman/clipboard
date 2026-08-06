@@ -89,6 +89,21 @@ def test_list_recent_newest_first(engine):
     assert len(history_service.list_recent(engine, limit=1)) == 1
 
 
+def test_save_item_fills_display_fields(engine):
+    """落库回填 created_at/preview：实时 UI 依赖（回归：当前进程内不显示时间/文件名）。"""
+    item = _item("hello display")
+    history_service.save_item(engine, item)
+    assert item.created_at  # "%m-%d %H:%M"
+    assert item.preview == "hello display"
+
+    img = ClipboardItem(
+        type="image", content="", file_path="/data/images/xyz.png", hash="y" * 64
+    )
+    history_service.save_item(engine, img)
+    assert img.preview == "xyz.png"
+    assert img.created_at
+
+
 def test_preview_image_uses_filename():
     item = ClipboardItem(
         type="image", content="", file_path="/data/images/abc123.png",
