@@ -1,9 +1,9 @@
 """启动装配：配置 → 数据库 → 服务 → UI（全部延迟导入，保证启动 <1s）。
 
-TODO: 落库/去重逻辑提取为 services/history_service.py（V1 打磨项）。
+V1 核心闭环已打通：ClipboardWatcher 解析 → history_service 去重落库
+→ MainWindow.refresh_history 刷新列表与状态栏。
 """
 import logging
-from pathlib import Path
 
 from PySide6.QtWidgets import QApplication
 
@@ -28,51 +28,50 @@ def start_workspace(app: QApplication) -> None:
     migrate(engine)
 
     # 服务
+    from services import history_service
     from services.clipboard_watcher import ClipboardWatcher
     from services.hotkey_manager import HotkeyManager
     from services.image_service import ImageService
 
-    watcher = ClipboardWatcher(float(config["history"]["poll_interval"]))
-    watcher.changed.connect(lambda item: _on_clipboard_changed(item, engine))
+    image_service = ImageService(IMAGES_DIR)
+    # parent=app：QObject 挂到应用对象上，防止 start_workspace 返回后
+    # 局部引用被 GC 回收导致定时器/监听静默失效（实测踩坑）
+    watcher = ClipboardWatcher(float(config["history"]["poll_interval"]), parent=app)
+    hotkey = HotkeyManager(parent=app)
+
+    # UI（装配完成前不弹窗）
+    from ui.main_window import MainWindow
+
+    window = MainWindow()
+    window.show()
+
+    # 闭环：监听 → 图片落盘 → 去重落库 → UI 刷新
+    def on_clipboard_changed(item: ClipboardItem) -> None:
+        if item.type == "image" and item.data:
+            try:
+                item.file_path = str(image_service.save(item.data))
+                item.data = b""  # 释放内存
+            except Exception:
+                logger.exception("图片保存失败，放弃本条")
+                return
+        is_new = history_service.save_item(
+            engine, item, max_items=int(config["history"]["max_items"])
+        )
+        window.refresh_history(item, is_new)
+        logger.info("已%s: type=%s hash=%s", "新增" if is_new else "去重更新", item.type, item.hash[:12])
+
+    watcher.changed.connect(on_clipboard_changed)
     watcher.start()
 
-    hotkey = HotkeyManager()
     hotkey.activated.connect(_on_quick_paste)
     hotkey.permission_required.connect(_on_permission_required)
     if config["hotkey"]["enabled"]:
         hotkey.start()
 
-    # UI（最后加载，成功装配前不弹窗）
-    from ui.main_window import MainWindow
-
-    window = MainWindow()
-    window.show()
-    app._clipboard_window = window  # noqa: SLF001  # 供服务回调引用（临时接线）
     logger.info("启动完成")
 
 
 # ---- 回调 ----
-
-def _on_clipboard_changed(item: ClipboardItem, engine) -> None:
-    """监听回调：图片先落盘，去重落库待实现。
-
-    TODO(history_service):
-      1. 按 hash 查重 → 已存在只更新 updated_at
-      2. 落库 + items_fts 索引（search_service.reindex）
-      3. 历史数量上限裁剪（max_items）
-    """
-    from services.image_service import ImageService
-
-    if item.type == "image" and item.data:
-        try:
-            item.file_path = str(ImageService(IMAGES_DIR).save(item.data))
-            item.data = b""  # 释放内存
-        except Exception:
-            logger.exception("图片保存失败，放弃本条")
-            return
-    # TODO: 持久化与 UI 刷新
-    logger.info("待落库: type=%s hash=%s", item.type, item.hash[:12])
-
 
 def _on_quick_paste() -> None:
     """⌘⇧V：弹出最近历史。

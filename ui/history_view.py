@@ -21,9 +21,13 @@ class HistoryView(QWidget):
         layout.addWidget(self._list)
 
     def add_item(self, clipboard_item) -> None:
-        """追加一条历史（来自 ClipboardWatcher/加载分页）。"""
+        """追加一条历史（最新在上）。"""
         text = f"{clipboard_item.display_text()}\n{clipboard_item.type}"
-        self._list.addItem(text)
+        self._list.insertItem(0, text)
+
+    def mark_duplicate(self, clipboard_item) -> None:
+        """重复内容：不新增，仅刷新状态栏（列表不动）。"""
+        logger.debug("去重: %s", clipboard_item.hash[:12])
 
     def set_query(self, query: str) -> None:
         """顶部搜索栏联动。TODO: 接入 SearchService（DEVELOPMENT.md §3.4）。"""

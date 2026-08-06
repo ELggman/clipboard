@@ -75,11 +75,15 @@ class MainWindow(QMainWindow):
         if hasattr(page, "set_query"):
             page.set_query(query)
 
-    def refresh_history(self, clipboard_item) -> None:
-        """剪贴板新条目回调：刷新历史页与状态栏。"""
+    def refresh_history(self, clipboard_item, is_new: bool = True) -> None:
+        """剪贴板条目回调：is_new=True 追加列表；状态栏区分新增/去重。"""
         page = self._pages.widget(0)
         if isinstance(page, HistoryView):
-            page.add_item(clipboard_item)
+            if is_new:
+                page.add_item(clipboard_item)
+            else:
+                page.mark_duplicate(clipboard_item)
+        verb = "捕获" if is_new else "去重"
         self.statusBar().showMessage(
-            f"已捕获 {clipboard_item.type} · {clipboard_item.hash[:8]}"
+            f"{verb} {clipboard_item.type} · {clipboard_item.hash[:8]}"
         )

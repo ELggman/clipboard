@@ -6,7 +6,7 @@
 import logging
 from pathlib import Path
 
-from AppKit import NSPasteboard
+from AppKit import NSPasteboard, NSPasteboardTypeString
 
 from actions import load_actions
 from actions._base import ClipboardAction
@@ -18,7 +18,7 @@ def set_clipboard_text(text: str) -> None:
     """将文本写入系统剪贴板。"""
     pb = NSPasteboard.generalPasteboard()
     pb.clearContents()
-    pb.setString_forType(text, NSPasteboard.NSPasteboardTypeString)
+    pb.setString_forType_(text, NSPasteboardTypeString)
 
 
 class ActionService:

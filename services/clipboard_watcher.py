@@ -10,7 +10,17 @@ import logging
 from pathlib import Path
 from urllib.parse import urlparse
 
-from AppKit import NSPasteboard
+# 注意：pasteboard 类型常量是 AppKit 模块级导出，不是 NSPasteboard 类属性
+# （pyobjc 12.x 实测类属性访问为 None，会导致每次轮询 AttributeError）
+from AppKit import (
+    NSPasteboard,
+    NSPasteboardTypeFileURL,
+    NSPasteboardTypePNG,
+    NSPasteboardTypeString,
+    NSPasteboardTypeTIFF,
+    NSPasteboardTypeURL,
+    NSWorkspace,
+)
 from PySide6.QtCore import QObject, QTimer, Signal
 
 from app.types import FILE, IMAGE, TEXT, URL, ClipboardItem
@@ -54,8 +64,10 @@ class ClipboardWatcher(QObject):
 
     @staticmethod
     def _parse(pb: NSPasteboard) -> ClipboardItem | None:
+        source_app = ClipboardWatcher._frontmost_app()
+
         # 1) File：public.file-url 可能返回单个字符串或数组，兼容两者
-        raw = pb.propertyListForType(NSPasteboard.NSPasteboardTypeFileURL)
+        raw = pb.propertyListForType_(NSPasteboardTypeFileURL)
         urls = raw if isinstance(raw, list) else ([raw] if raw else [])
         if urls:
             path = Path(urlparse(urls[0]).path)
@@ -63,35 +75,51 @@ class ClipboardWatcher(QObject):
                 type=FILE,
                 content=path.name,
                 file_path=str(path),
+                source_app=source_app,
                 hash=ClipboardWatcher._digest(str(path)),
             )
 
         # 2) Image：PNG 优先，TIFF 兜底
-        data = pb.dataForType(NSPasteboard.NSPasteboardTypePNG)
+        data = pb.dataForType_(NSPasteboardTypePNG)
         if data is None:
-            data = pb.dataForType(NSPasteboard.NSPasteboardTypeTIFF)
+            data = pb.dataForType_(NSPasteboardTypeTIFF)
         if data is not None:
             return ClipboardItem(
                 type=IMAGE,
                 data=bytes(data),
+                source_app=source_app,
                 hash=ClipboardWatcher._digest(bytes(data)),
             )
 
         # 3) URL / Text
-        url = pb.stringForType(NSPasteboard.NSPasteboardTypeURL)
+        url = pb.stringForType_(NSPasteboardTypeURL)
         if url:
             return ClipboardItem(
-                type=URL, content=url, hash=ClipboardWatcher._digest(url)
+                type=URL, content=url, source_app=source_app,
+                hash=ClipboardWatcher._digest(url),
             )
-        text = pb.stringForType(NSPasteboard.NSPasteboardTypeString)
+        text = pb.stringForType_(NSPasteboardTypeString)
         if text is None or not text.strip():
             return None
         # 简化启发式：http(s) 开头视为 URL（完整判断可后续加强）
         if text.startswith(("http://", "https://")):
             return ClipboardItem(
-                type=URL, content=text, hash=ClipboardWatcher._digest(text)
+                type=URL, content=text, source_app=source_app,
+                hash=ClipboardWatcher._digest(text),
             )
-        return ClipboardItem(type=TEXT, content=text, hash=ClipboardWatcher._digest(text))
+        return ClipboardItem(
+            type=TEXT, content=text, source_app=source_app,
+            hash=ClipboardWatcher._digest(text),
+        )
+
+    @staticmethod
+    def _frontmost_app() -> str:
+        """监听时刻的前台应用名（复制动作的发起者），无需额外权限。"""
+        try:
+            return NSWorkspace.sharedWorkspace().frontmostApplication().localizedName()
+        except Exception:
+            logger.exception("获取前台应用失败")
+            return ""
 
     @staticmethod
     def _digest(payload: str | bytes) -> str:
