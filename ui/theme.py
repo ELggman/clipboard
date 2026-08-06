@@ -26,6 +26,7 @@ LIGHT = {
     "separator": "#E3E3E6",
     "search_bg": "#E9E9EB",   # NSSearchField 底色
     "accent": "#007AFF",      # 系统蓝（导航/按钮等强调）
+    "accent_pressed": "#0062CC",  # 按下态加深（QSS 不支持 opacity，须显式色）
     "accent_text": "#FFFFFF",
     # 列表选中高亮：浅蓝半透明 + 深色文字（macOS 原生选中风格，比实心蓝柔和）
     # 注意：QColor 的 8 位十六进制是 AARRGGBB 顺序（alpha 前置），
@@ -47,6 +48,7 @@ DARK = {
     "separator": "#3A3A3C",
     "search_bg": "#3A3A3C",
     "accent": "#0A84FF",
+    "accent_pressed": "#3396FF",
     "accent_text": "#FFFFFF",
     # 列表选中高亮：macOS 深色模式的选中蓝（#3D82F7）比 #0A84FF 柔和
     "selection_bg": "#3D82F7",
@@ -199,8 +201,7 @@ QPushButton#primaryButton {
     padding: 6px 18px;
     font-size: 13px;
 }
-QPushButton#primaryButton:hover { background: $accent; }
-QPushButton#primaryButton:pressed { opacity: 0.8; }
+QPushButton#primaryButton:pressed { background: $accent_pressed; }
 
 /* 状态栏 */
 QStatusBar { color: $secondary; font-size: 11px; background: transparent; }

@@ -51,5 +51,11 @@ class NameDialog(QDialog):
 
         self._edit.setFocus()
 
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        from ui.animations import fade_in_window
+
+        fade_in_window(self, dy=0)  # 对话框淡入（不做位移，避免晃动）
+
     def text(self) -> str:
         return self._edit.text().strip()

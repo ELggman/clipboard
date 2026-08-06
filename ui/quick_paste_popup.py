@@ -50,6 +50,9 @@ class QuickPastePopup(QWidget):
         self.move(x, y)
         self.show()
         self.raise_()
+        from ui.animations import fade_in_window
+
+        fade_in_window(self)  # 出现动画（origin-aware：从光标方向生长）
         self._list.setFocus()
 
     @staticmethod

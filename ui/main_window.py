@@ -83,7 +83,7 @@ class MainWindow(QMainWindow):
         for name, view_cls in _NAV_PAGES:
             self._nav.addItem(QListWidgetItem(name))
             self._pages.addWidget(view_cls())
-        self._nav.currentRowChanged.connect(self._pages.setCurrentIndex)
+        self._nav.currentRowChanged.connect(self._on_page_changed)
         self._nav.setCurrentRow(0)
         right.addWidget(self._pages, 1)
 
@@ -94,6 +94,13 @@ class MainWindow(QMainWindow):
         self._search_timer.setSingleShot(True)
         self._search_timer.setInterval(150)
         self._search_timer.timeout.connect(self._apply_search)
+
+    def _on_page_changed(self, row: int) -> None:
+        """页面切换：即时切换 + 淡入（响应优先，OutCubic 140ms）。"""
+        self._pages.setCurrentIndex(row)
+        from ui.animations import fade_in_widget
+
+        fade_in_widget(self._pages.currentWidget())
 
     def closeEvent(self, event) -> None:
         """关窗不退出：隐藏窗口、保持后台监听（菜单栏应用模式）。
