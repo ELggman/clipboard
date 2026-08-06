@@ -129,18 +129,22 @@ class HistoryDelegate(QStyledItemDelegate):
 
         if item is None:
             return
+        # 注意：drawText 的 y 是基线，字形会向上延伸 ascent 像素。
+        # 基线 = top+15（12px 字 ascent≈10）→ 字形顶 ≈ top+5，完整落在
+        # 高亮框（top+1）内——之前 top+7 时字形顶 ≈ top-3，超出高亮 3px
+        # （ASCII 像素可视化实测：时间·类型顶部被高亮框截断）
         # 第一行：时间 · 类型（小号次要色）
         painter.setPen(secondary)
         self._draw_line(painter,
                         f"{item.created_at} · {item.type}" if item.created_at else item.type,
                         rect.left() + self._s(_MARGIN_X),
-                        rect.top() + self._s(7), small=True,
+                        rect.top() + self._s(15), small=True,
                         avail=rect.width() - 2 * self._s(_MARGIN_X))
         # 第二行：内容预览（主色，超出 elide）
         painter.setPen(text_color)
         self._draw_line(painter, item.display_text(),
                         rect.left() + self._s(_MARGIN_X),
-                        rect.top() + self._s(25), small=False,
+                        rect.top() + self._s(33), small=False,
                         avail=rect.width() - 2 * self._s(_MARGIN_X))
 
     def _draw_image_row(self, painter, rect, option, item) -> None:

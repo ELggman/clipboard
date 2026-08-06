@@ -62,10 +62,10 @@ class MainWindow(QMainWindow):
         self._nav.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         layout.addWidget(self._nav)
 
-        # 内容区：搜索栏 + 页面栈
+        # 内容区：搜索栏 + 页面栈（spacing 8 拉开搜索框与列表的视觉距离）
         right = QVBoxLayout()
         right.setContentsMargins(10, 8, 10, 0)
-        right.setSpacing(6)
+        right.setSpacing(8)
         self._search = QLineEdit()
         self._search.setObjectName("searchBox")
         self._search.setFixedHeight(30)
