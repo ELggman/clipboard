@@ -25,10 +25,10 @@ logger = logging.getLogger(__name__)
 
 # 顶部导航：显示名 → 页面视图类
 _NAV_PAGES: list[tuple[str, type]] = [
-    ("History", HistoryView),
-    ("Collections", CollectionsView),
-    ("Snippet", SnippetsView),
-    ("Settings", SettingsView),
+    ("历史", HistoryView),
+    ("收藏夹", CollectionsView),
+    ("片段", SnippetsView),
+    ("设置", SettingsView),
 ]
 
 
@@ -164,6 +164,12 @@ class MainWindow(QMainWindow):
         page = self._pages.widget(0)
         if isinstance(page, HistoryView):
             page.set_menu_context(engine, action_service, self._reload_history)
+
+    def set_item_activated_handler(self, handler) -> None:
+        """单击历史条目 → 详情弹层（bootstrap 装配）。"""
+        page = self._pages.widget(0)
+        if isinstance(page, HistoryView):
+            page.item_activated.connect(handler)
 
     def refresh_history(self, clipboard_item, is_new: bool = True) -> None:
         """剪贴板条目回调：is_new=True 追加列表；状态栏区分新增/去重。"""

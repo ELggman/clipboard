@@ -4,7 +4,7 @@ from ._base import ClipboardAction
 
 class UpperCaseAction(ClipboardAction):
     id = "upper_case"
-    name = "Upper Case"
+    name = "转大写"
     icon = "case"
 
     def can_handle(self, clipboard_item) -> bool:

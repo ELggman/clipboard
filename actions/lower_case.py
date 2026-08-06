@@ -4,7 +4,7 @@ from ._base import ClipboardAction
 
 class LowerCaseAction(ClipboardAction):
     id = "lower_case"
-    name = "Lower Case"
+    name = "转小写"
     icon = "case"
 
     def can_handle(self, clipboard_item) -> bool:

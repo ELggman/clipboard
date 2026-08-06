@@ -25,8 +25,13 @@ LIGHT = {
     "secondary": "#6E6E73",
     "separator": "#E3E3E6",
     "search_bg": "#E9E9EB",   # NSSearchField 底色
-    "accent": "#007AFF",      # 系统蓝
+    "accent": "#007AFF",      # 系统蓝（导航/按钮等强调）
     "accent_text": "#FFFFFF",
+    # 列表选中高亮：浅蓝半透明 + 深色文字（macOS 原生选中风格，比实心蓝柔和）
+    # 注意：QColor 的 8 位十六进制是 AARRGGBB 顺序（alpha 前置），
+    # 不支持 "rgba()" 函数字符串（实测解析失败）
+    "selection_bg": "#33007AFF",
+    "selection_text": "#1D1D1F",
     "hover": "rgba(0, 0, 0, 0.06)",
     "hover_item": "rgba(0, 0, 0, 0.04)",
     "scrollbar": "rgba(0, 0, 0, 0.22)",        # 滚动条滑块（默认太浅不可见）
@@ -43,6 +48,9 @@ DARK = {
     "search_bg": "#3A3A3C",
     "accent": "#0A84FF",
     "accent_text": "#FFFFFF",
+    # 列表选中高亮：macOS 深色模式的选中蓝（#3D82F7）比 #0A84FF 柔和
+    "selection_bg": "#3D82F7",
+    "selection_text": "#FFFFFF",
     "hover": "rgba(255, 255, 255, 0.08)",
     "hover_item": "rgba(255, 255, 255, 0.06)",
     "scrollbar": "rgba(255, 255, 255, 0.25)",
@@ -128,6 +136,41 @@ QScrollBar::handle:horizontal:hover { background: $scrollbar_hover; }
 /* 占位提示（未实现的页面） */
 QLabel#placeholder { color: $secondary; font-size: 13px; }
 
+/* 右键菜单：Apple 风格（圆角浮层、选中强调色、分隔线） */
+QMenu {
+    background: $window;
+    border: 1px solid $separator;
+    border-radius: 10px;
+    padding: 6px;
+}
+QMenu::item {
+    padding: 6px 28px 6px 14px;
+    border-radius: 6px;
+    font-size: 13px;
+}
+QMenu::item:selected {
+    background: $accent;
+    color: $accent_text;
+}
+QMenu::separator {
+    height: 1px;
+    background: $separator;
+    margin: 4px 10px;
+}
+
+/* 详情弹层：元信息与按钮 */
+QLabel#detailMeta { color: $secondary; font-size: 12px; }
+QPushButton#primaryButton {
+    background: $accent;
+    color: $accent_text;
+    border: none;
+    border-radius: 6px;
+    padding: 6px 18px;
+    font-size: 13px;
+}
+QPushButton#primaryButton:hover { background: $accent; }
+QPushButton#primaryButton:pressed { opacity: 0.8; }
+
 /* 状态栏 */
 QStatusBar { color: $secondary; font-size: 11px; background: transparent; }
 QStatusBar::item { border: none; }
@@ -155,8 +198,9 @@ def _build_palette(p: dict) -> QPalette:
     pal.setColor(QPalette.ColorRole.AlternateBase, QColor(p["content"]))
     pal.setColor(QPalette.ColorRole.Text, QColor(p["text"]))
     pal.setColor(QPalette.ColorRole.PlaceholderText, QColor(p["secondary"]))
-    pal.setColor(QPalette.ColorRole.Highlight, QColor(p["accent"]))
-    pal.setColor(QPalette.ColorRole.HighlightedText, QColor(p["accent_text"]))
+    # 选中高亮用独立的 selection 色（列表条目浅蓝 + 深字，macOS 原生风格）
+    pal.setColor(QPalette.ColorRole.Highlight, QColor(p["selection_bg"]))
+    pal.setColor(QPalette.ColorRole.HighlightedText, QColor(p["selection_text"]))
     return pal
 
 

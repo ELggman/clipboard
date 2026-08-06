@@ -6,7 +6,7 @@ from ._base import ClipboardAction
 
 class JsonPrettyAction(ClipboardAction):
     id = "json_pretty"
-    name = "JSON Pretty"
+    name = "JSON 格式化"
     icon = "json"
 
     def can_handle(self, clipboard_item) -> bool:

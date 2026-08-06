@@ -4,7 +4,7 @@ from ._base import ClipboardAction
 
 class SortLinesAction(ClipboardAction):
     id = "sort_lines"
-    name = "Sort Lines"
+    name = "行排序"
     icon = "sort"
 
     def can_handle(self, clipboard_item) -> bool:

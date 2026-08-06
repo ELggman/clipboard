@@ -8,7 +8,7 @@ from ._base import ClipboardAction
 
 class MarkdownPreviewAction(ClipboardAction):
     id = "markdown_preview"
-    name = "Markdown Preview"
+    name = "Markdown 预览"
     icon = "markdown"
 
     def can_handle(self, clipboard_item) -> bool:

@@ -4,7 +4,7 @@ from ._base import ClipboardAction
 
 class TrimSpaceAction(ClipboardAction):
     id = "trim_space"
-    name = "Trim Space"
+    name = "去空白"
     icon = "trim"
 
     def can_handle(self, clipboard_item) -> bool:

@@ -53,14 +53,19 @@ def start_workspace(app: QApplication) -> None:
     hotkey = HotkeyManager(parent=app)
 
     # UI（装配完成前不弹窗）
+    from ui.item_detail_popup import ItemDetailPopup
     from ui.main_window import MainWindow
     from ui.quick_paste_popup import QuickPastePopup
 
     window = MainWindow()
+    detail_popup = ItemDetailPopup()
+
     window.set_image_service(image_service)  # 历史列表图片缩略图
     window.set_show_image_filename(bool(config["history"]["show_image_filename"]))
     window.set_search(engine)
     window.set_menu_context(engine, action_service)  # 右键菜单
+    window.set_item_activated_handler(  # 单击条目 → 详情弹层（可选中部分复制）
+        lambda item: detail_popup.show_item(item, image_service))
     window.show()
 
     # 关窗后（窗口隐藏）点 Dock 图标 → 应用激活 → 重新显示窗口

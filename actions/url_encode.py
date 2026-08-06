@@ -6,7 +6,7 @@ from ._base import ClipboardAction
 
 class UrlEncodeAction(ClipboardAction):
     id = "url_encode"
-    name = "URL Encode"
+    name = "URL 编码"
     icon = "url"
 
     def can_handle(self, clipboard_item) -> bool:

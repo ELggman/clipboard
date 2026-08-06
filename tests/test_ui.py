@@ -264,12 +264,95 @@ def test_context_menu_actions_submenu(tmp_path):
     # 用 view 持有的子菜单引用（shiboken 对 QAction.menu() 重新包装会失效）
     submenu = view._active_menus[-1]
     names = [a.text() for a in submenu.actions()]
-    assert "JSON Pretty" in names
+    assert "JSON 格式化" in names  # Actions 名称已中文化
 
-    json_action = next(a for a in submenu.actions() if a.text() == "JSON Pretty")
+    json_action = next(a for a in submenu.actions() if a.text() == "JSON 格式化")
     json_action.trigger()
     pb = NSPasteboard.generalPasteboard()
     assert pb.stringForType_(NSPasteboardTypeString) == '{\n  "a": 1\n}'
+
+
+def test_detail_popup_text_select_and_copy():
+    """详情弹层：全文显示 + 可选中部分复制 + 复制全部按钮。"""
+    from PySide6.QtGui import QTextCursor
+
+    from ui.item_detail_popup import ItemDetailPopup
+
+    popup = ItemDetailPopup()
+    content = "这是一个很长的文本，用于验证详情弹层的全文显示与部分复制功能。"
+    item = ClipboardItem(type="text", content=content, source_app="微信",
+                         created_at="08-06 18:00")
+    popup.show_item(item)
+    pytest_app.processEvents()
+
+    assert popup.isVisible()
+    assert popup._text.toPlainText() == content          # 全文显示
+    assert "微信" in popup._meta.text()                   # 来源软件显示
+    assert popup._image.isHidden()                        # 文本条目不显示图片
+
+    # 选中部分内容：选择机制断言（offscreen 无法模拟 Cmd+C 复制，
+    # 剪贴板回写行为留真实窗口 e2e 验证；QTextEdit 的选中复制是 Qt 原生能力）
+    cursor = popup._text.textCursor()
+    cursor.setPosition(0)
+    cursor.setPosition(4, QTextCursor.MoveMode.KeepAnchor)  # 选中前 4 个字符
+    popup._text.setTextCursor(cursor)
+    assert popup._text.textCursor().selectedText() == content[:4]  # 选择生效
+    assert popup._text.textCursor().hasSelection()
+
+    # 复制全部按钮
+    from AppKit import NSPasteboard, NSPasteboardTypeString
+
+    popup._copy_all()
+    assert NSPasteboard.generalPasteboard().stringForType_(
+        NSPasteboardTypeString) == content
+    popup.deleteLater()
+
+
+def test_detail_popup_image(tmp_path):
+    """图片条目：详情弹层显示大图 + 文件名。"""
+    from io import BytesIO
+
+    from PIL import Image as PILImage
+
+    from ui.item_detail_popup import ItemDetailPopup
+
+    buf = BytesIO()
+    PILImage.new("RGB", (64, 64), "green").save(buf, "PNG")
+    img_path = tmp_path / "big.png"
+    img_path.write_bytes(buf.getvalue())
+
+    popup = ItemDetailPopup()
+    popup.show_item(ClipboardItem(type="image", file_path=str(img_path),
+                                  preview="big.png", source_app="微信"))
+    pytest_app.processEvents()
+    assert popup._image.isVisible()
+    assert not popup._image.pixmap().isNull()
+    assert "big.png" in popup._meta.text()
+    popup.deleteLater()
+
+
+def test_history_item_clicked_signal(tmp_path):
+    """单击历史条目发出 item_activated（详情弹层入口）。"""
+    from services.image_service import ImageService
+
+    service = ImageService(tmp_path / "img")
+    view = HistoryView()
+    view.set_image_service(service)
+    item = ClipboardItem(type="text", content="click me", preview="click me")
+    view.add_item(item)
+    view.show()
+    pytest_app.processEvents()
+
+    activated = []
+    view.item_activated.connect(lambda it: activated.append(it))
+    view.resize(400, 200)
+    pytest_app.processEvents()
+    # 点击行 0 中部（viewport 坐标）
+    QTest.mouseClick(view._list.viewport(), Qt.MouseButton.LeftButton,
+                     pos=view._list.visualRect(view._model.index(0, 0)).center())
+    assert len(activated) == 1
+    assert activated[0].content == "click me"
+    view.close()
 
 
 def test_theme_scrollbar_qss():

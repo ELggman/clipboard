@@ -4,7 +4,7 @@ from ._base import ClipboardAction
 
 class RemoveDuplicateLinesAction(ClipboardAction):
     id = "remove_duplicate_lines"
-    name = "Remove Duplicate Lines"
+    name = "去重行"
     icon = "dedupe"
 
     def can_handle(self, clipboard_item) -> bool:

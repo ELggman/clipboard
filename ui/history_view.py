@@ -11,7 +11,7 @@ TODO: 右键菜单（Copy / Pin / Favorite / Add To Collection / Action 子菜�
 """
 import logging
 
-from PySide6.QtCore import QModelIndex, QRect, QSize, Qt
+from PySide6.QtCore import QModelIndex, QRect, QSize, Qt, Signal
 from PySide6.QtGui import (
     QContextMenuEvent,
     QFont,
@@ -135,9 +135,9 @@ class HistoryDelegate(QStyledItemDelegate):
         # 基线 = top+15（12px 字 ascent≈10）→ 字形顶 ≈ top+5，完整落在
         # 高亮框（top+1）内——之前 top+7 时字形顶 ≈ top-3，超出高亮 3px
         # （ASCII 像素可视化实测：时间·类型顶部被高亮框截断）
-        # 第一行：📌(置顶) 时间 · 类型（小号次要色）
+        # 第一行：📌(置顶) 时间 · 类型 · 来源软件（小号次要色）
         painter.setPen(secondary)
-        meta = f"{'📌 ' if item.pinned else ''}{item.created_at} · {item.type}" if item.created_at else item.type
+        meta = self._meta_line(item)
         self._draw_line(painter, meta,
                         rect.left() + self._s(_MARGIN_X),
                         rect.top() + self._s(15), small=True,
@@ -167,9 +167,12 @@ class HistoryDelegate(QStyledItemDelegate):
                       else option.palette.text().color())
         secondary = option.palette.placeholderText().color()
 
-        # 第一行：📌(置顶) 时间 · image（次要色，居中）
+        # 第一行：📌(置顶) 时间 · image · 来源（次要色，居中）
         painter.setPen(secondary)
-        time_text = f"{'📌 ' if item.pinned else ''}{item.created_at} · image" if item.created_at else "image"
+        time_text = (f"{'📌 ' if item.pinned else ''}"
+                     f"{item.created_at} · image"
+                     f"{' · ' + item.source_app if item.source_app else ''}"
+                     if item.created_at else "image")
         painter.drawText(QRect(center_x, y + size + self._s(_TIME_GAP),
                                avail, self._s(_TIME_LINE_H)),
                          Qt.AlignmentFlag.AlignHCenter, time_text)
@@ -207,6 +210,14 @@ class HistoryDelegate(QStyledItemDelegate):
         painter.drawText(x, baseline_y, elided)
 
     @staticmethod
+    def _meta_line(item) -> str:
+        """元信息行：📌(置顶) 时间 · 类型 · 来源软件。"""
+        base = f"{item.created_at} · {item.type}" if item.created_at else item.type
+        if item.source_app:
+            base += f" · {item.source_app}"
+        return f"📌 {base}" if item.pinned else base
+
+    @staticmethod
     def _caption_lines(text: str, font: QFont, avail_width: int) -> int:
         """按可用宽度计算文件名换行行数（字符级贪心，无空格文件名同样支持）。"""
         fm = QFontMetrics(font)
@@ -234,6 +245,8 @@ class HistoryDelegate(QStyledItemDelegate):
 
 
 class HistoryView(QWidget):
+    item_activated = Signal(object)  # 单击条目（详情弹层）
+
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
         self._list = QListView()
@@ -247,6 +260,7 @@ class HistoryView(QWidget):
         self._list.setModel(self._model)
         self._delegate = HistoryDelegate(self._list)
         self._list.setItemDelegate(self._delegate)
+        self._list.clicked.connect(self._on_item_clicked)  # 单击展开详情
 
         # 右键菜单依赖（bootstrap 注入）
         self._engine = None              # 置顶/收藏写库
@@ -279,6 +293,13 @@ class HistoryView(QWidget):
         self._engine = engine
         self._actions = action_service
         self._refresh_cb = refresh_cb
+
+    # ---- 点击 ----
+
+    def _on_item_clicked(self, index: QModelIndex) -> None:
+        item = index.data(ROLE_ITEM)
+        if item is not None:
+            self.item_activated.emit(item)
 
     # ---- 右键菜单 ----
 
