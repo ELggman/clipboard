@@ -409,28 +409,49 @@ def test_collections_view_create_and_items(tmp_path):
 
 
 def test_timeline_view_grouped(tmp_path):
-    """时间线页：分组标题 + 条目渲染。"""
+    """时间线页：分段选择器 + 按时间段过滤 + 更早按月分组。"""
+    import datetime
+
     from database.engine import create_db_engine
     from database.migrations import migrate
     from services import history_service
+    from sqlalchemy import text
     from ui.timeline_view import TimelineView
 
     engine = create_db_engine(tmp_path / "t.db")
     migrate(engine)
-    item = ClipboardItem(type="text", content="timeline entry")
-    import hashlib
-
-    item.hash = hashlib.sha256(b"timeline entry").hexdigest()
-    history_service.save_item(engine, item)
+    now = datetime.datetime.now()
+    with engine.begin() as conn:
+        for label, days, h in (("today item", 0, "ht"),
+                               ("yesterday item", 1, "hy"),
+                               ("old item", 40, "ho")):
+            conn.execute(text(
+                "INSERT INTO clipboard_items (type, content, preview, hash,"
+                " favorite, pinned, created_at, updated_at) VALUES"
+                " ('text', :c, :c, :h, 0, 0, :t, :t)"),
+                {"c": label, "h": h, "t": now - datetime.timedelta(days=days)})
 
     view = TimelineView()
     view.set_context(engine)
+    assert [view._tabs.item(i).text() for i in range(view._tabs.count())] \
+        == ["今天", "昨天", "本周", "更早"]
+
+    # 默认「今天」：只显示今天条目
     texts = [view._list.item(i).text() for i in range(view._list.count())]
-    assert any(t == "今天" for t in texts)          # 分组标题
-    assert any("timeline entry" in t for t in texts)
-    # 标题不可交互（NoItemFlags）
-    header_idx = next(i for i, t in enumerate(texts) if t == "今天")
-    assert not view._list.item(header_idx).flags() & Qt.ItemFlag.ItemIsSelectable
+    assert any("today item" in t for t in texts)
+    assert not any("yesterday item" in t for t in texts)
+
+    # 切「昨天」
+    view._tabs.setCurrentRow(1)
+    texts = [view._list.item(i).text() for i in range(view._list.count())]
+    assert any("yesterday item" in t for t in texts)
+
+    # 切「更早」：月份标题 + 旧条目
+    view._tabs.setCurrentRow(3)
+    texts = [view._list.item(i).text() for i in range(view._list.count())]
+    assert any("月" in t for t in texts)          # 月份分组标题
+    assert any("old item" in t for t in texts)
+    assert not any("today item" in t for t in texts)
     view.close()
 
 
