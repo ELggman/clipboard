@@ -1,7 +1,11 @@
-"""搜索服务：FTS5 全文索引 + 正则兜底（DEVELOPMENT.md §3.4）。
+"""搜索服务：FTS5 全文索引 + CJK 子串兜底 + 正则（DEVELOPMENT.md §3.4）。
 
-性能目标：1 万条历史 <100ms。普通搜索走 FTS5（模糊/忽略大小写天然满足），
-正则高级模式对最新 2k 条内存过滤（量级下同样 <100ms）。
+性能目标：1 万条历史 <100ms。
+- 普通搜索（ASCII）：FTS5（模糊/忽略大小写天然满足）
+- 中文搜索：FTS5 unicode61 把连续中文当一个 token，子串匹配不上
+  （实测「胶原」搜不出「最近胶原蛋白满满」）→ 改走 LIKE 子串扫描，
+  10k 行全表扫描仅数毫秒，性能目标内
+- 正则高级模式：内存过滤兜底
 """
 import logging
 import re
@@ -10,6 +14,27 @@ from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 logger = logging.getLogger(__name__)
+
+# CJK 统一表意文字区间（含扩展区与兼容区）
+_CJK_RANGES = (
+    (0x3400, 0x4DBF),   # 扩展 A
+    (0x4E00, 0x9FFF),   # 基本区
+    (0xF900, 0xFAFF),   # 兼容区
+)
+
+
+def _contains_cjk(query: str) -> bool:
+    """查询是否含 CJK 文字 → 需要 LIKE 子串路径。"""
+    return any(
+        start <= ord(ch) <= end
+        for ch in query
+        for start, end in _CJK_RANGES
+    )
+
+
+def _like_escape(term: str) -> str:
+    """转义 LIKE 通配符（配合 ESCAPE '\\' 使用）。"""
+    return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def _fts_terms(query: str) -> str:
@@ -31,6 +56,8 @@ class SearchService:
             return []
         if regex:
             return self._search_regex(query, limit, ignore_case)
+        if _contains_cjk(query):
+            return self._search_like(query, limit)
         terms = _fts_terms(query)
         sql = text(
             "SELECT i.id FROM items_fts f"
@@ -45,6 +72,22 @@ class SearchService:
         except Exception:
             logger.exception("FTS5 查询失败: %r", query)
             return []
+        return [row[0] for row in rows]
+
+    def _search_like(self, query: str, limit: int) -> list[int]:
+        """CJK 子串搜索：每个空白分隔词做 LIKE '%词%'，AND 组合（10k 量级毫秒级）。"""
+        terms = [t for t in query.split() if t.strip()]
+        if not terms:
+            return []
+        where = " AND ".join(f"content LIKE :t{i} ESCAPE '\\'" for i in range(len(terms)))
+        params = {f"t{i}": f"%{_like_escape(t)}%" for i, t in enumerate(terms)}
+        params["limit"] = limit
+        sql = text(
+            f"SELECT id FROM clipboard_items WHERE {where}"
+            " ORDER BY created_at DESC, id DESC LIMIT :limit"
+        )
+        with self._engine.connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
         return [row[0] for row in rows]
 
     def _search_regex(self, pattern: str, limit: int, ignore_case: bool) -> list[int]:

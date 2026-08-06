@@ -141,6 +141,53 @@ def test_search_items_matches_and_orders(engine):
     assert history_service.search_items(engine, "docker") == []
 
 
+def test_search_cjk_substring(engine):
+    """中文子串搜索：FTS5 unicode61 匹配不上连续中文，必须走 LIKE（回归测试）。"""
+    from datetime import datetime as dt
+
+    from sqlalchemy import text
+
+    with engine.begin() as conn:
+        conn.execute(
+            text("INSERT INTO clipboard_items (type, content, preview, hash,"
+                 " favorite, pinned, created_at, updated_at) VALUES"
+                 " ('text', '最近胶原蛋白满满', '最近胶原蛋白满满', 'hc', 0, 0, :n, :n)"),
+            {"n": dt.now()},
+        )
+        rid = conn.execute(text("SELECT id FROM clipboard_items LIMIT 1")).scalar()
+
+    from services.search_service import SearchService
+
+    svc = SearchService(engine)
+    assert svc.search("胶原") == [rid]       # 2 字子串
+    assert svc.search("胶原蛋白") == [rid]    # 4 字子串
+    assert svc.search("蛋白满满") == [rid]    # 尾部子串
+    assert svc.search("不是") == []           # 无命中
+    assert svc.search("胶原 满满") == [rid]   # 多词 AND
+
+
+def test_search_like_escapes_wildcards(engine):
+    """LIKE 路径转义 % _ \\（用户查询里的通配符不当通配符用）。"""
+    from datetime import datetime as dt
+
+    from sqlalchemy import text
+
+    with engine.begin() as conn:
+        conn.execute(
+            text("INSERT INTO clipboard_items (type, content, preview, hash,"
+                 " favorite, pinned, created_at, updated_at) VALUES"
+                 " ('text', '进度 50% 完成', '进度', 'hp', 0, 0, :n, :n)"),
+            {"n": dt.now()},
+        )
+    from services.search_service import SearchService
+
+    svc = SearchService(engine)
+    # 含 CJK → 走 LIKE 路径（转义只作用于该路径）；字面 % 能搜到
+    assert svc.search("进度 50%") != []
+    # 字面 _ 不匹配（未转义时 _ 匹配任意单字符，会误命中）
+    assert svc.search("进度 50_") == []
+
+
 def test_preview_image_uses_filename():
     item = ClipboardItem(
         type="image", content="", file_path="/data/images/abc123.png",
