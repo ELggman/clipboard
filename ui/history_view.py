@@ -273,19 +273,6 @@ class HistoryView(QWidget):
         self._list.setItemDelegate(self._delegate)
         self._list.clicked.connect(self._on_item_clicked)  # 单击展开详情
 
-        # 顶部工具行：清空历史（破坏性操作，红色确认）
-        from PySide6.QtWidgets import QHBoxLayout, QPushButton
-
-        toolbar = QWidget()
-        bar = QHBoxLayout(toolbar)
-        bar.setContentsMargins(10, 4, 10, 0)
-        bar.addStretch(1)
-        clear_btn = QPushButton("清空历史")
-        clear_btn.setObjectName("secondaryButton")
-        clear_btn.setFixedHeight(26)
-        clear_btn.clicked.connect(self._confirm_clear)
-        bar.addWidget(clear_btn)
-
         # 右键菜单依赖（bootstrap 注入）
         self._engine = None              # 置顶/收藏写库
         self._actions = None             # ActionService（Actions 子菜单）
@@ -294,8 +281,6 @@ class HistoryView(QWidget):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-        layout.addWidget(toolbar)
         layout.addWidget(self._list)
 
     def resizeEvent(self, event) -> None:
@@ -415,9 +400,18 @@ class HistoryView(QWidget):
             item.pinned = 1 - item.pinned  # 同步内存对象（菜单重建/绘制 📌 依赖）
             label = "已置顶" if item.pinned else "已取消置顶"
         else:
-            history_service.set_favorite(self._engine, item.id, not item.favorite)
-            item.favorite = 1 - item.favorite
-            label = "已收藏" if item.favorite else "已取消收藏"
+            # 快速收藏 = 加入内置「★ 收藏」收藏夹（内容快照，删历史不影响）
+            from services import collection_service
+
+            fav_id = collection_service.ensure_favorites(self._engine)
+            if not item.favorite:
+                collection_service.add_item(self._engine, fav_id, item)
+                item.favorite = 1
+                label = "已收藏"
+            else:
+                history_service.set_favorite(self._engine, item.id, 0)
+                item.favorite = 0
+                label = "已取消收藏"
         logger.info("已切换%s: id=%s", flag, item.id)
         if self._refresh_cb:
             self._refresh_cb()  # 先刷新（会重置状态栏），再给反馈
@@ -431,7 +425,7 @@ class HistoryView(QWidget):
     def _add_to_collection(self, coll: dict, item) -> None:
         from services import collection_service
 
-        if item.id and collection_service.add_item(self._engine, coll["id"], item.id):
+        if item.id and collection_service.add_item(self._engine, coll["id"], item):
             logger.info("已加入收藏夹「%s」: item=%s", coll["name"], item.id)
             self.feedback.emit(f"已收藏到「{coll['name']}」")
 
@@ -451,32 +445,6 @@ class HistoryView(QWidget):
         if self._refresh_cb:
             self._refresh_cb()
 
-    def _confirm_clear(self) -> None:
-        """清空历史：红色确认对话框（破坏性操作）。"""
-        if self._engine is None:
-            return
-        from ui.dialogs import ConfirmDialog
-
-        dialog = ConfirmDialog(
-            "清空历史",
-            "将删除全部历史记录（含图片与收藏），且无法恢复。确定继续？",
-            confirm_text="清空")
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            self._clear_impl()
-
-    def _clear_impl(self) -> None:
-        from services import history_service
-
-        files = history_service.clear_history(self._engine)
-        provider = self._delegate._provider
-        for path in files:
-            if provider is not None:
-                provider.delete(path)
-        logger.info("已清空全部历史（图片 %d 个）", len(files))
-        self.feedback.emit("已清空历史")
-        if self._refresh_cb:
-            self._refresh_cb()
-
     def _create_collection_and_add(self, item) -> None:
         """新建收藏夹并立即把当前条目加入。"""
         from services import collection_service
@@ -485,7 +453,7 @@ class HistoryView(QWidget):
         dialog = NameDialog("新建收藏夹", "名称：", confirm_text="创建")
         if dialog.exec() == QDialog.DialogCode.Accepted and dialog.text():
             cid = collection_service.create_collection(self._engine, dialog.text())
-            collection_service.add_item(self._engine, cid, item.id)
+            collection_service.add_item(self._engine, cid, item)
             logger.info("新建收藏夹并加入: %s (item=%s)", dialog.text(), item.id)
             self.feedback.emit(f"已收藏到「{dialog.text()}」")
 

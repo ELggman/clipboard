@@ -204,12 +204,13 @@ class MainWindow(QMainWindow):
         if isinstance(page, HistoryView):
             page.feedback.connect(self.statusBar().showMessage)
 
-    def set_settings_context(self, config, appliers, config_path=None) -> None:
-        """设置页注入：当前配置 + 生效回调（bootstrap 装配）。"""
+    def set_settings_context(self, config, appliers, config_path=None,
+                             engine=None) -> None:
+        """设置页注入：当前配置 + 生效回调 + 引擎（清理数据，bootstrap 装配）。"""
         page = next((self._pages.widget(i) for i in range(self._pages.count())
                      if isinstance(self._pages.widget(i), SettingsView)), None)
         if page is not None:
-            page.set_context(config, appliers, config_path)
+            page.set_context(config, appliers, config_path, engine)
 
     def refresh_history(self, clipboard_item, is_new: bool = True) -> None:
         """剪贴板条目回调：is_new=True 追加列表；状态栏区分新增/去重。"""

@@ -607,8 +607,10 @@ def test_collection_context_menu_delete(tmp_path):
     menu.addAction("删除").triggered.connect(
         lambda: view._delete_collection(cid))
     menu.actions()[0].trigger()
-    assert view._list.count() == 1  # 只剩 ★ 收藏
-    assert collection_service.list_collections(engine) == []
+    assert view._list.count() == 1  # 只剩内置 ★ 收藏
+    remaining = collection_service.list_collections(engine)
+    assert len(remaining) == 1
+    assert remaining[0]["name"] == collection_service.FAVORITES_NAME
     view.close()
 
 
@@ -644,36 +646,53 @@ def test_confirm_dialog_destructive_button():
     dlg.deleteLater()
 
 
-def test_history_clear_button_and_impl(tmp_path):
-    """历史页清空：按钮存在，执行后列表清空 + 反馈 + 刷新。"""
+def test_settings_clean_data_query_and_delete(tmp_path):
+    """设置页清理数据：筛选查询 + 删除选中（不影响收藏夹快照）。"""
+    import datetime
+
     from database.engine import create_db_engine
     from database.migrations import migrate
-    from services import history_service
+    from services import collection_service, history_service
     from sqlalchemy import text
-    from ui.history_view import HistoryView
+    from ui.settings_view import SettingsView
 
     engine = create_db_engine(tmp_path / "cl.db")
     migrate(engine)
-    item = ClipboardItem(type="text", content="clear me")
     import hashlib
 
-    item.hash = hashlib.sha256(b"clear me").hexdigest()
-    history_service.save_item(engine, item)
+    # 40 天前的旧条目 + 今天的新条目
+    old = ClipboardItem(type="text", content="old entry")
+    old.hash = hashlib.sha256(b"old entry").hexdigest()
+    new = ClipboardItem(type="text", content="new entry")
+    new.hash = hashlib.sha256(b"new entry").hexdigest()
+    history_service.save_item(engine, old)
+    history_service.save_item(engine, new)
+    with engine.begin() as conn:
+        conn.execute(text(
+            "UPDATE clipboard_items SET created_at = :t WHERE content = 'old entry'"),
+            {"t": datetime.datetime.now() - datetime.timedelta(days=40)})
+    # 收藏 old（验证清理不影响收藏快照）
+    cid = collection_service.create_collection(engine, "保留")
+    collection_service.add_item(engine, cid, old)
 
-    refreshed = []
-    messages = []
-    view = HistoryView()
-    view.add_item(item)
-    view.set_menu_context(engine, None, lambda: refreshed.append(True))
-    view.feedback.connect(messages.append)
-    assert view.findChildren(QPushButton)[0].text() == "清空历史"
+    view = SettingsView()
+    view.set_context({"app": {}, "history": {}}, {}, tmp_path / "s.yaml",
+                     engine=engine)
+    # 查询 7 天前 → 只有 old
+    view._clean_query()
+    assert view._clean_list.count() == 1
+    assert "old entry" in view._clean_list.item(0).text()
 
-    view._clear_impl()  # 绕过确认对话框直接执行
-    assert messages == ["已清空历史"]
-    assert refreshed == [True]
+    # 删除选中（_clean_delete 内有模态确认框，测试直接调服务 + 刷新预览）
+    history_service.delete_items(engine, [view._clean_items[0].id])
+    view._clean_query()
+    assert view._clean_list.count() == 0  # 预览已刷新
     with engine.connect() as conn:
-        assert conn.execute(text(
-            "SELECT COUNT(*) FROM clipboard_items")).scalar() == 0
+        remaining = [r[0] for r in conn.execute(text(
+            "SELECT content FROM clipboard_items")).fetchall()]
+    assert remaining == ["new entry"]
+    # 收藏快照不受影响
+    assert collection_service.list_items(engine, cid)[0].content == "old entry"
     view.close()
 
 

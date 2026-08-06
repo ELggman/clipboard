@@ -113,6 +113,7 @@ def start_workspace(app: QApplication) -> None:
         config,
         {k: apply_setting(k) for k in ("theme", "font", "show_filename",
                                        "autostart", "max_items")},
+        engine=engine,
     )
 
     # 自动删除：每日清扫一次（启动 1 分钟后首扫）

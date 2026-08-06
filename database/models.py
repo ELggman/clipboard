@@ -39,7 +39,11 @@ class Collection(Base):
 
 
 class CollectionItem(Base):
-    """收藏关系：collection → clipboard_item（多对多）。"""
+    """收藏条目：内容快照（与历史解耦，删除历史不影响收藏）。
+
+    clipboard_id 仅作来源引用（无 FK，可能悬空）；内容字段冗余存储，
+    收藏夹独立管理自己的数据（DEVELOPMENT.md §4.4）。
+    """
 
     __tablename__ = "collection_items"
     __table_args__ = (UniqueConstraint("collection_id", "clipboard_id"),)
@@ -48,9 +52,12 @@ class CollectionItem(Base):
     collection_id: Mapped[int] = mapped_column(
         ForeignKey("collections.id", ondelete="CASCADE"), nullable=False
     )
-    clipboard_id: Mapped[int] = mapped_column(
-        ForeignKey("clipboard_items.id", ondelete="CASCADE"), nullable=False
-    )
+    clipboard_id: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    type: Mapped[str] = mapped_column(String(16), nullable=False, default="text")
+    content: Mapped[str | None] = mapped_column(Text)
+    preview: Mapped[str | None] = mapped_column(Text)
+    file_path: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
 
 
 class Snippet(Base):

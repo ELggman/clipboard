@@ -1,7 +1,7 @@
-"""轻量迁移：Base.metadata.create_all + 幂等 SQL（不引 Alembic）。
+"""轻量迁移：Base.metadata.create_all + 版本化迁移（不引 Alembic）。
 
-演进约定：schema 变更时追加幂等 DDL 到 _EXTRA_DDL 并递增 _SCHEMA_VERSION；
-PRAGMA user_version 仅用于记录版本，不自动回滚。
+演进约定：新增迁移时在 migrate() 里按 user_version 分支处理，
+完成后递增 _SCHEMA_VERSION。
 """
 import logging
 
@@ -12,7 +12,7 @@ from .models import Base
 
 logger = logging.getLogger(__name__)
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 
 # 幂等扩展 DDL（FTS5 全文索引 + 常用索引）
 _EXTRA_DDL = [
@@ -29,10 +29,49 @@ def migrate(engine: Engine) -> None:
         current = conn.execute(text("PRAGMA user_version")).scalar()
     logger.info("数据库 schema 版本: %s", current)
 
-    Base.metadata.create_all(engine)  # ORM 表
+    Base.metadata.create_all(engine)  # ORM 表（新库按最新模型建）
+
+    if current < 2:
+        _upgrade_v2_collection_snapshot(engine)
 
     with engine.begin() as conn:
         for ddl in _EXTRA_DDL:
             conn.execute(text(ddl))
         conn.execute(text(f"PRAGMA user_version = {_SCHEMA_VERSION}"))
     logger.info("迁移完成，schema 版本 -> %s", _SCHEMA_VERSION)
+
+
+def _upgrade_v2_collection_snapshot(engine: Engine) -> None:
+    """v1 → v2：collection_items 增加内容快照列（收藏与历史解耦）。
+
+    旧表仅有 collection_id/clipboard_id 引用且 FK 级联删除历史；
+    重建为快照结构（内容冗余），并回填已有收藏的内容。
+    """
+    with engine.begin() as conn:
+        cols = {r[1] for r in conn.execute(
+            text("PRAGMA table_info(collection_items)")).fetchall()}
+        if "content" in cols:
+            return  # 已是快照结构
+        conn.execute(text(
+            "ALTER TABLE collection_items RENAME TO collection_items_old"))
+        conn.execute(text(
+            "CREATE TABLE collection_items ("
+            " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            " collection_id INTEGER NOT NULL"
+            "   REFERENCES collections(id) ON DELETE CASCADE,"
+            " clipboard_id INTEGER NOT NULL DEFAULT 0,"
+            " type VARCHAR(16) NOT NULL DEFAULT 'text',"
+            " content TEXT, preview TEXT, file_path TEXT,"
+            " created_at DATETIME NOT NULL,"
+            " UNIQUE (collection_id, clipboard_id))"))
+        conn.execute(text(
+            "INSERT INTO collection_items"
+            " (collection_id, clipboard_id, type, content, preview, file_path,"
+            "  created_at)"
+            " SELECT o.collection_id, o.clipboard_id, COALESCE(i.type, 'text'),"
+            "        i.content, i.preview, i.file_path,"
+            "        COALESCE(i.created_at, datetime('now'))"
+            " FROM collection_items_old o"
+            " LEFT JOIN clipboard_items i ON i.id = o.clipboard_id"))
+        conn.execute(text("DROP TABLE collection_items_old"))
+        logger.info("v2 迁移：collection_items 已快照化并回填")

@@ -67,51 +67,78 @@ def test_collection_crud(engine):
 
 
 def test_collection_items_add_remove_idempotent(engine):
-    from services import collection_service
-    from sqlalchemy import text as _t
+    """收藏快照：加/移/幂等；list_items 返回收藏条目自己的 id。"""
+    import hashlib
+
+    from app.types import ClipboardItem
+    from services import collection_service, history_service
 
     cid = collection_service.create_collection(engine, "收藏")
-    with engine.begin() as conn:
-        conn.execute(_t(
-            "INSERT INTO clipboard_items (type, content, preview, hash,"
-            " favorite, pinned, created_at, updated_at) VALUES"
-            " ('text', 'keep me', 'keep', 'hk', 0, 0, datetime('now'), datetime('now'))"))
-        clip_id = conn.execute(_t("SELECT id FROM clipboard_items")).scalar()
+    item = ClipboardItem(type="text", content="keep me", preview="keep",
+                         file_path="")
+    item.hash = hashlib.sha256(b"keep me").hexdigest()
+    history_service.save_item(engine, item)
+    item.id = history_service.list_recent(engine, limit=1)[0].id
 
-    # 加入两次幂等
-    assert collection_service.add_item(engine, cid, clip_id) is True
-    assert collection_service.add_item(engine, cid, clip_id) is True
+    # 加入两次幂等（同 clipboard_id）
+    assert collection_service.add_item(engine, cid, item) is True
+    assert collection_service.add_item(engine, cid, item) is True
     items = collection_service.list_items(engine, cid)
     assert len(items) == 1
     assert items[0].content == "keep me"
-    assert items[0].id == clip_id
 
-    # 移除
-    assert collection_service.remove_item(engine, cid, clip_id) is True
+    # 移除（按收藏条目 id）
+    coll_item_id = items[0].id
+    assert collection_service.remove_item(engine, coll_item_id) is True
     assert collection_service.list_items(engine, cid) == []
-    assert collection_service.remove_item(engine, cid, clip_id) is False
+    assert collection_service.remove_item(engine, coll_item_id) is False
 
-    # id=0 保护
-    assert collection_service.add_item(engine, 0, 0) is False
+    # 空收藏夹/空条目保护
+    assert collection_service.add_item(engine, 0, item) is False
+    assert collection_service.add_item(engine, cid, None) is False
+
+
+def test_collection_snapshot_survives_history_delete(engine):
+    """快照核心语义：删除/清空历史不影响收藏夹内容。"""
+    import hashlib
+
+    from app.types import ClipboardItem
+    from services import collection_service, history_service
+
+    item = ClipboardItem(type="text", content="收藏不删")
+    item.hash = hashlib.sha256("收藏不删".encode()).hexdigest()
+    history_service.save_item(engine, item)
+    cid = collection_service.create_collection(engine, "保留")
+    collection_service.add_item(engine, cid, item)
+
+    # 删除历史条目
+    history_service.delete_item(engine, item.id)
+    assert collection_service.list_items(engine, cid)[0].content == "收藏不删"
+
+    # 清空历史
+    collection_service.add_item(engine, cid, item)  # 重新收藏一次（内容仍在历史）
+    history_service.clear_history(engine)
+    items = collection_service.list_items(engine, cid)
+    assert len(items) == 1
+    assert items[0].content == "收藏不删"
 
 
 def test_collection_delete_cascades(engine):
-    """删除收藏夹级联清理关联（FK ON DELETE CASCADE）。"""
-    from services import collection_service
-    from sqlalchemy import text as _t
+    """删除收藏夹级联清理条目快照（FK ON DELETE CASCADE）。"""
+    import hashlib
+
+    from app.types import ClipboardItem
+    from services import collection_service, history_service
 
     cid = collection_service.create_collection(engine, "临时")
-    with engine.begin() as conn:
-        conn.execute(_t(
-            "INSERT INTO clipboard_items (type, content, preview, hash,"
-            " favorite, pinned, created_at, updated_at) VALUES"
-            " ('text', 'x', 'x', 'hx', 0, 0, datetime('now'), datetime('now'))"))
-        clip_id = conn.execute(_t("SELECT id FROM clipboard_items")).scalar()
-    collection_service.add_item(engine, cid, clip_id)
+    item = ClipboardItem(type="text", content="x")
+    item.hash = hashlib.sha256(b"x").hexdigest()
+    history_service.save_item(engine, item)
+    collection_service.add_item(engine, cid, item)
     collection_service.delete_collection(engine, cid)
     with engine.connect() as conn:
         count = conn.execute(
-            _t("SELECT COUNT(*) FROM collection_items")).scalar()
+            text("SELECT COUNT(*) FROM collection_items")).scalar()
     assert count == 0  # 级联已清理
 
 
@@ -181,15 +208,13 @@ def test_clear_history(engine):
     history_service.save_item(engine, a)
     history_service.save_item(engine, b)
     cid = collection_service.create_collection(engine, "c")
-    collection_service.add_item(engine, cid, a.id)
+    collection_service.add_item(engine, cid, a)
 
     files = history_service.clear_history(engine)
     assert files == ["/tmp/pic.png"]
     with engine.connect() as conn:
         assert conn.execute(text(
             "SELECT COUNT(*) FROM clipboard_items")).scalar() == 0
-        assert conn.execute(text(
-            "SELECT COUNT(*) FROM collection_items")).scalar() == 0  # 级联清空
     assert SearchService(engine).search("a") == []  # FTS 已重建
 
 

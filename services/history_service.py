@@ -200,6 +200,46 @@ def delete_item(engine: Engine, item_id: int) -> list[str]:
     return [row[0]] if row[0] else []
 
 
+def list_older_than(engine: Engine, days: int = 0) -> list[ClipboardItem]:
+    """筛选条件查询（清理数据预览用）：N 天前（days=0 为全部），最新在前。"""
+    from datetime import timedelta
+
+    stmt = select(ItemRow).order_by(
+        ItemRow.created_at.desc(), ItemRow.id.desc())
+    if days > 0:
+        cutoff = datetime.now() - timedelta(days=days)
+        stmt = stmt.where(ItemRow.created_at < cutoff)
+    with make_session_factory(engine)() as session:
+        rows = session.execute(stmt).scalars().all()
+    return [_to_item(row) for row in rows]
+
+
+def delete_items(engine: Engine, item_ids: list[int]) -> list[str]:
+    """批量删除指定条目（一次 FTS rebuild），返回图片文件路径供清理。
+
+    不影响收藏夹（快照独立）。
+    """
+    if not item_ids:
+        return []
+    from sqlalchemy import bindparam
+
+    stmt = text(
+        "SELECT file_path FROM clipboard_items WHERE id IN :ids"
+    ).bindparams(bindparam("ids", expanding=True))
+    with engine.connect() as conn:
+        rows = conn.execute(stmt, {"ids": item_ids}).fetchall()
+        files = [row[0] for row in rows if row[0]]
+    with engine.begin() as conn:
+        for item_id in item_ids:
+            conn.execute(
+                text("DELETE FROM clipboard_items WHERE id = :id"),
+                {"id": item_id},
+            )
+        conn.execute(text("INSERT INTO items_fts(items_fts) VALUES('rebuild')"))
+    logger.info("批量删除 %d 条历史（图片 %d 个）", len(item_ids), len(files))
+    return files
+
+
 def clear_history(engine: Engine) -> list[str]:
     """清空全部历史（含 FTS 索引重建），返回图片文件路径供清理。
 
