@@ -9,7 +9,7 @@ import logging
 import sys
 from pathlib import Path
 
-from .base import ClipboardAction
+from ._base import ClipboardAction
 
 logger = logging.getLogger(__name__)
 
@@ -44,11 +44,16 @@ def load_actions(*extra_dirs: Path) -> list[ClipboardAction]:
 
 
 def _load_action_module(path: Path) -> ClipboardAction | None:
-    """从单个 .py 文件加载模块，取其 ACTION 实例。失败不中断整体加载。"""
+    """从单个 .py 文件加载模块，取其 ACTION 实例。失败不中断整体加载。
+
+    模块名必须带 actions. 前缀注册，否则相对导入（from ._base import ...）
+    报 "attempted relative import with no known parent package"。
+    """
+    module_name = f"{__name__}.{path.stem}"
     try:
-        spec = importlib.util.spec_from_file_location(path.stem, path)
+        spec = importlib.util.spec_from_file_location(module_name, path)
         module = importlib.util.module_from_spec(spec)
-        sys.modules[spec.name] = module
+        sys.modules[module_name] = module
         spec.loader.exec_module(module)
         return module.ACTION
     except Exception:

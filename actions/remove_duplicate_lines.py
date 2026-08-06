@@ -1,5 +1,5 @@
 """Remove Duplicate Lines：去重并保持首次出现顺序。"""
-from .base import ClipboardAction
+from ._base import ClipboardAction
 
 
 class RemoveDuplicateLinesAction(ClipboardAction):

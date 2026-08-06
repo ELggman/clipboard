@@ -1,5 +1,5 @@
 """Lower Case：文本转小写。"""
-from .base import ClipboardAction
+from ._base import ClipboardAction
 
 
 class LowerCaseAction(ClipboardAction):

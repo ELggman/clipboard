@@ -19,7 +19,7 @@ python main.py
 
 ```
 app/          入口与生命周期（懒加载装配，保证启动 <1s）
-actions/      Action 插件体系（每个 .py 一个 Action，主程序不写死）
+actions/      Action 插件体系（每个 .py 一个 Action，主程序不写死；已内置 11 个）
 database/     SQLite + WAL（SQLAlchemy ORM + 轻量迁移）
 services/     剪贴板监听 / 全局热键 / 搜索(FTS5) / Snippet / Action / 图片
 ui/           PySide6 视图（主窗口 / Quick Paste / 各页面）

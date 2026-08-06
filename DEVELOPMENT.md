@@ -454,7 +454,7 @@ CREATE TABLE snippets (
 - [ ] 按 §3.1 落地 ClipboardWatcher（dev 版先跑通文本监听 + 去重 + SQLite 落库）
 - [ ] 按 §3.2 落地 CGEventTap 热键 + 辅助功能引导窗口
 - [ ] 主窗口骨架（左导航/搜索栏/状态栏/主题切换）
-- [ ] Actions 接口 + 内置 10 个 Action
+- [ ] Actions 接口 + 内置 11 个 Action
 - [ ] 一次性准备打包：make_cert.sh 生成自签名证书
 - [ ] build.sh 打通「打包 → 签名 → 验证 checklist」
 - [ ] 性能验收：启动 <1s、万条搜索 <100ms

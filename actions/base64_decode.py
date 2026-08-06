@@ -1,7 +1,7 @@
 """Base64 Decode：Base64 解码为文本。"""
 import base64
 
-from .base import ClipboardAction
+from ._base import ClipboardAction
 
 
 class Base64DecodeAction(ClipboardAction):

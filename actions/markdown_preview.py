@@ -3,7 +3,7 @@
 TODO: 引入 markdown 渲染库（mistune / markdown-it-py，需在 requirements 增补）
 后替换 execute 实现；can_handle 已就绪。
 """
-from .base import ClipboardAction
+from ._base import ClipboardAction
 
 
 class MarkdownPreviewAction(ClipboardAction):

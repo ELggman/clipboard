@@ -1,5 +1,5 @@
 """Sort Lines：多行文本按行排序。"""
-from .base import ClipboardAction
+from ._base import ClipboardAction
 
 
 class SortLinesAction(ClipboardAction):

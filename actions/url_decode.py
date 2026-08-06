@@ -1,7 +1,7 @@
 """URL Decode：百分号编码解码为原文。"""
 from urllib.parse import unquote
 
-from .base import ClipboardAction
+from ._base import ClipboardAction
 
 
 class UrlDecodeAction(ClipboardAction):

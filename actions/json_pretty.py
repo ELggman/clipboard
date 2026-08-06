@@ -1,7 +1,7 @@
 """JSON Pretty：格式化 JSON 文本。"""
 import json
 
-from .base import ClipboardAction
+from ._base import ClipboardAction
 
 
 class JsonPrettyAction(ClipboardAction):

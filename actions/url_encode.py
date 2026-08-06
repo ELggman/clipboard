@@ -1,7 +1,7 @@
 """URL Encode：文本做 URL 百分号编码（保留常见安全字符）。"""
 from urllib.parse import quote
 
-from .base import ClipboardAction
+from ._base import ClipboardAction
 
 
 class UrlEncodeAction(ClipboardAction):

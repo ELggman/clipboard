@@ -1,7 +1,7 @@
 """Base64 Encode：文本编码为 Base64。"""
 import base64
 
-from .base import ClipboardAction
+from ._base import ClipboardAction
 
 
 class Base64EncodeAction(ClipboardAction):

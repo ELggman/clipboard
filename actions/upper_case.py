@@ -1,5 +1,5 @@
 """Upper Case：文本转大写。"""
-from .base import ClipboardAction
+from ._base import ClipboardAction
 
 
 class UpperCaseAction(ClipboardAction):

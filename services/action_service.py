@@ -9,7 +9,7 @@ from pathlib import Path
 from AppKit import NSPasteboard
 
 from actions import load_actions
-from actions.base import ClipboardAction
+from actions._base import ClipboardAction
 
 logger = logging.getLogger(__name__)
 

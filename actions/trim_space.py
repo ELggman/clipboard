@@ -1,5 +1,5 @@
 """Trim Space：去除每行首尾空白。"""
-from .base import ClipboardAction
+from ._base import ClipboardAction
 
 
 class TrimSpaceAction(ClipboardAction):
