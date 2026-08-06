@@ -7,7 +7,7 @@ import logging
 import logging.handlers
 import sys
 
-from PySide6.QtCore import QLocalServer, QLocalSocket
+from PySide6.QtNetwork import QLocalServer, QLocalSocket  # 单实例：QLocalServer 在 QtNetwork
 from PySide6.QtWidgets import QApplication
 
 from app import APP_ID, ROOT_DIR, __version__

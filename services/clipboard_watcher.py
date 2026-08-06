@@ -32,7 +32,7 @@ class ClipboardWatcher(QObject):
 
     def start(self) -> None:
         self._timer.start()
-        logger.info("剪贴板监听启动（轮询 %ds）", self._timer.interval() / 1000)
+        logger.info("剪贴板监听启动（轮询 %.1fs）", self._timer.interval() / 1000)
 
     def stop(self) -> None:
         self._timer.stop()
