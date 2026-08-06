@@ -53,6 +53,7 @@ def start_workspace(app: QApplication) -> None:
     from ui.main_window import MainWindow
 
     window = MainWindow()
+    window.set_image_service(image_service)  # 历史列表图片缩略图
     window.show()
 
     # 关窗后（窗口隐藏）点 Dock 图标 → 应用激活 → 重新显示窗口

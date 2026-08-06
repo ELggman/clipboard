@@ -29,6 +29,8 @@ LIGHT = {
     "accent_text": "#FFFFFF",
     "hover": "rgba(0, 0, 0, 0.06)",
     "hover_item": "rgba(0, 0, 0, 0.04)",
+    "scrollbar": "rgba(0, 0, 0, 0.22)",        # 滚动条滑块（默认太浅不可见）
+    "scrollbar_hover": "rgba(0, 0, 0, 0.38)",
 }
 
 DARK = {
@@ -43,6 +45,8 @@ DARK = {
     "accent_text": "#FFFFFF",
     "hover": "rgba(255, 255, 255, 0.08)",
     "hover_item": "rgba(255, 255, 255, 0.06)",
+    "scrollbar": "rgba(255, 255, 255, 0.25)",
+    "scrollbar_hover": "rgba(255, 255, 255, 0.42)",
 }
 
 _QSS = string.Template("""
@@ -85,23 +89,49 @@ QLineEdit#searchBox {
     selection-background-color: $accent;
 }
 
-/* 历史列表 */
+/* 历史列表：margin 右侧留出滚动条空间，选中高亮不与滚动条重叠 */
 QListView#historyList {
     background: transparent;
     border: none;
     font-size: 13px;
-    padding: 4px 6px;
+    padding: 4px 8px;
 }
 QListView#historyList::item {
     padding: 8px 12px;
     border-radius: 8px;
-    margin: 1px 2px;
+    margin: 1px 8px;
 }
 QListView#historyList::item:hover { background: $hover_item; }
 QListView#historyList::item:selected {
     background: $accent;
     color: $accent_text;
 }
+
+/* 滚动条：圆角细条 + 半透明滑块（QSS 样式后为非 overlay，不再压住选中高亮） */
+QScrollBar:vertical {
+    background: transparent;
+    width: 10px;
+}
+QScrollBar::handle:vertical {
+    background: $scrollbar;
+    border-radius: 5px;
+    min-height: 30px;
+    margin: 2px;
+}
+QScrollBar::handle:vertical:hover { background: $scrollbar_hover; }
+QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; }
+QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
+QScrollBar:horizontal {
+    background: transparent;
+    height: 10px;
+}
+QScrollBar::handle:horizontal {
+    background: $scrollbar;
+    border-radius: 5px;
+    min-width: 30px;
+    margin: 2px;
+}
+QScrollBar::handle:horizontal:hover { background: $scrollbar_hover; }
 
 /* 占位提示（未实现的页面） */
 QLabel#placeholder { color: $secondary; font-size: 13px; }

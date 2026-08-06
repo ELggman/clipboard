@@ -92,6 +92,12 @@ class MainWindow(QMainWindow):
         if hasattr(page, "set_query"):
             page.set_query(query)
 
+    def set_image_service(self, service) -> None:
+        """注入图片服务（历史列表缩略图用）。"""
+        page = self._pages.widget(0)
+        if isinstance(page, HistoryView):
+            page.set_image_service(service)
+
     def load_history(self, items: list) -> None:
         """启动恢复：把数据库已有历史填入列表。"""
         page = self._pages.widget(0)
