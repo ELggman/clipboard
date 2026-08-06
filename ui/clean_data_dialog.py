@@ -23,6 +23,9 @@ logger = logging.getLogger(__name__)
 
 # 清理数据：时间筛选条件（days, 文案）
 _CLEAN_OPTIONS = [(7, "7 天以前"), (30, "30 天以前"), (90, "90 天以前"), (0, "全部历史")]
+# 类型筛选（"", 全部）
+_TYPE_OPTIONS = [("", "全部类型"), ("text", "文本"), ("url", "URL"),
+                 ("image", "图片"), ("file", "文件")]
 
 
 class CleanDataDialog(QDialog):
@@ -38,13 +41,17 @@ class CleanDataDialog(QDialog):
         layout.setContentsMargins(20, 16, 20, 16)
         layout.setSpacing(10)
 
-        # 筛选行
+        # 筛选行：时间 + 类型
         filter_row = QHBoxLayout()
         filter_row.setSpacing(6)
         self._days = QComboBox()
         for value, label in _CLEAN_OPTIONS:
             self._days.addItem(label, value)
         filter_row.addWidget(self._days)
+        self._types = QComboBox()
+        for value, label in _TYPE_OPTIONS:
+            self._types.addItem(label, value)
+        filter_row.addWidget(self._types)
         query_btn = QPushButton("查询")
         query_btn.setObjectName("secondaryButton")
         query_btn.clicked.connect(self._query)
@@ -79,13 +86,15 @@ class CleanDataDialog(QDialog):
     # ---- 查询与删除 ----
 
     def _query(self) -> None:
-        """按时间条件查询匹配条目（可勾选，默认全选）。"""
+        """按时间 + 类型条件查询匹配条目（可勾选，默认全选）。"""
         if self._engine is None:
             return
         from services import history_service
 
         days = self._days.currentData()
-        self._items = history_service.list_older_than(self._engine, days)
+        item_type = self._types.currentData()
+        self._items = history_service.list_older_than(
+            self._engine, days, item_type)
         self._list.clear()
         for item in self._items:
             row = QListWidgetItem(

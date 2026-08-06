@@ -218,6 +218,28 @@ def test_clear_history(engine):
     assert SearchService(engine).search("a") == []  # FTS 已重建
 
 
+def test_list_older_than_type_filter(engine):
+    """清理数据查询支持类型筛选。"""
+    import hashlib
+
+    from app.types import ClipboardItem
+    from services import history_service
+
+    t = ClipboardItem(type="text", content="txt")
+    t.hash = hashlib.sha256(b"txt").hexdigest()
+    u = ClipboardItem(type="url", content="https://x.com")
+    u.hash = hashlib.sha256(b"url").hexdigest()
+    history_service.save_item(engine, t)
+    history_service.save_item(engine, u)
+
+    all_items = history_service.list_older_than(engine, 0)
+    assert len(all_items) == 2
+    urls = history_service.list_older_than(engine, 0, item_type="url")
+    assert [i.content for i in urls] == ["https://x.com"]
+    imgs = history_service.list_older_than(engine, 0, item_type="image")
+    assert imgs == []
+
+
 # ---- Timeline 分组 ----
 
 def test_list_grouped_buckets(engine):

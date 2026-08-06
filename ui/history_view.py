@@ -25,6 +25,8 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QDialog,
     QListView,
+    QListWidget,
+    QListWidgetItem,
     QMenu,
     QStyledItemDelegate,
     QStyle,
@@ -35,6 +37,10 @@ from PySide6.QtWidgets import (
 logger = logging.getLogger(__name__)
 
 ROLE_ITEM = Qt.ItemDataRole.UserRole + 1  # QStandardItem 里存 ClipboardItem
+
+# 类型筛选：("", 全部) / 具体类型
+TYPE_FILTERS = [("", "全部"), ("text", "文本"), ("url", "URL"),
+                ("image", "图片"), ("file", "文件")]
 
 # ---- 基准尺寸（scale=1，即窗口宽度 380px 初始/最小档）----
 # 所有几何值 = 基准 × scale，随窗口宽度等比例放大（HistoryView.resizeEvent 驱动）
@@ -273,6 +279,23 @@ class HistoryView(QWidget):
         self._list.setItemDelegate(self._delegate)
         self._list.clicked.connect(self._on_item_clicked)  # 单击展开详情
 
+        # 顶部类型筛选条（全部 / 文本 / URL / 图片 / 文件）
+        self._type_tabs = QListWidget()
+        self._type_tabs.setObjectName("topnav")
+        self._type_tabs.setFlow(QListView.Flow.LeftToRight)
+        self._type_tabs.setFixedHeight(30)
+        self._type_tabs.setSpacing(2)
+        self._type_tabs.setFrameShape(QListWidget.Shape.NoFrame)
+        self._type_tabs.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._type_tabs.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        for _type, label in TYPE_FILTERS:
+            self._type_tabs.addItem(QListWidgetItem(label))
+        self._type_tabs.currentRowChanged.connect(self._on_type_filter)
+        self._filter_type = ""  # 当前类型筛选
+        self._all_items: list = []  # set_items 传入的完整数据（筛选前）
+
         # 右键菜单依赖（bootstrap 注入）
         self._engine = None              # 置顶/收藏写库
         self._actions = None             # ActionService（Actions 子菜单）
@@ -281,6 +304,8 @@ class HistoryView(QWidget):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(self._type_tabs)
         layout.addWidget(self._list)
 
     def resizeEvent(self, event) -> None:
@@ -461,13 +486,27 @@ class HistoryView(QWidget):
 
     def set_items(self, items: list) -> None:
         """整体替换列表（启动恢复 / 搜索结果），items 最新在前。"""
-        self._model.clear()
-        for item in items:
-            self._model.appendRow(self._make_row(item))
+        self._all_items = list(items)
+        self._apply_type_filter()
 
     def add_item(self, clipboard_item) -> None:
-        """追加一条实时捕获（最新在上）。"""
-        self._model.insertRow(0, self._make_row(clipboard_item))
+        """追加一条实时捕获（最新在上；符合当前类型筛选才显示）。"""
+        self._all_items.insert(0, clipboard_item)
+        if not self._filter_type or clipboard_item.type == self._filter_type:
+            self._model.insertRow(0, self._make_row(clipboard_item))
+
+    # ---- 类型筛选 ----
+
+    def _on_type_filter(self, row: int) -> None:
+        if 0 <= row < len(TYPE_FILTERS):
+            self._filter_type = TYPE_FILTERS[row][0]
+            self._apply_type_filter()
+
+    def _apply_type_filter(self) -> None:
+        self._model.clear()
+        for item in self._all_items:
+            if not self._filter_type or item.type == self._filter_type:
+                self._model.appendRow(self._make_row(item))
 
     def mark_duplicate(self, clipboard_item) -> None:
         """重复内容：不新增，仅刷新状态栏（列表不动）。"""

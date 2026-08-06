@@ -200,8 +200,9 @@ def delete_item(engine: Engine, item_id: int) -> list[str]:
     return [row[0]] if row[0] else []
 
 
-def list_older_than(engine: Engine, days: int = 0) -> list[ClipboardItem]:
-    """筛选条件查询（清理数据预览用）：N 天前（days=0 为全部），最新在前。"""
+def list_older_than(engine: Engine, days: int = 0,
+                    item_type: str = "") -> list[ClipboardItem]:
+    """筛选条件查询（清理数据预览用）：时间（N 天前，0=全部）+ 类型，最新在前。"""
     from datetime import timedelta
 
     stmt = select(ItemRow).order_by(
@@ -209,6 +210,8 @@ def list_older_than(engine: Engine, days: int = 0) -> list[ClipboardItem]:
     if days > 0:
         cutoff = datetime.now() - timedelta(days=days)
         stmt = stmt.where(ItemRow.created_at < cutoff)
+    if item_type:
+        stmt = stmt.where(ItemRow.type == item_type)
     with make_session_factory(engine)() as session:
         rows = session.execute(stmt).scalars().all()
     return [_to_item(row) for row in rows]

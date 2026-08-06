@@ -702,6 +702,71 @@ def test_clean_data_dialog_query_and_delete(tmp_path):
     dialog.close()
 
 
+def test_history_type_filter(tmp_path):
+    """历史页类型筛选：切换只显示对应类型；实时新增符合筛选才显示。"""
+    from ui.history_view import HistoryView
+
+    view = HistoryView()
+    items = [
+        ClipboardItem(type="text", content="text one"),
+        ClipboardItem(type="url", content="https://example.com"),
+        ClipboardItem(type="image", file_path="/tmp/x.png", preview="x.png"),
+    ]
+    view.set_items(items)
+    assert view._model.rowCount() == 3  # 默认全部
+
+    # 切「图片」
+    view._type_tabs.setCurrentRow(3)
+    assert view._model.rowCount() == 1
+    assert view._model.index(0, 0).data(ROLE_ITEM).type == "image"
+
+    # 实时新增：符合筛选显示，不符合不显示（但保留在全部里）
+    view.add_item(ClipboardItem(type="text", content="text two"))
+    assert view._model.rowCount() == 1  # 图片筛选下 text 不显示
+    view._type_tabs.setCurrentRow(0)    # 切回全部
+    assert view._model.rowCount() == 4  # 含新增的 text two
+    view.close()
+
+
+def test_clean_data_dialog_type_filter(tmp_path):
+    """清理弹窗类型筛选：组合时间+类型查询。"""
+    from database.engine import create_db_engine
+    from database.migrations import migrate
+    from services import history_service
+    from ui.clean_data_dialog import CleanDataDialog
+
+    engine = create_db_engine(tmp_path / "tf.db")
+    migrate(engine)
+    import datetime
+    import hashlib
+
+    from sqlalchemy import text
+
+    for content, type_ in (("text a", "text"), ("https://b.com", "url")):
+        item = ClipboardItem(type=type_, content=content)
+        item.hash = hashlib.sha256(content.encode()).hexdigest()
+        history_service.save_item(engine, item)
+    # 数据改为 40 天前（对话框默认「7 天以前」筛选）
+    with engine.begin() as conn:
+        conn.execute(text(
+            "UPDATE clipboard_items SET created_at = :t"),
+            {"t": datetime.datetime.now() - datetime.timedelta(days=40)})
+
+    dialog = CleanDataDialog(engine)
+    assert dialog._list.count() == 2  # 默认 7 天前 + 全部类型
+
+    dialog._types.setCurrentIndex(2)  # URL
+    dialog._query()
+    assert dialog._list.count() == 1
+    assert "https://b.com" in dialog._list.item(0).text()
+
+    dialog._types.setCurrentIndex(1)  # 文本
+    dialog._query()
+    assert dialog._list.count() == 1
+    assert "text a" in dialog._list.item(0).text()
+    dialog.close()
+
+
 def test_theme_scrollbar_qss():
     """主题 QSS 含滚动条样式且无未替换占位符。"""
     from ui.theme import DARK, build_stylesheet
