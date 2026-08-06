@@ -25,9 +25,11 @@ LIGHT = {
     "secondary": "#6E6E73",
     "separator": "#E3E3E6",
     "search_bg": "#E9E9EB",   # NSSearchField 底色
-    "accent": "#007AFF",      # 系统蓝（导航/按钮等强调）
-    "accent_pressed": "#0062CC",  # 按下态加深（QSS 不支持 opacity，须显式色）
+    "accent": "#007AFF",      # 系统蓝（导航/菜单选中等）
     "accent_text": "#FFFFFF",
+    # 按钮蓝（比 accent 浅一档，用户要求柔和）
+    "accent_soft": "#2E90FF",
+    "accent_soft_pressed": "#1F7AE0",  # 按下态加深（QSS 不支持 opacity，须显式色）
     # 列表选中高亮：浅蓝半透明 + 深色文字（macOS 原生选中风格，比实心蓝柔和）
     # 注意：QColor 的 8 位十六进制是 AARRGGBB 顺序（alpha 前置），
     # 不支持 "rgba()" 函数字符串（实测解析失败）
@@ -48,8 +50,9 @@ DARK = {
     "separator": "#3A3A3C",
     "search_bg": "#3A3A3C",
     "accent": "#0A84FF",
-    "accent_pressed": "#3396FF",
     "accent_text": "#FFFFFF",
+    "accent_soft": "#4DA3FF",
+    "accent_soft_pressed": "#3D8CFF",
     # 列表选中高亮：macOS 深色模式的选中蓝（#3D82F7）比 #0A84FF 柔和
     "selection_bg": "#3D82F7",
     "selection_text": "#FFFFFF",
@@ -193,15 +196,25 @@ QMenu::separator {
 
 /* 详情弹层：元信息与按钮 */
 QLabel#detailMeta { color: $secondary; font-size: 12px; }
-QPushButton#primaryButton {
-    background: $accent;
-    color: $accent_text;
+
+/* 按钮统一：文字色、字号、尺寸（primary/secondary 同 padding 同高） */
+QPushButton { color: $text; font-size: 13px; }
+QPushButton#primaryButton,
+QPushButton#secondaryButton {
     border: none;
     border-radius: 6px;
     padding: 6px 18px;
-    font-size: 13px;
 }
-QPushButton#primaryButton:pressed { background: $accent_pressed; }
+QPushButton#primaryButton {
+    background: $accent_soft;  /* 浅一档的按钮蓝 */
+    color: $accent_text;
+}
+QPushButton#primaryButton:pressed { background: $accent_soft_pressed; }
+QPushButton#secondaryButton {
+    background: $search_bg;
+    color: $text;
+}
+QPushButton#secondaryButton:pressed { background: $separator; }
 
 /* 状态栏 */
 QStatusBar { color: $secondary; font-size: 11px; background: transparent; }

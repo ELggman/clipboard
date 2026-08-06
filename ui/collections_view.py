@@ -177,7 +177,8 @@ class CollectionsView(QWidget):
         menu = QMenu(self)
         self._active_menus.append(menu)
         menu.addAction("重命名").triggered.connect(lambda: self._rename(item))
-        menu.addAction("删除").triggered.connect(lambda: self._delete(cid))
+        menu.addAction("删除").triggered.connect(
+            lambda: self._delete_collection(cid))
         menu.exec(self._list.viewport().mapToGlobal(pos))
 
     def _delete(self, cid: int) -> None:
@@ -236,6 +237,13 @@ class CollectionsView(QWidget):
     def _remove(self, cid: int, item) -> None:
         if self._engine is not None:
             collection_service.remove_item(self._engine, cid, item.id)
+            self.reload()
+
+    def _delete_collection(self, cid: int) -> None:
+        """删除收藏夹（收藏夹右键菜单）。"""
+        if self._engine is not None:
+            collection_service.delete_collection(self._engine, cid)
+            logger.info("收藏夹已删除: id=%s", cid)
             self.reload()
 
     def _delete(self, item) -> None:

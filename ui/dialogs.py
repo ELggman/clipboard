@@ -41,6 +41,7 @@ class NameDialog(QDialog):
         buttons = QHBoxLayout()
         buttons.addStretch(1)
         cancel = QPushButton("取消")
+        cancel.setObjectName("secondaryButton")  # 灰底 + 主题文字色（与确认按钮同尺寸）
         cancel.clicked.connect(self.reject)
         confirm = QPushButton(confirm_text)
         confirm.setObjectName("primaryButton")

@@ -585,6 +585,50 @@ def test_history_menu_delete(tmp_path):
     assert count == 0
 
 
+def test_collection_context_menu_delete(tmp_path):
+    """收藏夹右键删除（回归：此前误调条目删除方法导致 AttributeError）。"""
+    from database.engine import create_db_engine
+    from database.migrations import migrate
+    from services import collection_service
+    from ui.collections_view import CollectionsView
+
+    engine = create_db_engine(tmp_path / "cd.db")
+    migrate(engine)
+    cid = collection_service.create_collection(engine, "待删")
+    view = CollectionsView()
+    view.set_context(engine)
+    assert view._list.count() == 2  # ★ 收藏 + 待删
+
+    # 模拟右键菜单删除（与 _on_list_menu 相同的动作构建）
+    from PySide6.QtWidgets import QMenu
+
+    menu = QMenu()
+    view._active_menus.append(menu)
+    menu.addAction("删除").triggered.connect(
+        lambda: view._delete_collection(cid))
+    menu.actions()[0].trigger()
+    assert view._list.count() == 1  # 只剩 ★ 收藏
+    assert collection_service.list_collections(engine) == []
+    view.close()
+
+
+def test_name_dialog_buttons_same_size():
+    """弹窗两个按钮同尺寸（同 padding 同文本长度），取消为灰色次要样式。"""
+    from ui.dialogs import NameDialog
+
+    dlg = NameDialog("测试", "名称：", confirm_text="创建")
+    dlg.show()
+    pytest_app.processEvents()
+    buttons = dlg.findChildren(QPushButton)
+    cancel = next(b for b in buttons if b.text() == "取消")
+    confirm = next(b for b in buttons if b.text() == "创建")
+    assert cancel.objectName() == "secondaryButton"
+    assert confirm.objectName() == "primaryButton"
+    # 同 padding → sizeHint 宽度一致（同字号同文本长）
+    assert cancel.sizeHint().width() == confirm.sizeHint().width()
+    dlg.deleteLater()
+
+
 def test_theme_scrollbar_qss():
     """主题 QSS 含滚动条样式且无未替换占位符。"""
     from ui.theme import DARK, build_stylesheet
