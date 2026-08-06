@@ -89,22 +89,13 @@ QLineEdit#searchBox {
     selection-background-color: $accent;
 }
 
-/* 历史列表：margin 右侧留出滚动条空间，选中高亮不与滚动条重叠 */
+/* 历史列表：条目渲染由 HistoryDelegate 全权负责（自绘选中/hover/缩略图），
+   不要再加 ::item 规则——QSS 的 item padding/margin 会干扰 delegate 的行几何 */
 QListView#historyList {
     background: transparent;
     border: none;
     font-size: 13px;
     padding: 4px 8px;
-}
-QListView#historyList::item {
-    padding: 8px 12px;
-    border-radius: 8px;
-    margin: 1px 8px;
-}
-QListView#historyList::item:hover { background: $hover_item; }
-QListView#historyList::item:selected {
-    background: $accent;
-    color: $accent_text;
 }
 
 /* 滚动条：圆角细条 + 半透明滑块（QSS 样式后为非 overlay，不再压住选中高亮） */

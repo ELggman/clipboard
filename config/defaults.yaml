@@ -11,6 +11,7 @@ history:
   save_images: true
   auto_delete_days: 30     # 7 / 30 / 90 / -1(永不)
   poll_interval: 0.2       # 剪贴板轮询间隔（秒）
+  show_image_filename: true  # 图片条目是否显示文件名（False 显示「时间 · image」）
 
 hotkey:
   enabled: true

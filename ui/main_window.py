@@ -35,8 +35,9 @@ class MainWindow(QMainWindow):
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
         self.setWindowTitle("Clipboard Workspace")
-        self.resize(1000, 640)
-        self.setMinimumSize(760, 480)
+        # 唤起类工具：允许缩到较小尺寸，避免遮挡当前工作内容
+        self.resize(900, 560)
+        self.setMinimumSize(560, 360)
         self.statusBar().setSizeGripEnabled(False)
         self._build_ui()
         self.statusBar().showMessage("就绪")
@@ -56,8 +57,8 @@ class MainWindow(QMainWindow):
 
         # 右侧：搜索栏 + 页面栈
         right = QVBoxLayout()
-        right.setContentsMargins(12, 12, 12, 0)
-        right.setSpacing(8)
+        right.setContentsMargins(10, 10, 10, 0)
+        right.setSpacing(6)
         self._search = QLineEdit()
         self._search.setObjectName("searchBox")
         self._search.setFixedHeight(30)
@@ -97,6 +98,12 @@ class MainWindow(QMainWindow):
         page = self._pages.widget(0)
         if isinstance(page, HistoryView):
             page.set_image_service(service)
+
+    def set_show_image_filename(self, show: bool) -> None:
+        """配置：图片条目文件名显示开关（透传历史列表）。"""
+        page = self._pages.widget(0)
+        if isinstance(page, HistoryView):
+            page.set_show_image_filename(show)
 
     def load_history(self, items: list) -> None:
         """启动恢复：把数据库已有历史填入列表。"""

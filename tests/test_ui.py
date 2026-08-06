@@ -1,4 +1,4 @@
-"""UI 层测试（offscreen）：历史列表缩略图、主题滚动条。"""
+"""UI 层测试（offscreen）：历史列表 delegate 布局、主题滚动条。"""
 import os
 import sys
 from io import BytesIO
@@ -8,9 +8,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PIL import Image
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import QRect
+from PySide6.QtWidgets import QApplication, QStyleOptionViewItem
 
 from app.types import ClipboardItem
+from ui.history_view import ROLE_ITEM, ROW_HEIGHT, THUMB_ROW_HEIGHT, HistoryView
 
 pytest_app = QApplication.instance() or QApplication([])
 
@@ -21,34 +23,72 @@ def _png_bytes(color: str = "red", size: int = 64) -> bytes:
     return buf.getvalue()
 
 
-def test_history_view_image_thumbnail(tmp_path):
-    """image 条目在列表里渲染出缩略图（懒加载经 ImageService）。"""
+def _size_hint(view: HistoryView, row: int) -> QRect:
+    opt = QStyleOptionViewItem()
+    opt.rect = QRect(0, 0, 400, 40)
+    return view._list.itemDelegate().sizeHint(opt, view._model.index(row, 0))
+
+
+def test_history_row_layouts(tmp_path):
+    """图片条目行高 > 文本条目；缩略图渲染不崩。"""
     from services.image_service import ImageService
-    from ui.history_view import HistoryView
 
     service = ImageService(tmp_path / "img")
     path = service.save(_png_bytes("blue", 32))
     view = HistoryView()
     view.set_image_service(service)
-
-    item = ClipboardItem(type="image", file_path=str(path), preview="thumb.png")
-    view.add_item(item)
-    row = view._list.item(0)
-    assert row.icon().isNull() is False, "image 条目应有缩略图图标"
-
-    # 文本条目无图标
+    view.add_item(ClipboardItem(type="image", file_path=str(path), preview="thumb.png"))
     view.add_item(ClipboardItem(type="text", content="hello"))
-    assert view._list.item(0).icon().isNull() is True
+
+    # add_item 两次都插在行 0：后加的文本在行 0，图片在行 1
+    img_h = _size_hint(view, 1).height()
+    txt_h = _size_hint(view, 0).height()
+    assert img_h == THUMB_ROW_HEIGHT
+    assert txt_h == ROW_HEIGHT
+    assert img_h > txt_h
+
+    # paint 冒烟：真实渲染一遍（含缩略图绘制路径）
+    view.resize(400, 300)
+    view.show()
+    pytest_app.processEvents()
+    assert view.grab().isNull() is False
+    view.close()
 
 
-def test_history_view_thumbnail_missing_file(tmp_path):
-    """文件缺失时优雅降级：无图标不崩溃。"""
-    from ui.history_view import HistoryView
+def test_history_show_filename_toggle(tmp_path):
+    """开关关闭时不崩，布局仍按图片条目走。"""
+    from services.image_service import ImageService
 
+    service = ImageService(tmp_path / "img")
+    path = service.save(_png_bytes("blue", 32))
+    view = HistoryView()
+    view.set_image_service(service)
+    view.set_show_image_filename(False)
+    view.add_item(ClipboardItem(type="image", file_path=str(path), preview="thumb.png"))
+    assert _size_hint(view, 0).height() == THUMB_ROW_HEIGHT
+
+
+def test_history_missing_image_file(tmp_path):
+    """文件缺失（缩略图为 None）时优雅降级：布局不变、渲染不崩。"""
     view = HistoryView()
     view.add_item(ClipboardItem(
         type="image", file_path=str(tmp_path / "gone.png"), preview="gone.png"))
-    assert view._list.item(0).icon().isNull() is True
+    view.resize(400, 200)
+    view.show()
+    pytest_app.processEvents()
+    view.grab()
+    assert view._model.rowCount() == 1
+    view.close()
+
+
+def test_history_set_items_restores():
+    """set_items 整体回填（启动恢复路径）。"""
+    view = HistoryView()
+    items = [ClipboardItem(type="text", content=f"item {i}") for i in range(3)]
+    view.set_items(items)
+    assert view._model.rowCount() == 3
+    first = view._model.index(0, 0).data(ROLE_ITEM)
+    assert first.content == "item 0"  # 列表第一行 = items[0]（最新在前）
 
 
 def test_theme_scrollbar_qss():
