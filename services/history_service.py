@@ -200,6 +200,22 @@ def delete_item(engine: Engine, item_id: int) -> list[str]:
     return [row[0]] if row[0] else []
 
 
+def clear_history(engine: Engine) -> list[str]:
+    """清空全部历史（含 FTS 索引重建），返回图片文件路径供清理。
+
+    收藏关系由外键 ON DELETE CASCADE 级联清除（PRAGMA foreign_keys=ON）。
+    """
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text("SELECT file_path FROM clipboard_items")).fetchall()
+        files = [row[0] for row in rows if row[0]]
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM clipboard_items"))
+        conn.execute(text("INSERT INTO items_fts(items_fts) VALUES('rebuild')"))
+    logger.info("已清空全部历史（%d 条，图片 %d 个）", len(rows), len(files))
+    return files
+
+
 def _delete_rows_and_rebuild(conn, ids: list[int]) -> None:
     """删除内容行后重建 FTS 索引。
 

@@ -17,6 +17,37 @@ from PySide6.QtWidgets import (
 logger = logging.getLogger(__name__)
 
 
+class ConfirmDialog(QDialog):
+    """Apple 风格确认对话框：destructive 确认按钮为红色（macOS 惯例）。"""
+
+    def __init__(self, title: str, message: str, confirm_text: str = "删除",
+                 parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setModal(True)
+        self.setMinimumWidth(360)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(12)
+
+        msg = QLabel(message)
+        msg.setWordWrap(True)
+        layout.addWidget(msg)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        cancel = QPushButton("取消")
+        cancel.setObjectName("secondaryButton")
+        cancel.clicked.connect(self.reject)
+        confirm = QPushButton(confirm_text)
+        confirm.setObjectName("destructiveButton")
+        confirm.clicked.connect(self.accept)
+        buttons.addWidget(cancel)
+        buttons.addWidget(confirm)
+        layout.addLayout(buttons)
+
+
 class NameDialog(QDialog):
     """单行命名对话框（新建/重命名收藏夹等）。"""
 

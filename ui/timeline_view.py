@@ -4,6 +4,7 @@
 「更早」内按月分组（带月份标题）。点击条目 → 详情弹层。
 """
 import logging
+from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
@@ -37,11 +38,16 @@ class TimelineView(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # 时间段分段选择器（复用顶部导航 QSS）
+        # 顶部工具行：时间段分段选择器 + 清空时间线按钮
+        from PySide6.QtWidgets import QHBoxLayout, QPushButton
+
+        top = QHBoxLayout()
+        top.setContentsMargins(0, 0, 0, 0)
+        top.setSpacing(6)
         self._tabs = QListWidget()
         self._tabs.setObjectName("topnav")
         self._tabs.setFlow(QListView.Flow.LeftToRight)
-        self._tabs.setFixedHeight(34)
+        self._tabs.setFixedHeight(30)
         self._tabs.setSpacing(2)
         self._tabs.setFrameShape(QListWidget.Shape.NoFrame)
         self._tabs.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -49,7 +55,13 @@ class TimelineView(QWidget):
         for label, _ in _BUCKETS:
             self._tabs.addItem(QListWidgetItem(label))
         self._tabs.currentRowChanged.connect(self._on_bucket_selected)
-        layout.addWidget(self._tabs)
+        top.addWidget(self._tabs, 1)
+        clear_btn = QPushButton("清空时间线")
+        clear_btn.setObjectName("secondaryButton")
+        clear_btn.setFixedHeight(26)
+        clear_btn.clicked.connect(self._confirm_clear)
+        top.addWidget(clear_btn)
+        layout.addLayout(top)
 
         self._list = QListWidget()
         self._list.setObjectName("historyList")
@@ -116,3 +128,29 @@ class TimelineView(QWidget):
         entry = item.data(ROLE_ITEM)
         if entry is not None:
             self.item_activated.emit(entry)
+
+    def _confirm_clear(self) -> None:
+        """清空时间线：红色确认对话框。与历史同源，清空即删除全部记录。"""
+        if self._engine is None:
+            return
+        from ui.dialogs import ConfirmDialog
+
+        dialog = ConfirmDialog(
+            "清空时间线",
+            "时间线与历史是同一份数据，将删除全部记录（含图片与收藏），"
+            "且无法恢复。确定继续？",
+            confirm_text="清空")
+        if dialog.exec() == ConfirmDialog.DialogCode.Accepted:
+            self._clear_impl()
+
+    def _clear_impl(self) -> None:
+        from services import history_service
+
+        files = history_service.clear_history(self._engine)
+        for path in files:
+            try:
+                Path(path).unlink(missing_ok=True)
+            except OSError:
+                logger.warning("图片清理失败: %s", path)
+        logger.info("已清空时间线（图片 %d 个）", len(files))
+        self.reload()

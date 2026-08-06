@@ -166,6 +166,33 @@ def test_delete_item(engine):
     assert history_service.delete_item(engine, 99999) == []
 
 
+def test_clear_history(engine):
+    """清空全部历史：行清空 + FTS 重建 + 图片路径返回 + 收藏级联。"""
+    import hashlib
+
+    from app.types import ClipboardItem
+    from services import collection_service, history_service
+    from services.search_service import SearchService
+
+    a = ClipboardItem(type="text", content="a")
+    a.hash = hashlib.sha256(b"a").hexdigest()
+    b = ClipboardItem(type="image", file_path="/tmp/pic.png", content="")
+    b.hash = hashlib.sha256(b"b").hexdigest()
+    history_service.save_item(engine, a)
+    history_service.save_item(engine, b)
+    cid = collection_service.create_collection(engine, "c")
+    collection_service.add_item(engine, cid, a.id)
+
+    files = history_service.clear_history(engine)
+    assert files == ["/tmp/pic.png"]
+    with engine.connect() as conn:
+        assert conn.execute(text(
+            "SELECT COUNT(*) FROM clipboard_items")).scalar() == 0
+        assert conn.execute(text(
+            "SELECT COUNT(*) FROM collection_items")).scalar() == 0  # 级联清空
+    assert SearchService(engine).search("a") == []  # FTS 已重建
+
+
 # ---- Timeline 分组 ----
 
 def test_list_grouped_buckets(engine):

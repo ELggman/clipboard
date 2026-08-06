@@ -629,6 +629,54 @@ def test_name_dialog_buttons_same_size():
     dlg.deleteLater()
 
 
+def test_confirm_dialog_destructive_button():
+    """确认对话框：红色 destructive 按钮 + 取消灰按钮。"""
+    from ui.dialogs import ConfirmDialog
+
+    dlg = ConfirmDialog("清空历史", "确定？", confirm_text="清空")
+    dlg.show()
+    pytest_app.processEvents()
+    buttons = dlg.findChildren(QPushButton)
+    confirm = next(b for b in buttons if b.text() == "清空")
+    cancel = next(b for b in buttons if b.text() == "取消")
+    assert confirm.objectName() == "destructiveButton"
+    assert cancel.objectName() == "secondaryButton"
+    dlg.deleteLater()
+
+
+def test_history_clear_button_and_impl(tmp_path):
+    """历史页清空：按钮存在，执行后列表清空 + 反馈 + 刷新。"""
+    from database.engine import create_db_engine
+    from database.migrations import migrate
+    from services import history_service
+    from sqlalchemy import text
+    from ui.history_view import HistoryView
+
+    engine = create_db_engine(tmp_path / "cl.db")
+    migrate(engine)
+    item = ClipboardItem(type="text", content="clear me")
+    import hashlib
+
+    item.hash = hashlib.sha256(b"clear me").hexdigest()
+    history_service.save_item(engine, item)
+
+    refreshed = []
+    messages = []
+    view = HistoryView()
+    view.add_item(item)
+    view.set_menu_context(engine, None, lambda: refreshed.append(True))
+    view.feedback.connect(messages.append)
+    assert view.findChildren(QPushButton)[0].text() == "清空历史"
+
+    view._clear_impl()  # 绕过确认对话框直接执行
+    assert messages == ["已清空历史"]
+    assert refreshed == [True]
+    with engine.connect() as conn:
+        assert conn.execute(text(
+            "SELECT COUNT(*) FROM clipboard_items")).scalar() == 0
+    view.close()
+
+
 def test_theme_scrollbar_qss():
     """主题 QSS 含滚动条样式且无未替换占位符。"""
     from ui.theme import DARK, build_stylesheet

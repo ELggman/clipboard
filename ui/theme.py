@@ -215,6 +215,15 @@ QPushButton#secondaryButton {
     color: $text;
 }
 QPushButton#secondaryButton:pressed { background: $separator; }
+/* destructive：破坏性操作（清空/删除）确认按钮，macOS 红色惯例 */
+QPushButton#destructiveButton {
+    background: #FF453A;
+    color: #FFFFFF;
+    border: none;
+    border-radius: 6px;
+    padding: 6px 18px;
+}
+QPushButton#destructiveButton:pressed { background: #D63A30; }
 
 /* 状态栏 */
 QStatusBar { color: $secondary; font-size: 11px; background: transparent; }

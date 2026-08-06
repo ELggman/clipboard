@@ -273,6 +273,19 @@ class HistoryView(QWidget):
         self._list.setItemDelegate(self._delegate)
         self._list.clicked.connect(self._on_item_clicked)  # 单击展开详情
 
+        # 顶部工具行：清空历史（破坏性操作，红色确认）
+        from PySide6.QtWidgets import QHBoxLayout, QPushButton
+
+        toolbar = QWidget()
+        bar = QHBoxLayout(toolbar)
+        bar.setContentsMargins(10, 4, 10, 0)
+        bar.addStretch(1)
+        clear_btn = QPushButton("清空历史")
+        clear_btn.setObjectName("secondaryButton")
+        clear_btn.setFixedHeight(26)
+        clear_btn.clicked.connect(self._confirm_clear)
+        bar.addWidget(clear_btn)
+
         # 右键菜单依赖（bootstrap 注入）
         self._engine = None              # 置顶/收藏写库
         self._actions = None             # ActionService（Actions 子菜单）
@@ -281,6 +294,8 @@ class HistoryView(QWidget):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(toolbar)
         layout.addWidget(self._list)
 
     def resizeEvent(self, event) -> None:
@@ -433,6 +448,32 @@ class HistoryView(QWidget):
             if provider is not None:
                 provider.delete(path)
         self.feedback.emit("已删除")
+        if self._refresh_cb:
+            self._refresh_cb()
+
+    def _confirm_clear(self) -> None:
+        """清空历史：红色确认对话框（破坏性操作）。"""
+        if self._engine is None:
+            return
+        from ui.dialogs import ConfirmDialog
+
+        dialog = ConfirmDialog(
+            "清空历史",
+            "将删除全部历史记录（含图片与收藏），且无法恢复。确定继续？",
+            confirm_text="清空")
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._clear_impl()
+
+    def _clear_impl(self) -> None:
+        from services import history_service
+
+        files = history_service.clear_history(self._engine)
+        provider = self._delegate._provider
+        for path in files:
+            if provider is not None:
+                provider.delete(path)
+        logger.info("已清空全部历史（图片 %d 个）", len(files))
+        self.feedback.emit("已清空历史")
         if self._refresh_cb:
             self._refresh_cb()
 
