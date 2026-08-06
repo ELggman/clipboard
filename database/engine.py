@@ -2,12 +2,24 @@
 
 DEVELOPMENT.md §7.1：WAL 提升并发读写；外键保证 collection_items 级联删除。
 """
+import datetime
 import logging
+import sqlite3
 from pathlib import Path
 
 from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
+
+logger = logging.getLogger(__name__)
+
+
+# Python 3.12+ 弃用内置 datetime 适配器，注册等价的显式适配（格式不变）
+def _datetime_adapter(value: datetime.datetime) -> str:
+    return value.isoformat(sep=" ")
+
+
+sqlite3.register_adapter(datetime.datetime, _datetime_adapter)
 
 logger = logging.getLogger(__name__)
 
