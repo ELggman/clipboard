@@ -79,6 +79,16 @@ def test_max_items_trim(engine):
     assert SearchService(engine).search("item 5") != []
 
 
+def test_list_recent_newest_first(engine):
+    history_service.save_item(engine, _item("older"))
+    history_service.save_item(engine, _item("newer"))
+    items = history_service.list_recent(engine, limit=10)
+    assert [i.content for i in items] == ["newer", "older"]
+    assert items[0].created_at  # 恢复用的展示时间戳已填充
+    assert items[0].type == "text"
+    assert len(history_service.list_recent(engine, limit=1)) == 1
+
+
 def test_preview_image_uses_filename():
     item = ClipboardItem(
         type="image", content="", file_path="/data/images/abc123.png",

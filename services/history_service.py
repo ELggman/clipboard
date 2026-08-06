@@ -6,10 +6,12 @@ import logging
 from datetime import datetime
 from pathlib import Path
 
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.engine import Engine
 
 from app.types import ClipboardItem
+from database.engine import make_session_factory
+from database.models import ClipboardItem as ItemRow
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +25,33 @@ def compute_preview(item: ClipboardItem) -> str:
     if item.type == "text":
         return " ".join(item.content.split())[:_PREVIEW_LEN]
     return item.content[:_PREVIEW_LEN]
+
+
+def list_recent(engine: Engine, limit: int = 500) -> list[ClipboardItem]:
+    """加载最近 N 条（最新优先），用于启动恢复与分页（DEVELOPMENT.md §7.2）。
+
+    用 Session + ORM select（而非 raw SQL / Connection.scalars）：
+    - raw text() 拿到的 created_at 是字符串，ORM 的 DateTime 会解析为 datetime
+    - Connection.execute(select(实体)).scalars() 返回的是第一列(id)而非实体，
+      必须走 Session（实测踩坑）
+    """
+    with make_session_factory(engine)() as session:
+        rows = session.execute(
+            select(ItemRow)
+            .order_by(ItemRow.created_at.desc(), ItemRow.id.desc())
+            .limit(limit)
+        ).scalars().all()
+    return [
+        ClipboardItem(
+            type=row.type,
+            content=row.content or "",
+            preview=row.preview or "",
+            file_path=row.file_path or "",
+            source_app=row.source_app or "",
+            created_at=row.created_at.strftime("%m-%d %H:%M"),
+        )
+        for row in rows
+    ]
 
 
 def save_item(engine: Engine, item: ClipboardItem, max_items: int = 500) -> bool:

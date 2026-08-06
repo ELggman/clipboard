@@ -75,6 +75,13 @@ class MainWindow(QMainWindow):
         if hasattr(page, "set_query"):
             page.set_query(query)
 
+    def load_history(self, items: list) -> None:
+        """启动恢复：把数据库已有历史填入列表。"""
+        page = self._pages.widget(0)
+        if isinstance(page, HistoryView):
+            page.set_items(items)
+        self.statusBar().showMessage(f"已恢复 {len(items)} 条历史")
+
     def refresh_history(self, clipboard_item, is_new: bool = True) -> None:
         """剪贴板条目回调：is_new=True 追加列表；状态栏区分新增/去重。"""
         page = self._pages.widget(0)

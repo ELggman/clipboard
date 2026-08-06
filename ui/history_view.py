@@ -20,10 +20,21 @@ class HistoryView(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self._list)
 
+    def set_items(self, items: list) -> None:
+        """整体替换列表（启动恢复 / 搜索结果），items 最新在前。"""
+        self._list.clear()
+        for item in items:
+            self._list.addItem(self._item_text(item))
+
+    @staticmethod
+    def _item_text(item) -> str:
+        """列表行文案：`时间 · 类型` + 内容（与需求示例一致）。"""
+        prefix = f"{item.created_at} · " if item.created_at else ""
+        return f"{prefix}{item.type}\n{item.display_text()}"
+
     def add_item(self, clipboard_item) -> None:
-        """追加一条历史（最新在上）。"""
-        text = f"{clipboard_item.display_text()}\n{clipboard_item.type}"
-        self._list.insertItem(0, text)
+        """追加一条实时捕获（最新在上）。"""
+        self._list.insertItem(0, self._item_text(clipboard_item))
 
     def mark_duplicate(self, clipboard_item) -> None:
         """重复内容：不新增，仅刷新状态栏（列表不动）。"""
