@@ -85,6 +85,54 @@ def start_workspace(app: QApplication) -> None:
     window.load_history(history_service.list_recent(engine, limit=restore_limit),
                         limit=restore_limit)
 
+    # 设置页：改动即生效的回调
+    from ui.theme import apply_theme
+
+    def apply_setting(key: str):
+        def _apply(overrides: dict) -> None:
+            if key == "theme":
+                apply_theme(app, overrides["app"]["theme"])
+            elif key == "font":
+                window.set_font_size(int(overrides["app"]["font_size"]))
+            elif key == "show_filename":
+                window.set_show_image_filename(
+                    bool(overrides["history"]["show_image_filename"]))
+            elif key == "autostart":
+                from services.autostart import set_enabled
+
+                set_enabled(bool(overrides["app"]["launch_at_login"]))
+            elif key == "max_items":
+                n = int(overrides["history"]["max_items"])
+                if history_service.trim_history(engine, n) and window.isVisible():
+                    window._reload_history()
+            # save_images / auto_delete 下次插入或清扫时生效
+        return _apply
+
+    window.set_settings_context(
+        config,
+        {k: apply_setting(k) for k in ("theme", "font", "show_filename",
+                                       "autostart", "max_items")},
+    )
+
+    # 自动删除：每日清扫一次（启动 1 分钟后首扫）
+    from PySide6.QtCore import QTimer
+
+    def sweep_old_history() -> None:
+        days = int(config["history"]["auto_delete_days"])
+        if days <= 0:
+            return
+        removed_files = history_service.delete_older_than(engine, days)
+        for path in removed_files:
+            image_service.delete(path)
+        if removed_files:
+            window._reload_history()
+
+    sweep_timer = QTimer(app)
+    sweep_timer.setInterval(24 * 3600 * 1000)
+    sweep_timer.timeout.connect(sweep_old_history)
+    sweep_timer.start()
+    QTimer.singleShot(60_000, sweep_old_history)
+
     # 闭环：监听 → 图片落盘 → 去重落库 → UI 刷新
     def on_clipboard_changed(item: ClipboardItem) -> None:
         if item.type == "image" and item.data:

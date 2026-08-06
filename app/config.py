@@ -13,6 +13,20 @@ CONFIG_DIR = ROOT_DIR / "config"
 logger = logging.getLogger(__name__)
 
 
+def save_user_config(overrides: dict[str, Any], path: Path | None = None) -> None:
+    """把用户设置合并写回 settings.yaml（设置页改动即存）。
+
+    与既有用户配置深度合并，不覆盖 defaults.yaml；path 供测试注入临时目录。
+    """
+    target = path or CONFIG_DIR / "settings.yaml"
+    existing = _load_yaml(target) if target.exists() else {}
+    merged = _deep_merge(existing, overrides)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with open(target, "w", encoding="utf-8") as f:
+        yaml.safe_dump(merged, f, allow_unicode=True, sort_keys=False)
+    logger.info("用户配置已保存: %s", target)
+
+
 def load_config() -> dict[str, Any]:
     defaults = _load_yaml(CONFIG_DIR / "defaults.yaml")
     user_path = CONFIG_DIR / "settings.yaml"

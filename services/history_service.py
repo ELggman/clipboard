@@ -94,6 +94,63 @@ def set_pinned(engine: Engine, item_id: int, pinned: bool) -> bool:
     return True
 
 
+def delete_older_than(engine: Engine, days: int) -> list[str]:
+    """删除 N 天前且未置顶的记录（自动删除策略，置顶条目豁免）。
+
+    返回被删图片的文件路径，供调用方清理磁盘文件。
+    """
+    if days <= 0:
+        return []
+    from datetime import timedelta
+
+    cutoff = datetime.now() - timedelta(days=days)
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text("SELECT id, file_path FROM clipboard_items"
+                 " WHERE created_at < :cut AND pinned = 0"),
+            {"cut": cutoff},
+        ).fetchall()
+        ids = [row[0] for row in rows]
+        if not ids:
+            return []
+    with engine.begin() as conn:
+        _delete_rows_and_rebuild(conn, ids)
+    logger.info("自动删除 %d 条旧历史（%d 天前）", len(ids), days)
+    return [row[1] for row in rows if row[1]]
+
+
+def trim_history(engine: Engine, max_items: int) -> int:
+    """立即按数量上限裁剪（设置页改上限即时生效）。返回删除条数。"""
+    if max_items <= 0:
+        return 0
+    with engine.begin() as conn:
+        overflow = conn.execute(
+            text("SELECT id FROM clipboard_items"
+                 " ORDER BY pinned DESC, created_at DESC, id DESC LIMIT -1 OFFSET :m"),
+            {"m": max_items},
+        ).fetchall()
+        ids = [row[0] for row in overflow]
+        _delete_rows_and_rebuild(conn, ids)
+    if ids:
+        logger.info("历史数量裁剪 %d 条（上限 %d）", len(ids), max_items)
+    return len(ids)
+
+
+def _delete_rows_and_rebuild(conn, ids: list[int]) -> None:
+    """删除内容行后重建 FTS 索引。
+
+    对外部内容表逐行 DELETE 在索引与内容不同步时会报
+    'database disk image is malformed'（实测）——统一用 rebuild
+    从内容表重建索引，永远一致，10k 行毫秒级。
+    """
+    for item_id in ids:
+        conn.execute(
+            text("DELETE FROM clipboard_items WHERE id = :id"), {"id": item_id}
+        )
+    if ids:
+        conn.execute(text("INSERT INTO items_fts(items_fts) VALUES('rebuild')"))
+
+
 def set_favorite(engine: Engine, item_id: int, favorite: bool) -> bool:
     """收藏/取消收藏。返回是否成功。"""
     if not item_id:

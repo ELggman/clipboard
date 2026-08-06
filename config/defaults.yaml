@@ -3,7 +3,7 @@
 
 app:
   theme: system            # system / light / dark
-  font_size: 13
+  font_size: 14            # 历史列表基准字号（12-16）
   launch_at_login: false   # 开机启动（写入 LaunchAgent）
 
 history:

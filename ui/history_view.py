@@ -67,6 +67,8 @@ class HistoryDelegate(QStyledItemDelegate):
         self.show_image_filename = True  # 配置开关（DEVELOPMENT.md 设置项）
         self._scale = 1.0            # 响应式缩放（窗口宽度 / BASE_WIDTH）
         self._pixmap_cache: dict[str, QPixmap] = {}
+        self._main_font_px = BASE_FONT_PX        # 基准字号（设置页可调）
+        self._small_font_px = BASE_FONT_SMALL_PX
 
     def set_image_service(self, service) -> None:
         self._provider = service
@@ -74,6 +76,11 @@ class HistoryDelegate(QStyledItemDelegate):
 
     def set_show_image_filename(self, show: bool) -> None:
         self.show_image_filename = show
+
+    def set_font_sizes(self, main_px: int, small_px: int | None = None) -> None:
+        """设置页字体大小：主文字 + 次要文字（默认主-2），随 scale 等比例放大。"""
+        self._main_font_px = max(10, main_px)
+        self._small_font_px = max(9, small_px if small_px is not None else main_px - 2)
 
     def set_scale(self, scale: float) -> None:
         """窗口放大时等比例放大所有几何（字号/缩略图/行高/间距）。"""
@@ -199,7 +206,7 @@ class HistoryDelegate(QStyledItemDelegate):
 
     def _font(self, small: bool = False) -> QFont:
         font = QFont()
-        font.setPixelSize(self._s(BASE_FONT_SMALL_PX if small else BASE_FONT_PX))
+        font.setPixelSize(self._s(self._small_font_px if small else self._main_font_px))
         return font
 
     def _draw_line(self, painter, text: str, x: int, baseline_y: int,
@@ -287,6 +294,12 @@ class HistoryView(QWidget):
     def set_show_image_filename(self, show: bool) -> None:
         """配置：图片条目是否显示文件名（False 时显示「时间 · image」）。"""
         self._delegate.set_show_image_filename(show)
+
+    def set_font_size(self, main_px: int) -> None:
+        """设置页字体大小：更新 delegate 基准字号并重排。"""
+        self._delegate.set_font_sizes(main_px)
+        self._list.doItemsLayout()
+        self._list.viewport().update()
 
     def set_menu_context(self, engine, action_service, refresh_cb) -> None:
         """注入右键菜单依赖：数据库引擎（置顶/收藏）、ActionService、刷新回调。"""

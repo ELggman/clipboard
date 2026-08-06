@@ -459,7 +459,9 @@ CREATE TABLE snippets (
 - [x] Quick Paste 弹窗闭环（⌘⇧V → 最近 10 条 → Enter 回写剪贴板）
 - [x] 搜索栏接线（防抖 150ms + FTS5 过滤，清空恢复完整历史）
 - [ ] 右键菜单（Copy / Pin / Favorite / Add To Collection / Action 子菜单）
-- [ ] 设置页 UI（历史数量/图片保存/自动删除/开机启动/快捷键/字体/主题）
+- [x] 设置页 UI（主题/字体/历史数量/图片保存/图片文件名/自动删除/开机启动；快捷键展示，自定义 V1.5）
+- [x] 自动删除定时清扫（每日 + 启动 1 分钟后；置顶条目豁免；FTS 用 rebuild 重建避免外部内容表 DELETE malformed）
+- [x] 开机启动 LaunchAgent（services/autostart.py；打包版替换 .app 路径）
 - [ ] Collections / Snippets / Timeline 页面实现
 - [ ] 一次性准备打包：make_cert.sh 生成自签名证书
 - [ ] build.sh 打通「打包 → 签名 → 验证 checklist」

@@ -139,6 +139,12 @@ class MainWindow(QMainWindow):
         if isinstance(page, HistoryView):
             page.set_show_image_filename(show)
 
+    def set_font_size(self, main_px: int) -> None:
+        """配置：基准字号（透传历史列表，设置页改动即时生效）。"""
+        page = self._pages.widget(0)
+        if isinstance(page, HistoryView):
+            page.set_font_size(main_px)
+
     def load_history(self, items: list, limit: int | None = None) -> None:
         """启动恢复：把数据库已有历史填入列表（同时缓存为完整列表）。"""
         self._full_items = list(items)
@@ -170,6 +176,12 @@ class MainWindow(QMainWindow):
         page = self._pages.widget(0)
         if isinstance(page, HistoryView):
             page.item_activated.connect(handler)
+
+    def set_settings_context(self, config, appliers, config_path=None) -> None:
+        """设置页注入：当前配置 + 生效回调（bootstrap 装配）。"""
+        page = self._pages.widget(3)
+        if isinstance(page, SettingsView):
+            page.set_context(config, appliers, config_path)
 
     def refresh_history(self, clipboard_item, is_new: bool = True) -> None:
         """剪贴板条目回调：is_new=True 追加列表；状态栏区分新增/去重。"""
