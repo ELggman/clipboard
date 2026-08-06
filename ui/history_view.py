@@ -38,18 +38,22 @@ ROLE_ITEM = Qt.ItemDataRole.UserRole + 1  # QStandardItem 里存 ClipboardItem
 BASE_WIDTH = 380            # 基准宽度（与 main_window 初始/最小宽度一致）
 BASE_FONT_PX = 14           # 主文字像素（13 → 14，初始档更大）
 BASE_FONT_SMALL_PX = 12     # 次要文字像素（时间/类型/文件名）
-ROW_HEIGHT_BASE = 48        # 文本条目行高（两行）
+ROW_HEIGHT_BASE = 44        # 文本条目行高（两行，收紧原 48 的底部空白）
 THUMB_SIZE_BASE = 68        # 图片条目缩略图边长
 _CAPTION_LINE_H = 18        # 文件名行高（换行按行数累加）
 _TOP_PAD = 10               # 缩略图顶部间距
-_CAPTION_GAP = 6            # 缩略图与文件名间距
+_TIME_GAP = 4               # 缩略图与时间·类型行间距
+_TIME_LINE_H = 16           # 时间·类型行高
+_NAME_GAP = 2               # 时间行与文件名间距
 _BOTTOM_PAD = 8             # 底部间距
 _MARGIN_X = 12              # 文本左/右留白
 _RADIUS = 8                 # 选中/hover 圆角
 
 # 导出（scale=1 时的行高，测试用）
 ROW_HEIGHT = ROW_HEIGHT_BASE
-THUMB_ROW_HEIGHT = _TOP_PAD + THUMB_SIZE_BASE + _CAPTION_GAP + _CAPTION_LINE_H + _BOTTOM_PAD  # 110（单行文件名）
+# 图片条目 = 10 + 68 + 4 + 16 + 2 + 文件名行数×18 + 8；单行文件名 = 126
+THUMB_ROW_HEIGHT = (_TOP_PAD + THUMB_SIZE_BASE + _TIME_GAP + _TIME_LINE_H
+                    + _NAME_GAP + _CAPTION_LINE_H + _BOTTOM_PAD)
 
 
 class HistoryDelegate(QStyledItemDelegate):
@@ -79,12 +83,12 @@ class HistoryDelegate(QStyledItemDelegate):
         item = index.data(ROLE_ITEM)
         width = max(option.rect.width(), 200)
         if item is not None and item.type == "image" and self._provider is not None:
-            caption = item.preview if self.show_image_filename else (
-                f"{item.created_at} · image" if item.created_at else "image")
+            caption = item.preview if self.show_image_filename else ""
             avail = width - 2 * self._s(_MARGIN_X)
             lines = self._caption_lines(caption, self._font(small=True), avail)
             height = (self._s(_TOP_PAD) + self._s(THUMB_SIZE_BASE)
-                      + self._s(_CAPTION_GAP) + lines * self._s(_CAPTION_LINE_H)
+                      + self._s(_TIME_GAP) + self._s(_TIME_LINE_H)
+                      + self._s(_NAME_GAP) + lines * self._s(_CAPTION_LINE_H)
                       + self._s(_BOTTOM_PAD))
             return QSize(width, height)
         return QSize(width, self._s(ROW_HEIGHT_BASE))
@@ -148,23 +152,35 @@ class HistoryDelegate(QStyledItemDelegate):
         if pix is not None:
             painter.drawPixmap(x, y, size, size, pix)
 
-        # 缩略图下方：文件名（开）或 时间·类型（关），水平居中，放不下换行
-        caption = item.preview if self.show_image_filename else (
-            f"{item.created_at} · image" if item.created_at else "image")
-        color = (option.palette.highlightedText().color() if
-                 option.state & QStyle.StateFlag.State_Selected
-                 else option.palette.placeholderText().color())
-        painter.setPen(color)
         font = self._font(small=True)
         painter.setFont(font)
         avail = rect.width() - 2 * self._s(_MARGIN_X)
-        caption_rect = QRect(rect.center().x() - avail // 2,
-                             y + size + self._s(_CAPTION_GAP),
-                             avail, self._caption_lines(caption, font, avail)
-                             * self._s(_CAPTION_LINE_H))
-        painter.drawText(caption_rect,
-                         Qt.AlignmentFlag.AlignHCenter | Qt.TextFlag.TextWordWrap,
-                         caption)
+        center_x = rect.center().x() - avail // 2
+        main_color = (option.palette.highlightedText().color() if
+                      option.state & QStyle.StateFlag.State_Selected
+                      else option.palette.text().color())
+        secondary = option.palette.placeholderText().color()
+
+        # 第一行：时间 · image（次要色，居中）
+        painter.setPen(secondary)
+        time_text = f"{item.created_at} · image" if item.created_at else "image"
+        painter.drawText(QRect(center_x, y + size + self._s(_TIME_GAP),
+                               avail, self._s(_TIME_LINE_H)),
+                         Qt.AlignmentFlag.AlignHCenter, time_text)
+
+        # 第二行+：文件名（主色，居中；放不下按字符换行）
+        caption = item.preview if self.show_image_filename else ""
+        if caption:
+            painter.setPen(main_color)
+            lines = self._caption_lines(caption, font, avail)
+            caption_rect = QRect(center_x,
+                                 y + size + self._s(_TIME_GAP) + self._s(_TIME_LINE_H)
+                                 + self._s(_NAME_GAP),
+                                 avail, lines * self._s(_CAPTION_LINE_H))
+            painter.drawText(caption_rect,
+                             Qt.AlignmentFlag.AlignHCenter
+                             | Qt.TextFlag.TextWrapAnywhere,
+                             caption)
 
     # ---- 工具 ----
 

@@ -90,13 +90,13 @@ QLineEdit#searchBox {
     selection-background-color: $accent;
 }
 
-/* 历史列表：条目渲染由 HistoryDelegate 全权负责（自绘选中/hover/缩略图），
-   不要再加 ::item 规则——QSS 的 item padding/margin 会干扰 delegate 的行几何 */
+/* 历史列表：条目渲染由 HistoryDelegate 全权负责（自绘选中/hover/缩略图）。
+   ⚠️ 不要加 padding / ::item 规则：QSS 的 padding 会被应用到每个条目的
+   option.rect，导致高亮背景相对条目内容整体偏移（实测：高亮下移、文字顶出框） */
 QListView#historyList {
     background: transparent;
     border: none;
     font-size: 13px;
-    padding: 4px 8px;
 }
 
 /* 滚动条：圆角细条 + 半透明滑块（QSS 样式后为非 overlay，不再压住选中高亮） */
