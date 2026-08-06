@@ -36,10 +36,10 @@ class MainWindow(QMainWindow):
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
         self.setWindowTitle("Clipboard Workspace")
-        # 唤起类工具：允许缩到较小尺寸，避免遮挡当前工作内容。
-        # 顶部导航布局下宽度不再被侧边栏占用，可做得比之前窄。
-        self.resize(440, 560)
-        self.setMinimumSize(400, 420)
+        # 唤起类工具：初始尺寸即最小尺寸（380 宽为内容缩放的基准档，
+        # 放大后列表内容等比例放大，见 history_view.BASE_WIDTH）。
+        self.resize(380, 560)
+        self.setMinimumSize(380, 560)
         self.statusBar().setSizeGripEnabled(False)
         self._build_ui()
         self.statusBar().showMessage("就绪")

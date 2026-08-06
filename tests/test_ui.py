@@ -81,6 +81,53 @@ def test_history_missing_image_file(tmp_path):
     view.close()
 
 
+def test_history_scale_responsive(tmp_path):
+    """窗口放大 → 行高等比例放大（基准 380 宽，scale=宽/380）。"""
+    from services.image_service import ImageService
+
+    service = ImageService(tmp_path / "img")
+    path = service.save(_png_bytes("blue", 32))
+    view = HistoryView()
+    view.set_image_service(service)
+    view.add_item(ClipboardItem(type="image", file_path=str(path), preview="thumb.png"))
+    view.add_item(ClipboardItem(type="text", content="hello"))
+
+    view.resize(380, 500)  # 基准档（隐藏控件 resize 事件延迟到 show，须先 show）
+    view.show()
+    pytest_app.processEvents()
+    assert view._delegate._scale == 1.0
+    base_img = _size_hint(view, 1).height()  # 图片在行 1（text 后加）
+    base_txt = _size_hint(view, 0).height()
+
+    view.resize(760, 500)  # 2 倍宽
+    pytest_app.processEvents()
+    assert view._delegate._scale == 2.0
+    assert _size_hint(view, 1).height() == base_img * 2
+    assert _size_hint(view, 0).height() == base_txt * 2
+    view.close()
+
+
+def test_history_caption_wraps_long_filename(tmp_path):
+    """文件名放不下时换行：行高随行数增高（放大后一行放得下则不换行）。"""
+    from services.image_service import ImageService
+
+    service = ImageService(tmp_path / "img")
+    path = service.save(_png_bytes("blue", 32))
+    long_name = "very_long_screenshot_filename_2026_08_06_10_30_am_from_ide_export.png"
+    view = HistoryView()
+    view.set_image_service(service)
+    view.add_item(ClipboardItem(type="image", file_path=str(path), preview=long_name))
+    assert _size_hint(view, 0).height() > THUMB_ROW_HEIGHT  # 两行文件名 → 更高
+
+    # 放大后可用宽度翻倍 → 一行放得下 → 回到基准行高
+    view.resize(900, 500)
+    view.show()
+    pytest_app.processEvents()
+    assert view._delegate._scale > 1.0
+    assert _size_hint(view, 0).height() >= THUMB_ROW_HEIGHT
+    view.close()
+
+
 def test_history_set_items_restores():
     """set_items 整体回填（启动恢复路径）。"""
     view = HistoryView()
