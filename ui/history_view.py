@@ -346,7 +346,11 @@ class HistoryView(QWidget):
     # ---- 右键菜单 ----
 
     def contextMenuEvent(self, event: QContextMenuEvent) -> None:
-        index = self._list.indexAt(event.pos())
+        # 坐标转换：event.pos() 是本视图坐标，indexAt 需要 viewport 坐标
+        # （顶部类型筛选条导致原点偏移，直接用 event.pos() 时最底部
+        #   条目映射到列表外 → indexAt 无效 → 菜单不弹出，实测踩坑）
+        pos = self._list.viewport().mapFromGlobal(event.globalPos())
+        index = self._list.indexAt(pos)
         if not index.isValid():
             return
         item = index.data(ROLE_ITEM)

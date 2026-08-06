@@ -178,7 +178,10 @@ class CollectionsView(QWidget):
             self.item_activated.emit(item)
 
     def contextMenuEvent(self, event) -> None:
-        index = self._items.indexAt(event.pos())
+        # 坐标转换：event.pos() 是视图坐标，indexAt 需要 viewport 坐标
+        # （顶部边距导致原点偏移，底部条目会映射失效）
+        pos = self._items.viewport().mapFromGlobal(event.globalPos())
+        index = self._items.indexAt(pos)
         if not index.isValid():
             return
         item = index.data(ROLE_ITEM)

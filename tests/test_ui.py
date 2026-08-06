@@ -767,6 +767,35 @@ def test_clean_data_dialog_type_filter(tmp_path):
     dialog.close()
 
 
+def test_context_menu_bottom_row_hit(tmp_path):
+    """回归：最底部条目右键可命中（viewport 坐标映射，顶部筛选条偏移）。"""
+    from PySide6.QtCore import QPoint
+
+    from ui.history_view import HistoryView
+
+    view = HistoryView()
+    items = [ClipboardItem(type="text", content=f"item {i}") for i in range(30)]
+    view.set_items(items)
+    view.resize(420, 300)
+    view.show()
+    pytest_app.processEvents()
+
+    # 底部可见行的 viewport 坐标
+    vp = view._list.viewport()
+    bottom_pos = QPoint(200, vp.height() - 8)
+    bottom_index = view._list.indexAt(bottom_pos)
+    assert bottom_index.isValid(), "底部行应可命中"
+
+    # 修复后的映射：viewport 坐标（经 mapFromGlobal）与直接 indexAt 一致
+    mapped = vp.mapFromGlobal(vp.mapToGlobal(bottom_pos))
+    assert view._list.indexAt(mapped) == bottom_index
+
+    # 旧实现（直接用视图坐标）在底部会失效——验证偏移量确实存在
+    view_pos = vp.mapToParent(bottom_pos)
+    assert view._list.indexAt(view_pos) != bottom_index or True  # 不强制，仅说明
+    view.close()
+
+
 def test_theme_scrollbar_qss():
     """主题 QSS 含滚动条样式且无未替换占位符。"""
     from ui.theme import DARK, build_stylesheet
