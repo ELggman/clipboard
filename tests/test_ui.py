@@ -646,15 +646,15 @@ def test_confirm_dialog_destructive_button():
     dlg.deleteLater()
 
 
-def test_settings_clean_data_query_and_delete(tmp_path):
-    """设置页清理数据：筛选查询 + 删除选中（不影响收藏夹快照）。"""
+def test_clean_data_dialog_query_and_delete(tmp_path):
+    """清理数据弹窗：筛选查询 + 删除（不影响收藏夹快照）。"""
     import datetime
 
     from database.engine import create_db_engine
     from database.migrations import migrate
     from services import collection_service, history_service
     from sqlalchemy import text
-    from ui.settings_view import SettingsView
+    from ui.clean_data_dialog import CleanDataDialog
 
     engine = create_db_engine(tmp_path / "cl.db")
     migrate(engine)
@@ -675,25 +675,31 @@ def test_settings_clean_data_query_and_delete(tmp_path):
     cid = collection_service.create_collection(engine, "保留")
     collection_service.add_item(engine, cid, old)
 
-    view = SettingsView()
-    view.set_context({"app": {}, "history": {}}, {}, tmp_path / "s.yaml",
-                     engine=engine)
-    # 查询 7 天前 → 只有 old
-    view._clean_query()
-    assert view._clean_list.count() == 1
-    assert "old entry" in view._clean_list.item(0).text()
+    dialog = CleanDataDialog(engine)
+    dialog.show()
+    pytest_app.processEvents()
+    # 默认查询（7 天前）→ 只有 old
+    assert dialog._list.count() == 1
+    assert "old entry" in dialog._list.item(0).text()
 
-    # 删除选中（_clean_delete 内有模态确认框，测试直接调服务 + 刷新预览）
-    history_service.delete_items(engine, [view._clean_items[0].id])
-    view._clean_query()
-    assert view._clean_list.count() == 0  # 预览已刷新
+    # 切「全部历史」→ 两条都在
+    dialog._days.setCurrentIndex(3)
+    dialog._query()
+    assert dialog._list.count() == 2
+
+    # 删除 old（_delete 内有模态确认框，测试直接调服务 + 刷新预览）
+    old_id = next(i.id for i in dialog._items if i.content == "old entry")
+    history_service.delete_items(engine, [old_id])
+    dialog._query()
+    assert dialog._list.count() == 1  # 全部历史只剩 new
+    assert "new entry" in dialog._list.item(0).text()
     with engine.connect() as conn:
         remaining = [r[0] for r in conn.execute(text(
             "SELECT content FROM clipboard_items")).fetchall()]
     assert remaining == ["new entry"]
     # 收藏快照不受影响
     assert collection_service.list_items(engine, cid)[0].content == "old entry"
-    view.close()
+    dialog.close()
 
 
 def test_theme_scrollbar_qss():
