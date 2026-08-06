@@ -135,6 +135,37 @@ def test_list_favorites(engine):
     assert items[0].favorite == 1
 
 
+def test_delete_item(engine):
+    """删除单条历史：行删除 + FTS 重建 + 图片路径返回。"""
+    import hashlib
+
+    from app.types import ClipboardItem
+    from services import history_service
+    from services.search_service import SearchService
+
+    item = ClipboardItem(type="text", content="to delete")
+    item.hash = hashlib.sha256(b"to delete").hexdigest()
+    history_service.save_item(engine, item)
+    rid = item.id
+    assert history_service.delete_item(engine, rid) == []
+    with engine.connect() as conn:
+        remaining = conn.execute(text(
+            "SELECT COUNT(*) FROM clipboard_items WHERE id = :id"),
+            {"id": rid}).scalar()
+    assert remaining == 0
+    # FTS 索引已重建：搜索不到
+    assert SearchService(engine).search("to delete") == []
+
+    # 图片条目返回路径
+    img = ClipboardItem(type="image", file_path="/tmp/x.png", content="")
+    img.hash = hashlib.sha256(b"img x").hexdigest()
+    history_service.save_item(engine, img)
+    assert history_service.delete_item(engine, img.id) == ["/tmp/x.png"]
+
+    # 不存在返回空
+    assert history_service.delete_item(engine, 99999) == []
+
+
 # ---- Timeline 分组 ----
 
 def test_list_grouped_buckets(engine):

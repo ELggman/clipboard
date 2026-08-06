@@ -375,6 +375,10 @@ class HistoryView(QWidget):
                         lambda _=False, a=action: self._run_action(a, item))
             else:
                 submenu.addAction("无可用 Action").setEnabled(False)
+
+        menu.addSeparator()
+        menu.addAction("删除").triggered.connect(
+            lambda: self._delete_item(item))
         return menu
 
     def _run_copy(self, item) -> None:
@@ -415,6 +419,22 @@ class HistoryView(QWidget):
         if item.id and collection_service.add_item(self._engine, coll["id"], item.id):
             logger.info("已加入收藏夹「%s」: item=%s", coll["name"], item.id)
             self.feedback.emit(f"已收藏到「{coll['name']}」")
+
+    def _delete_item(self, item) -> None:
+        """删除单条历史（图片文件同步清理，状态栏反馈）。"""
+        if not self._engine or not item.id:
+            logger.warning("条目未落库，无法删除: id=%s", item.id)
+            return
+        from services import history_service
+
+        files = history_service.delete_item(self._engine, item.id)
+        provider = self._delegate._provider  # ImageService：清理图片文件
+        for path in files:
+            if provider is not None:
+                provider.delete(path)
+        self.feedback.emit("已删除")
+        if self._refresh_cb:
+            self._refresh_cb()
 
     def _create_collection_and_add(self, item) -> None:
         """新建收藏夹并立即把当前条目加入。"""

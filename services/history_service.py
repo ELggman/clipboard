@@ -182,6 +182,24 @@ def list_grouped(engine: Engine, limit: int = 500) -> list[tuple[str, list[Clipb
     return groups
 
 
+def delete_item(engine: Engine, item_id: int) -> list[str]:
+    """删除单条历史（含 FTS 索引重建），返回图片文件路径供清理。"""
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT file_path FROM clipboard_items WHERE id = :id"),
+            {"id": item_id},
+        ).fetchone()
+        if row is None:
+            return []
+    with engine.begin() as conn:
+        conn.execute(
+            text("DELETE FROM clipboard_items WHERE id = :id"), {"id": item_id}
+        )
+        conn.execute(text("INSERT INTO items_fts(items_fts) VALUES('rebuild')"))
+    logger.info("已删除历史: id=%s", item_id)
+    return [row[0]] if row[0] else []
+
+
 def _delete_rows_and_rebuild(conn, ids: list[int]) -> None:
     """删除内容行后重建 FTS 索引。
 

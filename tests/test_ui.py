@@ -212,7 +212,7 @@ def test_context_menu_copy_action(tmp_path):
     menu = view._build_menu(item)
 
     labels = [a.text() for a in menu.actions()]
-    assert labels == ["复制", "置顶", "收藏"]
+    assert labels == ["复制", "置顶", "收藏", "", "删除"]  # "" = 分隔线
 
     menu.actions()[0].trigger()  # 复制
     pb = NSPasteboard.generalPasteboard()
@@ -548,6 +548,41 @@ def test_name_dialog_chinese_buttons_and_return():
     assert dlg.result() == QDialog.DialogCode.Accepted
     assert dlg.text() == "工作"
     dlg.deleteLater()
+
+
+def test_history_menu_delete(tmp_path):
+    """右键「删除」：菜单含删除项，触发后 DB 删除 + 反馈 + 刷新。"""
+    from database.engine import create_db_engine
+    from database.migrations import migrate
+    from services import history_service
+    from sqlalchemy import text
+    from ui.history_view import HistoryView
+
+    engine = create_db_engine(tmp_path / "d.db")
+    migrate(engine)
+    item = ClipboardItem(type="text", content="delete me")
+    import hashlib
+
+    item.hash = hashlib.sha256(b"delete me").hexdigest()
+    history_service.save_item(engine, item)
+
+    refreshed = []
+    messages = []
+    view = HistoryView()
+    view.add_item(item)
+    view.set_menu_context(engine, None, lambda: refreshed.append(True))
+    view.feedback.connect(messages.append)
+    menu = view._build_menu(item)
+    assert menu.actions()[-1].text() == "删除"  # 分隔线后最后一项
+
+    menu.actions()[-1].trigger()
+    assert messages == ["已删除"]
+    assert refreshed == [True]
+    with engine.connect() as conn:
+        count = conn.execute(text(
+            "SELECT COUNT(*) FROM clipboard_items WHERE id = :id"),
+            {"id": item.id}).scalar()
+    assert count == 0
 
 
 def test_theme_scrollbar_qss():

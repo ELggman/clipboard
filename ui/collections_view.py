@@ -34,11 +34,13 @@ class CollectionsView(QWidget):
         super().__init__(parent)
         self._engine = None
         self._collections: list[dict] = []
+        self._image_service = None     # 删除条目时清理图片文件
         self._active_menus: list = []  # 防 GC（PySide 菜单包装器 Python 所有）
         self._build_ui()
 
     def set_context(self, engine, image_service=None) -> None:
         self._engine = engine
+        self._image_service = image_service
         if image_service is not None:
             self._delegate.set_image_service(image_service)
         self.reload()
@@ -210,6 +212,8 @@ class CollectionsView(QWidget):
         submenu = menu.addMenu("Actions")
         self._active_menus.append(submenu)
         self._fill_actions_submenu(submenu, item)
+        menu.addSeparator()
+        menu.addAction("删除").triggered.connect(lambda: self._delete(item))
         menu.exec(event.globalPos())
 
     def _fill_actions_submenu(self, submenu: QMenu, item) -> None:
@@ -233,3 +237,15 @@ class CollectionsView(QWidget):
         if self._engine is not None:
             collection_service.remove_item(self._engine, cid, item.id)
             self.reload()
+
+    def _delete(self, item) -> None:
+        """从历史删除条目（图片文件同步清理，收藏关系级联清除）。"""
+        if self._engine is None or not item.id:
+            return
+        from services import history_service
+
+        files = history_service.delete_item(self._engine, item.id)
+        for path in files:
+            if self._image_service is not None:
+                self._image_service.delete(path)
+        self.reload()
