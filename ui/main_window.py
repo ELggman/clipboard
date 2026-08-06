@@ -20,6 +20,7 @@ from .collections_view import CollectionsView
 from .history_view import HistoryView
 from .settings_view import SettingsView
 from .snippets_view import SnippetsView
+from .timeline_view import TimelineView
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,7 @@ _NAV_PAGES: list[tuple[str, type]] = [
     ("历史", HistoryView),
     ("收藏夹", CollectionsView),
     ("片段", SnippetsView),
+    ("时间线", TimelineView),
     ("设置", SettingsView),
 ]
 
@@ -172,15 +174,27 @@ class MainWindow(QMainWindow):
             page.set_menu_context(engine, action_service, self._reload_history)
 
     def set_item_activated_handler(self, handler) -> None:
-        """单击历史条目 → 详情弹层（bootstrap 装配）。"""
-        page = self._pages.widget(0)
-        if isinstance(page, HistoryView):
-            page.item_activated.connect(handler)
+        """各列表页（历史/收藏夹/时间线）单击条目 → 详情弹层。"""
+        for idx in range(self._pages.count()):
+            page = self._pages.widget(idx)
+            if hasattr(page, "item_activated"):
+                page.item_activated.connect(handler)
+
+    def set_data_context(self, engine, image_service=None) -> None:
+        """数据页注入引擎（收藏夹/片段/时间线，打开页面时自动刷新）。"""
+        for idx in range(self._pages.count()):
+            page = self._pages.widget(idx)
+            if isinstance(page, (CollectionsView, SnippetsView, TimelineView)):
+                if isinstance(page, CollectionsView):
+                    page.set_context(engine, image_service)
+                else:
+                    page.set_context(engine)
 
     def set_settings_context(self, config, appliers, config_path=None) -> None:
         """设置页注入：当前配置 + 生效回调（bootstrap 装配）。"""
-        page = self._pages.widget(3)
-        if isinstance(page, SettingsView):
+        page = next((self._pages.widget(i) for i in range(self._pages.count())
+                     if isinstance(self._pages.widget(i), SettingsView)), None)
+        if page is not None:
             page.set_context(config, appliers, config_path)
 
     def refresh_history(self, clipboard_item, is_new: bool = True) -> None:

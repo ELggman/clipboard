@@ -1,17 +1,204 @@
-"""收藏夹视图：左侧收藏列表 + 右侧条目（拖入/右键 Add To Collection 在 V1.5）。"""
+"""收藏夹页：左侧收藏夹列表，右侧条目（DEVELOPMENT.md §4.4）。
+
+- 新建/双击重命名/右键删除收藏夹
+- 条目复用 HistoryDelegate 渲染（缩略图/两行布局），点击 → 详情弹层，
+  右键：复制 / 从收藏夹移除 / Actions
+"""
 import logging
 
-from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
+from PySide6.QtCore import QModelIndex, QRect, Qt, Signal
+from PySide6.QtGui import QStandardItem, QStandardItemModel
+from PySide6.QtWidgets import (
+    QHBoxLayout,
+    QInputDialog,
+    QListView,
+    QListWidget,
+    QListWidgetItem,
+    QMenu,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
+
+from services import collection_service
 
 logger = logging.getLogger(__name__)
 
+ROLE_ITEM = Qt.ItemDataRole.UserRole + 1  # 与 HistoryView 保持一致
+
 
 class CollectionsView(QWidget):
+    item_activated = Signal(object)  # 单击条目 → 详情弹层
+
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        label = QLabel("Collections（TODO: 创建/删除/重命名收藏夹）")
-        label.setObjectName("placeholder")
-        layout.addWidget(label)
-        layout.addStretch(1)
+        self._engine = None
+        self._collections: list[dict] = []
+        self._active_menus: list = []  # 防 GC（PySide 菜单包装器 Python 所有）
+        self._build_ui()
+
+    def set_context(self, engine, image_service=None) -> None:
+        self._engine = engine
+        if image_service is not None:
+            self._delegate.set_image_service(image_service)
+        self.reload()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if self._engine is not None:
+            self.reload()
+
+    # ---- 构建 ----
+
+    def _build_ui(self) -> None:
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(10)
+
+        left = QVBoxLayout()
+        left.setSpacing(6)
+        self._list = QListWidget()
+        self._list.setObjectName("sideList")
+        self._list.currentRowChanged.connect(self._on_select)
+        self._list.itemDoubleClicked.connect(self._rename)
+        self._list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._list.customContextMenuRequested.connect(self._on_list_menu)
+        left.addWidget(self._list, 1)
+        new_btn = QPushButton("新建收藏夹")
+        new_btn.setObjectName("primaryButton")
+        new_btn.clicked.connect(self._create)
+        left.addWidget(new_btn)
+        layout.addLayout(left, 2)
+
+        self._model = QStandardItemModel(self)
+        self._items = QListView()
+        self._items.setObjectName("historyList")
+        self._items.setMouseTracking(True)
+        self._items.setModel(self._model)
+        from ui.history_view import HistoryDelegate
+
+        self._delegate = HistoryDelegate(self._items)
+        self._items.setItemDelegate(self._delegate)
+        self._items.clicked.connect(self._on_item_clicked)
+        layout.addWidget(self._items, 3)
+
+    # ---- 数据 ----
+
+    def reload(self) -> None:
+        if self._engine is None:
+            return
+        current_id = self._current_id()
+        self._collections = collection_service.list_collections(self._engine)
+        self._list.blockSignals(True)
+        self._list.clear()
+        for c in self._collections:
+            item = QListWidgetItem(f"{c['name']}（{c['count']}）")
+            item.setData(Qt.ItemDataRole.UserRole, c["id"])
+            self._list.addItem(item)
+        self._list.blockSignals(False)
+        if self._collections:
+            idx = next((i for i, c in enumerate(self._collections)
+                        if c["id"] == current_id), 0)
+            self._list.setCurrentRow(idx)
+        else:
+            self._model.clear()
+
+    def _current_id(self) -> int:
+        row = self._list.currentRow()
+        if 0 <= row < len(self._collections):
+            return self._collections[row]["id"]
+        return 0
+
+    def _on_select(self, row: int) -> None:
+        self._model.clear()
+        if 0 <= row < len(self._collections) and self._engine is not None:
+            cid = self._collections[row]["id"]
+            for item in collection_service.list_items(self._engine, cid):
+                row_item = QStandardItem()
+                row_item.setData(item, ROLE_ITEM)
+                row_item.setEditable(False)
+                self._model.appendRow(row_item)
+
+    # ---- 收藏夹操作 ----
+
+    def _create(self) -> None:
+        name, ok = QInputDialog.getText(self, "新建收藏夹", "名称：")
+        if ok and name.strip() and self._engine is not None:
+            collection_service.create_collection(self._engine, name.strip())
+            self.reload()
+
+    def _rename(self, item: QListWidgetItem) -> None:
+        cid = item.data(Qt.ItemDataRole.UserRole)
+        coll = next((c for c in self._collections if c["id"] == cid), None)
+        if coll is None or self._engine is None:
+            return
+        name, ok = QInputDialog.getText(self, "重命名", "名称：", text=coll["name"])
+        if ok and name.strip():
+            collection_service.rename_collection(self._engine, cid, name.strip())
+            self.reload()
+
+    def _on_list_menu(self, pos) -> None:
+        item = self._list.itemAt(pos)
+        if item is None:
+            return
+        cid = item.data(Qt.ItemDataRole.UserRole)
+        menu = QMenu(self)
+        self._active_menus.append(menu)
+        menu.addAction("重命名").triggered.connect(lambda: self._rename(item))
+        menu.addAction("删除").triggered.connect(lambda: self._delete(cid))
+        menu.exec(self._list.viewport().mapToGlobal(pos))
+
+    def _delete(self, cid: int) -> None:
+        if self._engine is not None:
+            collection_service.delete_collection(self._engine, cid)
+            logger.info("收藏夹已删除: id=%s", cid)
+            self.reload()
+
+    # ---- 条目操作 ----
+
+    def _on_item_clicked(self, index: QModelIndex) -> None:
+        item = index.data(ROLE_ITEM)
+        if item is not None:
+            self.item_activated.emit(item)
+
+    def contextMenuEvent(self, event) -> None:
+        index = self._items.indexAt(event.pos())
+        if not index.isValid():
+            return
+        item = index.data(ROLE_ITEM)
+        cid = self._current_id()
+        if item is None or cid == 0:
+            return
+
+        menu = QMenu(self)
+        self._active_menus.append(menu)
+        menu.addAction("复制").triggered.connect(
+            lambda: self._copy(item))
+        menu.addAction("从收藏夹移除").triggered.connect(
+            lambda: self._remove(cid, item))
+        submenu = menu.addMenu("Actions")
+        self._active_menus.append(submenu)
+        self._fill_actions_submenu(submenu, item)
+        menu.exec(event.globalPos())
+
+    def _fill_actions_submenu(self, submenu: QMenu, item) -> None:
+        from services.action_service import ActionService
+
+        service = ActionService()
+        available = service.actions_for(item)
+        if available:
+            for action in available:
+                submenu.addAction(action.name).triggered.connect(
+                    lambda _=False, a=action: service.run(a, item))
+        else:
+            submenu.addAction("无可用 Action").setEnabled(False)
+
+    def _copy(self, item) -> None:
+        from services.action_service import set_clipboard_item
+
+        set_clipboard_item(item)
+
+    def _remove(self, cid: int, item) -> None:
+        if self._engine is not None:
+            collection_service.remove_item(self._engine, cid, item.id)
+            self.reload()

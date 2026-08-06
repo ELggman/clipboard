@@ -355,6 +355,116 @@ def test_history_item_clicked_signal(tmp_path):
     view.close()
 
 
+def test_snippets_view_save_and_copy(tmp_path):
+    """片段页：新建保存 → 列表出现；复制渲染变量到剪贴板。"""
+    from AppKit import NSPasteboard, NSPasteboardTypeString
+
+    from database.engine import create_db_engine
+    from database.migrations import migrate
+    from ui.snippets_view import SnippetsView
+
+    engine = create_db_engine(tmp_path / "s.db")
+    migrate(engine)
+    view = SnippetsView()
+    view.set_context(engine)
+    assert view._list.count() == 0
+
+    # 新建 + 保存
+    view._new_snippet()
+    view._name.setText("日期")
+    view._content.setPlainText("今天：{{date}}")
+    view._save()
+    assert view._list.count() == 1
+
+    # 复制（渲染变量）
+    view._copy()
+    clip = NSPasteboard.generalPasteboard().stringForType_(NSPasteboardTypeString)
+    assert clip.startswith("今天：") and "{{" not in clip
+    view.close()
+
+
+def test_collections_view_create_and_items(tmp_path):
+    """收藏夹页：创建收藏夹 → 条目列表加载。"""
+    from database.engine import create_db_engine
+    from database.migrations import migrate
+    from services import collection_service
+    from ui.collections_view import CollectionsView
+
+    engine = create_db_engine(tmp_path / "c.db")
+    migrate(engine)
+    view = CollectionsView()
+    view.set_context(engine)
+    assert view._list.count() == 0
+
+    collection_service.create_collection(engine, "工作")
+    view.reload()
+    assert view._list.count() == 1
+    assert "工作" in view._list.item(0).text()
+
+    # 选中收藏夹 → 空条目
+    view._list.setCurrentRow(0)
+    assert view._model.rowCount() == 0
+    view.close()
+
+
+def test_timeline_view_grouped(tmp_path):
+    """时间线页：分组标题 + 条目渲染。"""
+    from database.engine import create_db_engine
+    from database.migrations import migrate
+    from services import history_service
+    from ui.timeline_view import TimelineView
+
+    engine = create_db_engine(tmp_path / "t.db")
+    migrate(engine)
+    item = ClipboardItem(type="text", content="timeline entry")
+    import hashlib
+
+    item.hash = hashlib.sha256(b"timeline entry").hexdigest()
+    history_service.save_item(engine, item)
+
+    view = TimelineView()
+    view.set_context(engine)
+    texts = [view._list.item(i).text() for i in range(view._list.count())]
+    assert any(t == "今天" for t in texts)          # 分组标题
+    assert any("timeline entry" in t for t in texts)
+    # 标题不可交互（NoItemFlags）
+    header_idx = next(i for i, t in enumerate(texts) if t == "今天")
+    assert not view._list.item(header_idx).flags() & Qt.ItemFlag.ItemIsSelectable
+    view.close()
+
+
+def test_history_menu_add_to_collection(tmp_path):
+    """右键菜单「加入收藏夹」：收藏夹列表 + 触发加入。"""
+    from database.engine import create_db_engine
+    from database.migrations import migrate
+    from services import collection_service, history_service
+    from ui.history_view import HistoryView
+
+    engine = create_db_engine(tmp_path / "m.db")
+    migrate(engine)
+    cid = collection_service.create_collection(engine, "收藏夹A")
+    item = ClipboardItem(type="text", content="collect me")
+    import hashlib
+
+    item.hash = hashlib.sha256(b"collect me").hexdigest()
+    history_service.save_item(engine, item)
+
+    view = HistoryView()
+    view.add_item(item)
+    view.set_menu_context(engine, None, None)
+    menu = view._build_menu(item)
+
+    coll_action = next(a for a in menu.actions()
+                       if a.menu() is not None
+                       and any(x.text() == "加入收藏夹" for x in menu.actions()))
+    # 找到「加入收藏夹」子菜单动作
+    sub = next(a.menu() for a in menu.actions() if a.text() == "加入收藏夹")
+    names = [a.text() for a in sub.actions()]
+    assert "收藏夹A" in names
+    sub.actions()[0].trigger()
+    assert collection_service.list_items(engine, cid)[0].content == "collect me"
+
+
 def test_theme_scrollbar_qss():
     """主题 QSS 含滚动条样式且无未替换占位符。"""
     from ui.theme import DARK, build_stylesheet

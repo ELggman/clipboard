@@ -462,7 +462,9 @@ CREATE TABLE snippets (
 - [x] 设置页 UI（主题/字体/历史数量/图片保存/图片文件名/自动删除/开机启动；快捷键展示，自定义 V1.5）
 - [x] 自动删除定时清扫（每日 + 启动 1 分钟后；置顶条目豁免；FTS 用 rebuild 重建避免外部内容表 DELETE malformed）
 - [x] 开机启动 LaunchAgent（services/autostart.py；打包版替换 .app 路径）
-- [ ] Collections / Snippets / Timeline 页面实现
+- [x] Collections 收藏夹页（新建/重命名/删除/条目浏览/右键加入收藏夹/Actions）
+- [x] Snippet 片段页（CRUD + 复制渲染 {{date}}/{{time}}/{{uuid}}）
+- [x] Timeline 时间线页（今天/昨天/本周/更早按月分组，点击进详情）
 - [ ] 一次性准备打包：make_cert.sh 生成自签名证书
 - [ ] build.sh 打通「打包 → 签名 → 验证 checklist」
 - [ ] 性能验收：启动 <1s、万条搜索 <100ms

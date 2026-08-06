@@ -64,7 +64,8 @@ def start_workspace(app: QApplication) -> None:
     window.set_show_image_filename(bool(config["history"]["show_image_filename"]))
     window.set_search(engine)
     window.set_menu_context(engine, action_service)  # 右键菜单
-    window.set_item_activated_handler(  # 单击条目 → 详情弹层（可选中部分复制）
+    window.set_data_context(engine, image_service)  # 收藏夹/片段/时间线页
+    window.set_item_activated_handler(  # 各列表页单击 → 详情弹层（可选中部分复制）
         lambda item: detail_popup.show_item(item, image_service))
     window.show()
 

@@ -136,6 +136,39 @@ def trim_history(engine: Engine, max_items: int) -> int:
     return len(ids)
 
 
+def list_grouped(engine: Engine, limit: int = 500) -> list[tuple[str, list[ClipboardItem]]]:
+    """按时间分组：今天 / 昨天 / 本周 / 更早（按月）——Timeline 页（DEVELOPMENT.md §4.7）。"""
+    from datetime import date, timedelta
+
+    today = date.today()
+    monday = today - timedelta(days=today.weekday())
+
+    def bucket_label(dt: datetime) -> str:
+        d = dt.date()
+        if d == today:
+            return "今天"
+        if d == today - timedelta(days=1):
+            return "昨天"
+        if d >= monday:
+            return "本周"
+        return f"{dt.year}年{dt.month}月"
+
+    with make_session_factory(engine)() as session:
+        rows = session.execute(
+            select(ItemRow)
+            .order_by(ItemRow.created_at.desc(), ItemRow.id.desc())
+            .limit(limit)
+        ).scalars().all()
+
+    groups: list[tuple[str, list[ClipboardItem]]] = []
+    for row in rows:
+        label = bucket_label(row.created_at)
+        if not groups or groups[-1][0] != label:
+            groups.append((label, []))
+        groups[-1][1].append(_to_item(row))
+    return groups
+
+
 def _delete_rows_and_rebuild(conn, ids: list[int]) -> None:
     """删除内容行后重建 FTS 索引。
 

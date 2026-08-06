@@ -354,6 +354,19 @@ class HistoryView(QWidget):
                         lambda _=False, a=action: self._run_action(a, item))
             else:
                 submenu.addAction("无可用 Action").setEnabled(False)
+
+        if self._engine is not None:
+            coll_menu = menu.addMenu("加入收藏夹")
+            self._active_menus.append(coll_menu)
+            from services import collection_service
+
+            collections = collection_service.list_collections(self._engine)
+            if collections:
+                for coll in collections:
+                    coll_menu.addAction(coll["name"]).triggered.connect(
+                        lambda _=False, c=coll: self._add_to_collection(c, item))
+            else:
+                coll_menu.addAction("暂无收藏夹（先到收藏夹页创建）").setEnabled(False)
         return menu
 
     def _run_copy(self, item) -> None:
@@ -384,6 +397,12 @@ class HistoryView(QWidget):
         if self._actions.run(action, item):
             logger.info("Action 执行完成: %s", action.id)
         # 结果已写回剪贴板，watcher 会捕获为一条新历史（去重防重复）
+
+    def _add_to_collection(self, coll: dict, item) -> None:
+        from services import collection_service
+
+        if item.id and collection_service.add_item(self._engine, coll["id"], item.id):
+            logger.info("已加入收藏夹「%s」: item=%s", coll["name"], item.id)
 
     # ---- 数据 ----
 

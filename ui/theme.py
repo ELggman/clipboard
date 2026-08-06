@@ -136,6 +136,37 @@ QScrollBar::handle:horizontal:hover { background: $scrollbar_hover; }
 /* 占位提示（未实现的页面） */
 QLabel#placeholder { color: $secondary; font-size: 13px; }
 
+/* 数据页侧边列表（收藏夹/片段），与顶部导航同风格 */
+QListView#sideList {
+    background: $sidebar;
+    border: none;
+    border-radius: 10px;
+    font-size: 13px;
+    padding: 4px;
+}
+QListView#sideList::item {
+    height: 28px;
+    padding: 0 10px;
+    border-radius: 6px;
+    margin: 1px 2px;
+}
+QListView#sideList::item:hover { background: $hover; }
+QListView#sideList::item:selected {
+    background: $accent;
+    color: $accent_text;
+}
+
+/* 输入类控件（片段表单等）：NSSearchField 风格 */
+QLineEdit, QPlainTextEdit {
+    background: $search_bg;
+    border: none;
+    border-radius: 8px;
+    padding: 6px 10px;
+    font-size: 13px;
+    selection-background-color: $accent;
+}
+QPlainTextEdit { padding: 8px 10px; }
+
 /* 右键菜单：Apple 风格（圆角浮层、选中强调色、分隔线） */
 QMenu {
     background: $window;
