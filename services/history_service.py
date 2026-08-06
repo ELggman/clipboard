@@ -28,7 +28,7 @@ def compute_preview(item: ClipboardItem) -> str:
 
 
 def list_recent(engine: Engine, limit: int = 500) -> list[ClipboardItem]:
-    """加载最近 N 条（最新优先），用于启动恢复与分页（DEVELOPMENT.md §7.2）。
+    """加载最近 N 条（置顶优先，其余最新优先），启动恢复/分页/右键刷新共用。
 
     用 Session + ORM select（而非 raw SQL / Connection.scalars）：
     - raw text() 拿到的 created_at 是字符串，ORM 的 DateTime 会解析为 datetime
@@ -38,7 +38,8 @@ def list_recent(engine: Engine, limit: int = 500) -> list[ClipboardItem]:
     with make_session_factory(engine)() as session:
         rows = session.execute(
             select(ItemRow)
-            .order_by(ItemRow.created_at.desc(), ItemRow.id.desc())
+            .order_by(ItemRow.pinned.desc(), ItemRow.created_at.desc(),
+                      ItemRow.id.desc())
             .limit(limit)
         ).scalars().all()
     return [_to_item(row) for row in rows]
@@ -60,7 +61,10 @@ def search_items(engine: Engine, query: str, limit: int = 200,
             select(ItemRow).where(ItemRow.id.in_(ids))
         ).scalars().all()
     by_id = {row.id: row for row in rows}
-    return [_to_item(by_id[i]) for i in ids if i in by_id]
+    ordered = [by_id[i] for i in ids if i in by_id]
+    # 置顶优先（稳定排序，组内保持 FTS 相关顺序）
+    ordered.sort(key=lambda r: -r.pinned)
+    return [_to_item(r) for r in ordered]
 
 
 def _to_item(row: ItemRow) -> ClipboardItem:
@@ -72,7 +76,34 @@ def _to_item(row: ItemRow) -> ClipboardItem:
         file_path=row.file_path or "",
         source_app=row.source_app or "",
         created_at=row.created_at.strftime("%m-%d %H:%M"),
+        id=row.id,
+        pinned=row.pinned,
+        favorite=row.favorite,
     )
+
+
+def set_pinned(engine: Engine, item_id: int, pinned: bool) -> bool:
+    """置顶/取消置顶。返回是否成功（id=0 的未落库条目跳过）。"""
+    if not item_id:
+        return False
+    with engine.begin() as conn:
+        conn.execute(
+            text("UPDATE clipboard_items SET pinned = :p WHERE id = :id"),
+            {"p": 1 if pinned else 0, "id": item_id},
+        )
+    return True
+
+
+def set_favorite(engine: Engine, item_id: int, favorite: bool) -> bool:
+    """收藏/取消收藏。返回是否成功。"""
+    if not item_id:
+        return False
+    with engine.begin() as conn:
+        conn.execute(
+            text("UPDATE clipboard_items SET favorite = :f WHERE id = :id"),
+            {"f": 1 if favorite else 0, "id": item_id},
+        )
+    return True
 
 
 def save_item(engine: Engine, item: ClipboardItem, max_items: int = 500) -> bool:
@@ -114,6 +145,7 @@ def save_item(engine: Engine, item: ClipboardItem, max_items: int = 500) -> bool
             },
         )
         item_id = result.lastrowid
+        item.id = item_id  # 回填主键（右键菜单置顶/收藏需要）
         conn.execute(
             text("INSERT INTO items_fts(rowid, content) VALUES (:id, :content)"),
             {"id": item_id, "content": item.content},

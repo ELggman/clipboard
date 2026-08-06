@@ -200,6 +200,78 @@ def test_main_window_search_filters(tmp_path):
     w.close()
 
 
+def test_context_menu_copy_action(tmp_path):
+    """右键菜单：复制动作把内容写回剪贴板（触发式测试，不 exec 菜单）。"""
+    from AppKit import NSPasteboard, NSPasteboardTypeString
+
+    from ui.history_view import HistoryView
+
+    view = HistoryView()
+    item = ClipboardItem(type="text", content="menu copy target", id=1)
+    view.add_item(item)
+    menu = view._build_menu(item)
+
+    labels = [a.text() for a in menu.actions()]
+    assert labels == ["复制", "置顶", "收藏"]
+
+    menu.actions()[0].trigger()  # 复制
+    pb = NSPasteboard.generalPasteboard()
+    assert pb.stringForType_(NSPasteboardTypeString) == "menu copy target"
+
+
+def test_context_menu_pin_action(tmp_path):
+    """右键菜单：置顶动作写库并触发刷新回调。"""
+    from services import history_service
+    from database.engine import create_db_engine
+    from database.migrations import migrate
+    from ui.history_view import HistoryView
+
+    engine = create_db_engine(tmp_path / "m.db")
+    migrate(engine)
+    item = ClipboardItem(type="text", content="pin me")
+    import hashlib
+
+    item.hash = hashlib.sha256(b"pin me").hexdigest()
+    history_service.save_item(engine, item)
+
+    refreshed = []
+    view = HistoryView()
+    view.add_item(item)
+    view.set_menu_context(engine, None, lambda: refreshed.append(True))
+    menu = view._build_menu(item)
+    menu.actions()[1].trigger()  # 置顶
+    assert refreshed == [True]
+    assert history_service.list_recent(engine)[0].pinned == 1
+
+    # 再次构建菜单：显示「取消置顶」
+    menu2 = view._build_menu(item)
+    assert menu2.actions()[1].text() == "取消置顶"
+
+
+def test_context_menu_actions_submenu(tmp_path):
+    """右键菜单：Actions 子菜单列出可用 Action，触发执行并写回剪贴板。"""
+    from AppKit import NSPasteboard, NSPasteboardTypeString
+
+    from services.action_service import ActionService
+    from ui.history_view import HistoryView
+
+    view = HistoryView()
+    view.set_menu_context(None, ActionService(), None)
+    item = ClipboardItem(type="text", content='{"a": 1}')
+    view.add_item(item)
+    menu = view._build_menu(item)
+
+    # 用 view 持有的子菜单引用（shiboken 对 QAction.menu() 重新包装会失效）
+    submenu = view._active_menus[-1]
+    names = [a.text() for a in submenu.actions()]
+    assert "JSON Pretty" in names
+
+    json_action = next(a for a in submenu.actions() if a.text() == "JSON Pretty")
+    json_action.trigger()
+    pb = NSPasteboard.generalPasteboard()
+    assert pb.stringForType_(NSPasteboardTypeString) == '{\n  "a": 1\n}'
+
+
 def test_theme_scrollbar_qss():
     """主题 QSS 含滚动条样式且无未替换占位符。"""
     from ui.theme import DARK, build_stylesheet

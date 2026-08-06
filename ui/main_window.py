@@ -139,13 +139,31 @@ class MainWindow(QMainWindow):
         if isinstance(page, HistoryView):
             page.set_show_image_filename(show)
 
-    def load_history(self, items: list) -> None:
+    def load_history(self, items: list, limit: int | None = None) -> None:
         """启动恢复：把数据库已有历史填入列表（同时缓存为完整列表）。"""
         self._full_items = list(items)
+        if limit is not None:
+            self._history_limit = limit
         page = self._pages.widget(0)
         if isinstance(page, HistoryView):
             page.set_items(items)
         self.statusBar().showMessage(f"已恢复 {len(items)} 条历史")
+
+    def _reload_history(self) -> None:
+        """从数据库重载列表（置顶/收藏等菜单操作后刷新）。"""
+        if self._engine is None:
+            return
+        from services import history_service
+
+        self.load_history(
+            history_service.list_recent(self._engine,
+                                        limit=getattr(self, "_history_limit", 500)))
+
+    def set_menu_context(self, engine, action_service) -> None:
+        """注入右键菜单依赖（透传历史列表）。"""
+        page = self._pages.widget(0)
+        if isinstance(page, HistoryView):
+            page.set_menu_context(engine, action_service, self._reload_history)
 
     def refresh_history(self, clipboard_item, is_new: bool = True) -> None:
         """剪贴板条目回调：is_new=True 追加列表；状态栏区分新增/去重。"""

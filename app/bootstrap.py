@@ -39,10 +39,12 @@ def start_workspace(app: QApplication) -> None:
 
     # 服务
     from services import history_service
-    from services.action_service import set_clipboard_item
+    from services.action_service import ActionService, set_clipboard_item
     from services.clipboard_watcher import ClipboardWatcher
     from services.hotkey_manager import HotkeyManager
     from services.image_service import ImageService
+
+    action_service = ActionService()  # 右键 Actions 子菜单
 
     image_service = ImageService(IMAGES_DIR)
     # parent=app：QObject 挂到应用对象上，防止 start_workspace 返回后
@@ -58,6 +60,7 @@ def start_workspace(app: QApplication) -> None:
     window.set_image_service(image_service)  # 历史列表图片缩略图
     window.set_show_image_filename(bool(config["history"]["show_image_filename"]))
     window.set_search(engine)
+    window.set_menu_context(engine, action_service)  # 右键菜单
     window.show()
 
     # 关窗后（窗口隐藏）点 Dock 图标 → 应用激活 → 重新显示窗口
@@ -74,7 +77,8 @@ def start_workspace(app: QApplication) -> None:
     # 启动恢复：历史在 SQLite 持久化，重启后从数据库回填列表
     max_items = int(config["history"]["max_items"])
     restore_limit = 1000 if max_items < 0 else max_items
-    window.load_history(history_service.list_recent(engine, limit=restore_limit))
+    window.load_history(history_service.list_recent(engine, limit=restore_limit),
+                        limit=restore_limit)
 
     # 闭环：监听 → 图片落盘 → 去重落库 → UI 刷新
     def on_clipboard_changed(item: ClipboardItem) -> None:

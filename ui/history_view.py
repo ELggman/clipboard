@@ -13,6 +13,7 @@ import logging
 
 from PySide6.QtCore import QModelIndex, QRect, QSize, Qt
 from PySide6.QtGui import (
+    QContextMenuEvent,
     QFont,
     QFontMetrics,
     QPainter,
@@ -23,6 +24,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QListView,
+    QMenu,
     QStyledItemDelegate,
     QStyle,
     QVBoxLayout,
@@ -133,10 +135,10 @@ class HistoryDelegate(QStyledItemDelegate):
         # 基线 = top+15（12px 字 ascent≈10）→ 字形顶 ≈ top+5，完整落在
         # 高亮框（top+1）内——之前 top+7 时字形顶 ≈ top-3，超出高亮 3px
         # （ASCII 像素可视化实测：时间·类型顶部被高亮框截断）
-        # 第一行：时间 · 类型（小号次要色）
+        # 第一行：📌(置顶) 时间 · 类型（小号次要色）
         painter.setPen(secondary)
-        self._draw_line(painter,
-                        f"{item.created_at} · {item.type}" if item.created_at else item.type,
+        meta = f"{'📌 ' if item.pinned else ''}{item.created_at} · {item.type}" if item.created_at else item.type
+        self._draw_line(painter, meta,
                         rect.left() + self._s(_MARGIN_X),
                         rect.top() + self._s(15), small=True,
                         avail=rect.width() - 2 * self._s(_MARGIN_X))
@@ -165,9 +167,9 @@ class HistoryDelegate(QStyledItemDelegate):
                       else option.palette.text().color())
         secondary = option.palette.placeholderText().color()
 
-        # 第一行：时间 · image（次要色，居中）
+        # 第一行：📌(置顶) 时间 · image（次要色，居中）
         painter.setPen(secondary)
-        time_text = f"{item.created_at} · image" if item.created_at else "image"
+        time_text = f"{'📌 ' if item.pinned else ''}{item.created_at} · image" if item.created_at else "image"
         painter.drawText(QRect(center_x, y + size + self._s(_TIME_GAP),
                                avail, self._s(_TIME_LINE_H)),
                          Qt.AlignmentFlag.AlignHCenter, time_text)
@@ -239,11 +241,18 @@ class HistoryView(QWidget):
         self._list.setMouseTracking(True)  # hover 态需要
         self._list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._list.setWordWrap(False)
+        self._list.setContextMenuPolicy(Qt.ContextMenuPolicy.DefaultContextMenu)
 
         self._model = QStandardItemModel(self._list)
         self._list.setModel(self._model)
         self._delegate = HistoryDelegate(self._list)
         self._list.setItemDelegate(self._delegate)
+
+        # 右键菜单依赖（bootstrap 注入）
+        self._engine = None              # 置顶/收藏写库
+        self._actions = None             # ActionService（Actions 子菜单）
+        self._refresh_cb = None          # 菜单操作后重载列表
+        self._active_menus: list = []    # 持有菜单引用防 GC（PySide 包装器 Python 所有）
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -264,6 +273,83 @@ class HistoryView(QWidget):
     def set_show_image_filename(self, show: bool) -> None:
         """配置：图片条目是否显示文件名（False 时显示「时间 · image」）。"""
         self._delegate.set_show_image_filename(show)
+
+    def set_menu_context(self, engine, action_service, refresh_cb) -> None:
+        """注入右键菜单依赖：数据库引擎（置顶/收藏）、ActionService、刷新回调。"""
+        self._engine = engine
+        self._actions = action_service
+        self._refresh_cb = refresh_cb
+
+    # ---- 右键菜单 ----
+
+    def contextMenuEvent(self, event: QContextMenuEvent) -> None:
+        index = self._list.indexAt(event.pos())
+        if not index.isValid():
+            return
+        item = index.data(ROLE_ITEM)
+        if item is None:
+            return
+        self._build_menu(item).exec(event.globalPos())
+
+    def _build_menu(self, item) -> QMenu:
+        """构建右键菜单（复制 / 置顶 / 收藏 / Actions 子菜单）。
+
+        动作直接 connect triggered，可编程触发（测试友好），exec 仅用于展示。
+        self._active_menu 持有引用：防止菜单对象被 Python GC 提前回收
+        （QMenu 无 Python 引用时 C++ 对象被删除，子菜单访问报
+        'Internal C++ object already deleted'）。
+        """
+        menu = QMenu(self)
+        self._active_menus.append(menu)
+        menu.addAction("复制").triggered.connect(
+            lambda: self._run_copy(item))
+        pin_label = "取消置顶" if item.pinned else "置顶"
+        menu.addAction(pin_label).triggered.connect(
+            lambda: self._toggle_flag(item, "pinned"))
+        fav_label = "取消收藏" if item.favorite else "收藏"
+        menu.addAction(fav_label).triggered.connect(
+            lambda: self._toggle_flag(item, "favorite"))
+
+        if self._actions is not None:
+            submenu = menu.addMenu("Actions")
+            self._active_menus.append(submenu)  # 子菜单包装器 Python 所有，须持有
+            available = self._actions.actions_for(item)
+            if available:
+                for action in available:
+                    submenu.addAction(action.name).triggered.connect(
+                        lambda _=False, a=action: self._run_action(a, item))
+            else:
+                submenu.addAction("无可用 Action").setEnabled(False)
+        return menu
+
+    def _run_copy(self, item) -> None:
+        from services.action_service import set_clipboard_item
+
+        if set_clipboard_item(item):
+            logger.info("右键复制: %s", item.type)
+        else:
+            logger.warning("右键复制失败: %s", item.type)
+
+    def _toggle_flag(self, item, flag: str) -> None:
+        if not self._engine or not item.id:
+            logger.warning("条目未落库，无法%s: id=%s", flag, item.id)
+            return
+        from services import history_service
+
+        if flag == "pinned":
+            history_service.set_pinned(self._engine, item.id, not item.pinned)
+            item.pinned = 1 - item.pinned  # 同步内存对象（菜单重建/绘制 📌 依赖）
+        else:
+            history_service.set_favorite(self._engine, item.id, not item.favorite)
+            item.favorite = 1 - item.favorite
+        logger.info("已切换%s: id=%s", flag, item.id)
+        if self._refresh_cb:
+            self._refresh_cb()
+
+    def _run_action(self, action, item) -> None:
+        if self._actions.run(action, item):
+            logger.info("Action 执行完成: %s", action.id)
+        # 结果已写回剪贴板，watcher 会捕获为一条新历史（去重防重复）
 
     # ---- 数据 ----
 

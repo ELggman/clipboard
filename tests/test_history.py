@@ -188,6 +188,74 @@ def test_search_like_escapes_wildcards(engine):
     assert svc.search("进度 50_") == []
 
 
+def test_save_item_backfills_id(engine):
+    """save_item 回填主键 id（右键菜单置顶/收藏依赖）。"""
+    item = _item("id backfill")
+    assert history_service.save_item(engine, item) is True
+    assert item.id > 0
+    assert item.pinned == 0 and item.favorite == 0
+
+
+def test_pin_favorite_toggle_and_ordering(engine):
+    """置顶/收藏切换 + list_recent 置顶优先排序。"""
+    older = _item("older")
+    newer = _item("newer")
+    history_service.save_item(engine, older)
+    history_service.save_item(engine, newer)
+
+    # 置顶旧的
+    assert history_service.set_pinned(engine, older.id, True) is True
+    assert history_service.set_favorite(engine, newer.id, True) is True
+
+    items = history_service.list_recent(engine)
+    assert items[0].id == older.id          # 置顶优先
+    assert items[0].pinned == 1
+    assert items[1].id == newer.id
+    assert items[1].favorite == 1
+
+    # 取消置顶后恢复时间序
+    history_service.set_pinned(engine, older.id, False)
+    items = history_service.list_recent(engine)
+    assert items[0].id == newer.id
+
+    # id=0 的未落库条目返回 False
+    assert history_service.set_pinned(engine, 0, True) is False
+
+
+def test_search_items_pinned_first(engine):
+    """搜索结果的置顶优先排序。"""
+    from datetime import datetime as dt
+
+    from sqlalchemy import text
+
+    with engine.begin() as conn:
+        conn.execute(
+            text("INSERT INTO clipboard_items (type, content, preview, hash,"
+                 " favorite, pinned, created_at, updated_at) VALUES"
+                 " ('text', 'mysql guide a', 'a', 'pa', 0, 1, :n, :n)"),
+            {"n": dt.now()},
+        )
+        conn.execute(
+            text("INSERT INTO clipboard_items (type, content, preview, hash,"
+                 " favorite, pinned, created_at, updated_at) VALUES"
+                 " ('text', 'mysql guide b', 'b', 'pb', 0, 0, :n, :n)"),
+            {"n": dt.now()},
+        )
+    with engine.connect() as conn:
+        ids = [r[0] for r in conn.execute(
+            text("SELECT id FROM clipboard_items ORDER BY id")).fetchall()]
+    from services.search_service import SearchService
+
+    svc = SearchService(engine)
+    for i, content in zip(ids, ("mysql guide a", "mysql guide b")):
+        svc.reindex(i, content)
+
+    from services import history_service
+
+    results = history_service.search_items(engine, "mysql")
+    assert [r.id for r in results] == [ids[0], ids[1]]  # 置顶的 a 在前
+
+
 def test_preview_image_uses_filename():
     item = ClipboardItem(
         type="image", content="", file_path="/data/images/abc123.png",

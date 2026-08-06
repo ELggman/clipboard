@@ -20,6 +20,9 @@ class ClipboardItem:
     hash: str = ""            # sha256，去重键
     data: bytes = b""         # 图片原始字节（落库前临时持有）
     created_at: str = ""      # 展示用时间戳（"%m-%d %H:%M"，落库后由 list_recent 填充）
+    id: int = 0               # 数据库主键（落库后回填，右键菜单操作需要）
+    pinned: int = 0           # 置顶（列表排序优先）
+    favorite: int = 0         # 收藏
 
     def display_text(self, max_len: int = 100) -> str:
         return self.preview or self.content[:max_len]
