@@ -115,6 +115,26 @@ def test_collection_delete_cascades(engine):
     assert count == 0  # 级联已清理
 
 
+def test_list_favorites(engine):
+    """收藏条目查询（收藏夹页「★ 收藏」虚拟项数据源）。"""
+    import hashlib
+
+    from app.types import ClipboardItem
+    from services import history_service
+
+    fav = ClipboardItem(type="text", content="fav item")
+    fav.hash = hashlib.sha256(b"fav item").hexdigest()
+    plain = ClipboardItem(type="text", content="plain item")
+    plain.hash = hashlib.sha256(b"plain item").hexdigest()
+    history_service.save_item(engine, fav)
+    history_service.save_item(engine, plain)
+    history_service.set_favorite(engine, fav.id, True)
+
+    items = history_service.list_favorites(engine)
+    assert [i.content for i in items] == ["fav item"]
+    assert items[0].favorite == 1
+
+
 # ---- Timeline 分组 ----
 
 def test_list_grouped_buckets(engine):

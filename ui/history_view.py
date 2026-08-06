@@ -174,9 +174,10 @@ class HistoryDelegate(QStyledItemDelegate):
                       else option.palette.text().color())
         secondary = option.palette.placeholderText().color()
 
-        # 第一行：📌(置顶) 时间 · image · 来源（次要色，居中）
+        # 第一行：📌(置顶) ★(收藏) 时间 · image · 来源（次要色，居中）
         painter.setPen(secondary)
-        time_text = (f"{'📌 ' if item.pinned else ''}"
+        marks = ("📌 " if item.pinned else "") + ("★ " if item.favorite else "")
+        time_text = (f"{marks}"
                      f"{item.created_at} · image"
                      f"{' · ' + item.source_app if item.source_app else ''}"
                      if item.created_at else "image")
@@ -218,11 +219,12 @@ class HistoryDelegate(QStyledItemDelegate):
 
     @staticmethod
     def _meta_line(item) -> str:
-        """元信息行：📌(置顶) 时间 · 类型 · 来源软件。"""
+        """元信息行：📌(置顶) ★(收藏) 时间 · 类型 · 来源软件。"""
         base = f"{item.created_at} · {item.type}" if item.created_at else item.type
         if item.source_app:
             base += f" · {item.source_app}"
-        return f"📌 {base}" if item.pinned else base
+        marks = ("📌 " if item.pinned else "") + ("★ " if item.favorite else "")
+        return f"{marks}{base}"
 
     @staticmethod
     def _caption_lines(text: str, font: QFont, avail_width: int) -> int:
@@ -253,6 +255,7 @@ class HistoryDelegate(QStyledItemDelegate):
 
 class HistoryView(QWidget):
     item_activated = Signal(object)  # 单击条目（详情弹层）
+    feedback = Signal(str)           # 状态栏提示（置顶/收藏等菜单操作反馈）
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -386,12 +389,15 @@ class HistoryView(QWidget):
         if flag == "pinned":
             history_service.set_pinned(self._engine, item.id, not item.pinned)
             item.pinned = 1 - item.pinned  # 同步内存对象（菜单重建/绘制 📌 依赖）
+            label = "已置顶" if item.pinned else "已取消置顶"
         else:
             history_service.set_favorite(self._engine, item.id, not item.favorite)
             item.favorite = 1 - item.favorite
+            label = "已收藏" if item.favorite else "已取消收藏"
         logger.info("已切换%s: id=%s", flag, item.id)
         if self._refresh_cb:
-            self._refresh_cb()
+            self._refresh_cb()  # 先刷新（会重置状态栏），再给反馈
+        self.feedback.emit(label)  # 状态栏即时反馈（收藏后可见可感）
 
     def _run_action(self, action, item) -> None:
         if self._actions.run(action, item):

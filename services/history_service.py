@@ -8,6 +8,7 @@ from pathlib import Path
 
 from sqlalchemy import select, text
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import IntegrityError
 
 from app.types import ClipboardItem
 from database.engine import make_session_factory
@@ -136,6 +137,18 @@ def trim_history(engine: Engine, max_items: int) -> int:
     return len(ids)
 
 
+def list_favorites(engine: Engine, limit: int = 500) -> list[ClipboardItem]:
+    """收藏（favorite=1）的条目，最新在前——收藏夹页「★ 收藏」虚拟项。"""
+    with make_session_factory(engine)() as session:
+        rows = session.execute(
+            select(ItemRow)
+            .where(ItemRow.favorite == 1)
+            .order_by(ItemRow.created_at.desc(), ItemRow.id.desc())
+            .limit(limit)
+        ).scalars().all()
+    return [_to_item(row) for row in rows]
+
+
 def list_grouped(engine: Engine, limit: int = 500) -> list[tuple[str, list[ClipboardItem]]]:
     """按时间分组：今天 / 昨天 / 本周 / 更早（按月）——Timeline 页（DEVELOPMENT.md §4.7）。"""
     from datetime import date, timedelta
@@ -217,23 +230,28 @@ def save_item(engine: Engine, item: ClipboardItem, max_items: int = 500) -> bool
             )
             return False
 
-        result = conn.execute(
-            text(
-                "INSERT INTO clipboard_items"
-                " (type, content, preview, file_path, hash, source_app,"
-                "  favorite, pinned, created_at, updated_at)"
-                " VALUES (:t, :c, :p, :f, :h, :s, 0, 0, :now, :now)"
-            ),
-            {
-                "t": item.type,
-                "c": item.content,
-                "p": compute_preview(item),
-                "f": item.file_path,
-                "h": item.hash,
-                "s": item.source_app,
-                "now": now,
-            },
-        )
+        try:
+            result = conn.execute(
+                text(
+                    "INSERT INTO clipboard_items"
+                    " (type, content, preview, file_path, hash, source_app,"
+                    "  favorite, pinned, created_at, updated_at)"
+                    " VALUES (:t, :c, :p, :f, :h, :s, 0, 0, :now, :now)"
+                ),
+                {
+                    "t": item.type,
+                    "c": item.content,
+                    "p": compute_preview(item),
+                    "f": item.file_path,
+                    "h": item.hash,
+                    "s": item.source_app,
+                    "now": now,
+                },
+            )
+        except IntegrityError:
+            # 并发写入同 hash（查重 SELECT 与 INSERT 之间的窗口）→ 视为重复
+            logger.debug("INSERT 冲突（并发同类内容），按去重处理: %s", item.hash[:12])
+            return False
         item_id = result.lastrowid
         item.id = item_id  # 回填主键（右键菜单置顶/收藏需要）
         conn.execute(

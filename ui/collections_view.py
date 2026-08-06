@@ -84,40 +84,60 @@ class CollectionsView(QWidget):
 
     # ---- 数据 ----
 
+    # 「★ 收藏」虚拟项：显示所有 favorite=1 的条目（收藏后在这里能看到）
+    FAVORITES_ID = 0
+
     def reload(self) -> None:
         if self._engine is None:
             return
         current_id = self._current_id()
         self._collections = collection_service.list_collections(self._engine)
+        from services import history_service
+
+        fav_count = len(history_service.list_favorites(self._engine, limit=1000))
         self._list.blockSignals(True)
         self._list.clear()
+        fav_item = QListWidgetItem(f"★ 收藏（{fav_count}）")
+        fav_item.setData(Qt.ItemDataRole.UserRole, self.FAVORITES_ID)
+        self._list.addItem(fav_item)
         for c in self._collections:
             item = QListWidgetItem(f"{c['name']}（{c['count']}）")
             item.setData(Qt.ItemDataRole.UserRole, c["id"])
             self._list.addItem(item)
         self._list.blockSignals(False)
-        if self._collections:
-            idx = next((i for i, c in enumerate(self._collections)
-                        if c["id"] == current_id), 0)
+        if self._list.count():
+            idx = 0
+            if current_id:
+                idx = next((i for i, c in enumerate(self._collections)
+                            if c["id"] == current_id), 0) + 1
             self._list.setCurrentRow(idx)
         else:
             self._model.clear()
 
     def _current_id(self) -> int:
         row = self._list.currentRow()
-        if 0 <= row < len(self._collections):
-            return self._collections[row]["id"]
-        return 0
+        if row == 0:
+            return self.FAVORITES_ID  # 「★ 收藏」虚拟项
+        if 0 < row <= len(self._collections):
+            return self._collections[row - 1]["id"]
+        return -1
 
     def _on_select(self, row: int) -> None:
         self._model.clear()
-        if 0 <= row < len(self._collections) and self._engine is not None:
-            cid = self._collections[row]["id"]
-            for item in collection_service.list_items(self._engine, cid):
-                row_item = QStandardItem()
-                row_item.setData(item, ROLE_ITEM)
-                row_item.setEditable(False)
-                self._model.appendRow(row_item)
+        if self._engine is None or row < 0:
+            return
+        cid = self._current_id()
+        if cid == self.FAVORITES_ID:
+            from services import history_service
+
+            items = history_service.list_favorites(self._engine)
+        else:
+            items = collection_service.list_items(self._engine, cid)
+        for item in items:
+            row_item = QStandardItem()
+            row_item.setData(item, ROLE_ITEM)
+            row_item.setEditable(False)
+            self._model.appendRow(row_item)
 
     # ---- 收藏夹操作 ----
 
@@ -142,6 +162,8 @@ class CollectionsView(QWidget):
         if item is None:
             return
         cid = item.data(Qt.ItemDataRole.UserRole)
+        if cid == self.FAVORITES_ID:
+            return  # 虚拟项不可重命名/删除
         menu = QMenu(self)
         self._active_menus.append(menu)
         menu.addAction("重命名").triggered.connect(lambda: self._rename(item))
@@ -167,15 +189,16 @@ class CollectionsView(QWidget):
             return
         item = index.data(ROLE_ITEM)
         cid = self._current_id()
-        if item is None or cid == 0:
+        if item is None or cid < 0:
             return
 
         menu = QMenu(self)
         self._active_menus.append(menu)
         menu.addAction("复制").triggered.connect(
             lambda: self._copy(item))
-        menu.addAction("从收藏夹移除").triggered.connect(
-            lambda: self._remove(cid, item))
+        if cid != self.FAVORITES_ID:  # 「★ 收藏」虚拟项无移除操作
+            menu.addAction("从收藏夹移除").triggered.connect(
+                lambda: self._remove(cid, item))
         submenu = menu.addMenu("Actions")
         self._active_menus.append(submenu)
         self._fill_actions_submenu(submenu, item)

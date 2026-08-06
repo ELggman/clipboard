@@ -394,15 +394,16 @@ def test_collections_view_create_and_items(tmp_path):
     migrate(engine)
     view = CollectionsView()
     view.set_context(engine)
-    assert view._list.count() == 0
+    assert view._list.count() == 1  # 只有「★ 收藏」虚拟项
 
     collection_service.create_collection(engine, "工作")
     view.reload()
-    assert view._list.count() == 1
-    assert "工作" in view._list.item(0).text()
+    assert view._list.count() == 2  # 「★ 收藏」虚拟项 + 收藏夹
+    assert "★ 收藏" in view._list.item(0).text()
+    assert "工作" in view._list.item(1).text()
 
-    # 选中收藏夹 → 空条目
-    view._list.setCurrentRow(0)
+    # 选中真实收藏夹 → 空条目
+    view._list.setCurrentRow(1)
     assert view._model.rowCount() == 0
     view.close()
 
@@ -463,6 +464,46 @@ def test_history_menu_add_to_collection(tmp_path):
     assert "收藏夹A" in names
     sub.actions()[0].trigger()
     assert collection_service.list_items(engine, cid)[0].content == "collect me"
+
+
+def test_favorite_feedback_and_virtual_collection(tmp_path):
+    """收藏反馈链路：★ 标记 + feedback 信号 + 收藏夹页「★ 收藏」可见。"""
+    from database.engine import create_db_engine
+    from database.migrations import migrate
+    from services import history_service
+    from ui.collections_view import CollectionsView
+    from ui.history_view import HistoryView
+
+    engine = create_db_engine(tmp_path / "f.db")
+    migrate(engine)
+    item = ClipboardItem(type="text", content="fav target")
+    import hashlib
+
+    item.hash = hashlib.sha256(b"fav target").hexdigest()
+    history_service.save_item(engine, item)
+
+    # 历史页：收藏 → feedback 信号 + 条目 ★ 标记
+    view = HistoryView()
+    view.add_item(item)
+    view.set_menu_context(engine, None, None)
+    messages = []
+    view.feedback.connect(messages.append)
+    menu = view._build_menu(item)
+    menu.actions()[2].trigger()  # 收藏
+    assert messages == ["已收藏"]
+    assert item.favorite == 1
+    from ui.history_view import HistoryDelegate
+
+    assert "★" in HistoryDelegate._meta_line(item)
+
+    # 收藏夹页：「★ 收藏」虚拟项显示该条目
+    cv = CollectionsView()
+    cv.set_context(engine)
+    assert "★ 收藏" in cv._list.item(0).text()
+    cv._list.setCurrentRow(0)  # 选中虚拟项
+    assert cv._model.rowCount() == 1
+    assert cv._model.index(0, 0).data(ROLE_ITEM).content == "fav target"
+    cv.close()
 
 
 def test_theme_scrollbar_qss():

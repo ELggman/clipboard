@@ -46,6 +46,7 @@ class MainWindow(QMainWindow):
         self._engine = None          # FTS5 搜索（bootstrap 注入）
         self._full_items: list = []  # 完整历史缓存（清空搜索时恢复）
         self._build_ui()
+        self._bind_feedback()
         self.statusBar().showMessage("就绪")
 
     def _build_ui(self) -> None:
@@ -189,6 +190,12 @@ class MainWindow(QMainWindow):
                     page.set_context(engine, image_service)
                 else:
                     page.set_context(engine)
+
+    def _bind_feedback(self) -> None:
+        """历史页菜单操作反馈 → 状态栏。"""
+        page = self._pages.widget(0)
+        if isinstance(page, HistoryView):
+            page.feedback.connect(self.statusBar().showMessage)
 
     def set_settings_context(self, config, appliers, config_path=None) -> None:
         """设置页注入：当前配置 + 生效回调（bootstrap 装配）。"""
