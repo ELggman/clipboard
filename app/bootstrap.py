@@ -45,6 +45,17 @@ def start_workspace(app: QApplication) -> None:
     window = MainWindow()
     window.show()
 
+    # 关窗后（窗口隐藏）点 Dock 图标 → 应用激活 → 重新显示窗口
+    from PySide6.QtCore import Qt
+
+    def on_app_state(state) -> None:
+        if state == Qt.ApplicationState.ApplicationActive and not window.isVisible():
+            window.show()
+            window.raise_()
+            logger.info("主窗口已重新显示")
+
+    app.applicationStateChanged.connect(on_app_state)
+
     # 启动恢复：历史在 SQLite 持久化，重启后从数据库回填列表
     max_items = int(config["history"]["max_items"])
     restore_limit = 1000 if max_items < 0 else max_items

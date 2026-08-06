@@ -66,7 +66,22 @@ class ClipboardWatcher(QObject):
     def _parse(pb: NSPasteboard) -> ClipboardItem | None:
         source_app = ClipboardWatcher._frontmost_app()
 
-        # 1) File：public.file-url 可能返回单个字符串或数组，兼容两者
+        # 1) Image：PNG 优先，TIFF 兜底。
+        #    必须放在 File 之前：应用内复制图片（截图/VS Code/Safari）时
+        #    剪贴板常同时带 file-url 与图片数据，用户意图是图片内容
+        #    → 存 images/；仅 file-url（无图片数据）才是文件复制。
+        data = pb.dataForType_(NSPasteboardTypePNG)
+        if data is None:
+            data = pb.dataForType_(NSPasteboardTypeTIFF)
+        if data is not None:
+            return ClipboardItem(
+                type=IMAGE,
+                data=bytes(data),
+                source_app=source_app,
+                hash=ClipboardWatcher._digest(bytes(data)),
+            )
+
+        # 2) File：public.file-url 可能返回单个字符串或数组，兼容两者
         raw = pb.propertyListForType_(NSPasteboardTypeFileURL)
         urls = raw if isinstance(raw, list) else ([raw] if raw else [])
         if urls:
@@ -77,18 +92,6 @@ class ClipboardWatcher(QObject):
                 file_path=str(path),
                 source_app=source_app,
                 hash=ClipboardWatcher._digest(str(path)),
-            )
-
-        # 2) Image：PNG 优先，TIFF 兜底
-        data = pb.dataForType_(NSPasteboardTypePNG)
-        if data is None:
-            data = pb.dataForType_(NSPasteboardTypeTIFF)
-        if data is not None:
-            return ClipboardItem(
-                type=IMAGE,
-                data=bytes(data),
-                source_app=source_app,
-                hash=ClipboardWatcher._digest(bytes(data)),
             )
 
         # 3) URL / Text

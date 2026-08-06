@@ -70,6 +70,16 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._nav)
         layout.addLayout(right, 1)
 
+    def closeEvent(self, event) -> None:
+        """关窗不退出：隐藏窗口、保持后台监听（菜单栏应用模式）。
+
+        Dock 图标点击 → 应用激活 → 由 bootstrap 的 applicationStateChanged
+        钩子重新显示（DEVELOPMENT.md §4.1 常驻设计）。
+        """
+        event.ignore()
+        self.hide()
+        logger.info("主窗口已隐藏（应用继续后台运行）")
+
     def _on_search(self, query: str) -> None:
         page = self._pages.currentWidget()
         if hasattr(page, "set_query"):

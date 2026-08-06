@@ -8,7 +8,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from AppKit import NSPasteboard, NSPasteboardTypeFileURL, NSPasteboardTypeString
+from io import BytesIO
+
+from PIL import Image
+from AppKit import NSPasteboard, NSPasteboardTypeFileURL, NSPasteboardTypePNG, NSPasteboardTypeString
 
 from services.clipboard_watcher import ClipboardWatcher
 
@@ -51,6 +54,34 @@ def test_parse_file_url():
 def test_parse_blank_ignored():
     pb = _set_text("   ")
     assert ClipboardWatcher._parse(pb) is None
+
+
+def _png_bytes(color: str = "red") -> bytes:
+    buf = BytesIO()
+    Image.new("RGB", (4, 4), color).save(buf, "PNG")
+    return buf.getvalue()
+
+
+def test_parse_image_with_file_url_prefers_image():
+    """应用内复制图片（截图等）同时带 file-url 与图片数据 → 应判为 image。"""
+    pb = NSPasteboard.generalPasteboard()
+    pb.clearContents()
+    pb.setData_forType_(_png_bytes(), NSPasteboardTypePNG)
+    pb.setString_forType_("file:///tmp/shot.png", NSPasteboardTypeFileURL)
+    item = ClipboardWatcher._parse(pb)
+    assert item is not None
+    assert item.type == "image"
+    assert item.data  # 原始字节交给 image_service 落盘
+
+
+def test_parse_image_only_data():
+    """纯截图复制（无 file-url）→ image。"""
+    pb = NSPasteboard.generalPasteboard()
+    pb.clearContents()
+    pb.setData_forType_(_png_bytes("blue"), NSPasteboardTypePNG)
+    item = ClipboardWatcher._parse(pb)
+    assert item is not None
+    assert item.type == "image"
 
 
 def test_parse_priority_url_over_text():
