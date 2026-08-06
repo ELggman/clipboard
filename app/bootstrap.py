@@ -39,6 +39,7 @@ def start_workspace(app: QApplication) -> None:
 
     # 服务
     from services import history_service
+    from services.action_service import set_clipboard_item
     from services.clipboard_watcher import ClipboardWatcher
     from services.hotkey_manager import HotkeyManager
     from services.image_service import ImageService
@@ -51,10 +52,12 @@ def start_workspace(app: QApplication) -> None:
 
     # UI（装配完成前不弹窗）
     from ui.main_window import MainWindow
+    from ui.quick_paste_popup import QuickPastePopup
 
     window = MainWindow()
     window.set_image_service(image_service)  # 历史列表图片缩略图
     window.set_show_image_filename(bool(config["history"]["show_image_filename"]))
+    window.set_search(engine)
     window.show()
 
     # 关窗后（窗口隐藏）点 Dock 图标 → 应用激活 → 重新显示窗口
@@ -91,25 +94,37 @@ def start_workspace(app: QApplication) -> None:
     watcher.changed.connect(on_clipboard_changed)
     watcher.start()
 
-    hotkey.activated.connect(_on_quick_paste)
+    # Quick Paste（⌘⇧V）：最近 10 条 → 弹出层 → Enter 重新复制
+    popup = QuickPastePopup()
+
+    def on_quick_paste() -> None:
+        items = history_service.list_recent(engine, limit=10)
+        if not items:
+            logger.info("Quick Paste：暂无历史")
+            return
+        logger.info("Quick Paste：弹出 %d 条", len(items))
+        popup.populate(items)
+        popup.show_near_cursor()
+
+    def on_picked(item) -> None:
+        if set_clipboard_item(item):
+            logger.info("Quick Paste：已重新复制 %s", item.type)
+        popup.close()
+
+    popup.selected.connect(on_picked)
+    hotkey.activated.connect(on_quick_paste)
     hotkey.permission_required.connect(_on_permission_required)
     if config["hotkey"]["enabled"]:
         hotkey.start()
+
+    # 测试/调试钩子（不对外暴露 API）
+    app._quick_paste_popup = popup
+    app._on_quick_paste = on_quick_paste
 
     logger.info("启动完成")
 
 
 # ---- 回调 ----
-
-def _on_quick_paste() -> None:
-    """⌘⇧V：弹出最近历史。
-
-    TODO: 查最近 N 条（去重后）→ QuickPastePopup.populate()；
-    selected 信号 → set_clipboard_text 重新复制。
-    accessory 激活策略见 DEVELOPMENT.md §4.3。
-    """
-    logger.info("Quick Paste 触发（实现中）")
-
 
 def _on_permission_required() -> None:
     """辅助功能未授权：提示引导，不弹窗打断（V1.5 做引导对话框）。"""

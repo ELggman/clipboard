@@ -41,17 +41,38 @@ def list_recent(engine: Engine, limit: int = 500) -> list[ClipboardItem]:
             .order_by(ItemRow.created_at.desc(), ItemRow.id.desc())
             .limit(limit)
         ).scalars().all()
-    return [
-        ClipboardItem(
-            type=row.type,
-            content=row.content or "",
-            preview=row.preview or "",
-            file_path=row.file_path or "",
-            source_app=row.source_app or "",
-            created_at=row.created_at.strftime("%m-%d %H:%M"),
-        )
-        for row in rows
-    ]
+    return [_to_item(row) for row in rows]
+
+
+def search_items(engine: Engine, query: str, limit: int = 200,
+                 regex: bool = False) -> list[ClipboardItem]:
+    """FTS5 搜索并返回展示用条目（最新优先），搜索栏接线用。
+
+    SearchService 只返回 id 列表，这里按 id 顺序取行映射回 ClipboardItem。
+    """
+    from services.search_service import SearchService
+
+    ids = SearchService(engine).search(query, limit=limit, regex=regex)
+    if not ids:
+        return []
+    with make_session_factory(engine)() as session:
+        rows = session.execute(
+            select(ItemRow).where(ItemRow.id.in_(ids))
+        ).scalars().all()
+    by_id = {row.id: row for row in rows}
+    return [_to_item(by_id[i]) for i in ids if i in by_id]
+
+
+def _to_item(row: ItemRow) -> ClipboardItem:
+    """ORM 行 → 展示用 ClipboardItem（created_at 格式化为 %m-%d %H:%M）。"""
+    return ClipboardItem(
+        type=row.type,
+        content=row.content or "",
+        preview=row.preview or "",
+        file_path=row.file_path or "",
+        source_app=row.source_app or "",
+        created_at=row.created_at.strftime("%m-%d %H:%M"),
+    )
 
 
 def save_item(engine: Engine, item: ClipboardItem, max_items: int = 500) -> bool:

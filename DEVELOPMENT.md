@@ -449,12 +449,17 @@ CREATE TABLE snippets (
 
 ## 11. 下一步 TODO（按序）
 
-- [ ] `git init` 初始化仓库 + `.gitignore`（venv、dist、logs、images）
-- [ ] 搭建 venv，补齐依赖（pyobjc-framework-Quartz、pyinstaller）
-- [ ] 按 §3.1 落地 ClipboardWatcher（dev 版先跑通文本监听 + 去重 + SQLite 落库）
-- [ ] 按 §3.2 落地 CGEventTap 热键 + 辅助功能引导窗口
-- [ ] 主窗口骨架（左导航/搜索栏/状态栏/主题切换）
-- [ ] Actions 接口 + 内置 11 个 Action
+- [x] `git init` 初始化仓库 + `.gitignore`（venv、dist、logs、images）
+- [x] 搭建 venv，补齐依赖（pyobjc-framework-Quartz、pyinstaller）
+- [x] 按 §3.1 落地 ClipboardWatcher（文本/URL/图片/文件监听 + 去重 + SQLite 落库）
+- [x] 按 §3.2 落地 CGEventTap 热键（辅助功能引导窗口 V1.5）
+- [x] 主窗口骨架（顶部导航/搜索栏/状态栏/主题切换）
+- [x] Actions 接口 + 内置 11 个 Action
+- [x] Quick Paste 弹窗闭环（⌘⇧V → 最近 10 条 → Enter 回写剪贴板）
+- [x] 搜索栏接线（防抖 150ms + FTS5 过滤，清空恢复完整历史）
+- [ ] 右键菜单（Copy / Pin / Favorite / Add To Collection / Action 子菜单）
+- [ ] 设置页 UI（历史数量/图片保存/自动删除/开机启动/快捷键/字体/主题）
+- [ ] Collections / Snippets / Timeline 页面实现
 - [ ] 一次性准备打包：make_cert.sh 生成自签名证书
 - [ ] build.sh 打通「打包 → 签名 → 验证 checklist」
 - [ ] 性能验收：启动 <1s、万条搜索 <100ms

@@ -4,7 +4,7 @@
 """
 import logging
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import (
     QLineEdit,
     QListView,
@@ -41,6 +41,8 @@ class MainWindow(QMainWindow):
         self.resize(380, 560)
         self.setMinimumSize(380, 560)
         self.statusBar().setSizeGripEnabled(False)
+        self._engine = None          # FTS5 搜索（bootstrap 注入）
+        self._full_items: list = []  # 完整历史缓存（清空搜索时恢复）
         self._build_ui()
         self.statusBar().showMessage("就绪")
 
@@ -84,6 +86,12 @@ class MainWindow(QMainWindow):
 
         layout.addLayout(right, 1)
 
+        # 搜索防抖：停止输入 150ms 后才查询（FTS5 查询不频繁触发）
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(150)
+        self._search_timer.timeout.connect(self._apply_search)
+
     def closeEvent(self, event) -> None:
         """关窗不退出：隐藏窗口、保持后台监听（菜单栏应用模式）。
 
@@ -95,9 +103,29 @@ class MainWindow(QMainWindow):
         logger.info("主窗口已隐藏（应用继续后台运行）")
 
     def _on_search(self, query: str) -> None:
-        page = self._pages.currentWidget()
-        if hasattr(page, "set_query"):
-            page.set_query(query)
+        """输入即防抖重启，停止输入 150ms 后执行查询。"""
+        self._search_timer.start()
+
+    def _apply_search(self) -> None:
+        """执行查询：非空 → FTS5 搜索回填；清空 → 恢复完整历史。"""
+        page = self._pages.widget(0)
+        if not isinstance(page, HistoryView):
+            return
+        query = self._search.text().strip()
+        if not query:
+            page.set_items(getattr(self, "_full_items", []))
+            return
+        if self._engine is None:
+            return
+        from services import history_service
+
+        results = history_service.search_items(self._engine, query)
+        page.set_items(results)
+        self.statusBar().showMessage(f"搜索「{query}」：{len(results)} 条")
+
+    def set_search(self, engine) -> None:
+        """注入数据库引擎（FTS5 搜索用，bootstrap 装配时调用）。"""
+        self._engine = engine
 
     def set_image_service(self, service) -> None:
         """注入图片服务（历史列表缩略图用）。"""
@@ -112,7 +140,8 @@ class MainWindow(QMainWindow):
             page.set_show_image_filename(show)
 
     def load_history(self, items: list) -> None:
-        """启动恢复：把数据库已有历史填入列表。"""
+        """启动恢复：把数据库已有历史填入列表（同时缓存为完整列表）。"""
+        self._full_items = list(items)
         page = self._pages.widget(0)
         if isinstance(page, HistoryView):
             page.set_items(items)
@@ -120,6 +149,8 @@ class MainWindow(QMainWindow):
 
     def refresh_history(self, clipboard_item, is_new: bool = True) -> None:
         """剪贴板条目回调：is_new=True 追加列表；状态栏区分新增/去重。"""
+        if is_new:
+            self._full_items.insert(0, clipboard_item)
         page = self._pages.widget(0)
         if isinstance(page, HistoryView):
             if is_new:

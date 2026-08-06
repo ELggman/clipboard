@@ -8,7 +8,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PIL import Image
-from PySide6.QtCore import QRect
+from PySide6.QtCore import QRect, Qt
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QStyleOptionViewItem
 
 from app.types import ClipboardItem
@@ -136,6 +137,67 @@ def test_history_set_items_restores():
     assert view._model.rowCount() == 3
     first = view._model.index(0, 0).data(ROLE_ITEM)
     assert first.content == "item 0"  # 列表第一行 = items[0]（最新在前）
+
+
+def test_quick_paste_popup_enter_selects(tmp_path):
+    """Quick Paste：populate 后按 Enter 发出 selected 信号并关闭。"""
+    from PySide6.QtTest import QTest
+
+    from ui.quick_paste_popup import QuickPastePopup
+
+    popup = QuickPastePopup()
+    picked = []
+    popup.selected.connect(lambda item: picked.append(item))
+    items = [
+        ClipboardItem(type="text", content="first item"),
+        ClipboardItem(type="url", content="https://example.com"),
+    ]
+    popup.populate(items)
+    pytest_app.processEvents()
+    assert popup._list.count() == 2
+    assert popup._list.currentRow() == 0
+
+    QTest.keyClick(popup._list, Qt.Key.Key_Return)
+    assert len(picked) == 1
+    assert picked[0].content == "first item"
+    assert not popup.isVisible()  # 选择后自动关闭
+    popup.deleteLater()
+
+
+def test_main_window_search_filters(tmp_path):
+    """搜索栏接线：输入过滤列表，清空恢复完整历史。"""
+    from services import history_service
+    from database.engine import create_db_engine
+    from database.migrations import migrate
+    from ui.main_window import MainWindow
+
+    engine = create_db_engine(tmp_path / "s.db")
+    migrate(engine)
+    for content in ("mysql install", "postgres guide", "docker compose"):
+        item = ClipboardItem(type="text", content=content)
+        import hashlib
+        item.hash = hashlib.sha256(content.encode()).hexdigest()
+        history_service.save_item(engine, item)
+
+    w = MainWindow()
+    w.set_search(engine)
+    w.load_history(history_service.list_recent(engine))
+    w.show()
+    pytest_app.processEvents()
+    view = w._pages.widget(0)
+    assert view._model.rowCount() == 3
+
+    # 输入 "mysql" → 防抖 150ms 后过滤
+    w._search.setText("mysql")
+    QTest.qWait(250)  # 等待防抖定时器触发
+    assert view._model.rowCount() == 1
+    assert view._model.index(0, 0).data(ROLE_ITEM).content == "mysql install"
+
+    # 清空 → 恢复
+    w._search.clear()
+    QTest.qWait(250)
+    assert view._model.rowCount() == 3
+    w.close()
 
 
 def test_theme_scrollbar_qss():

@@ -104,6 +104,43 @@ def test_save_item_fills_display_fields(engine):
     assert img.created_at
 
 
+def test_search_items_matches_and_orders(engine):
+    """搜索栏接线：FTS5 命中并按相关度 id 顺序返回展示条目。"""
+    from datetime import datetime as dt
+
+    from sqlalchemy import text
+
+    with engine.begin() as conn:
+        conn.execute(
+            text("INSERT INTO clipboard_items (type, content, preview, hash,"
+                 " favorite, pinned, created_at, updated_at) VALUES"
+                 " ('text', 'mysql install notes', 'mysql install', 'h1', 0, 0, :n, :n)"),
+            {"n": dt.now()},
+        )
+        conn.execute(
+            text("INSERT INTO clipboard_items (type, content, preview, hash,"
+                 " favorite, pinned, created_at, updated_at) VALUES"
+                 " ('text', 'postgres setup guide', 'postgres', 'h2', 0, 0, :n, :n)"),
+            {"n": dt.now()},
+        )
+    with engine.connect() as conn:
+        ids = [r[0] for r in conn.execute(
+            text("SELECT id FROM clipboard_items ORDER BY id")).fetchall()]
+    from services import history_service
+
+    for i, content in [(ids[0], "mysql install notes"), (ids[1], "postgres setup guide")]:
+        from services.search_service import SearchService
+
+        SearchService(engine).reindex(i, content)
+
+    results = history_service.search_items(engine, "mysql")
+    assert [r.content for r in results] == ["mysql install notes"]
+    assert results[0].created_at  # 展示字段已填充
+
+    # 无命中返回空
+    assert history_service.search_items(engine, "docker") == []
+
+
 def test_preview_image_uses_filename():
     item = ClipboardItem(
         type="image", content="", file_path="/data/images/abc123.png",

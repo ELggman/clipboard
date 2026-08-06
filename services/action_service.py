@@ -2,11 +2,17 @@
 
 写回用 NSPasteboard 直接设置，避免 pyperclip 的子进程开销；
 主程序只依赖本服务，不 import 任何具体 Action 实现（插件化约束）。
+本模块同时是剪贴板写入工具（Quick Paste / Action 回写共用）。
 """
 import logging
 from pathlib import Path
 
-from AppKit import NSPasteboard, NSPasteboardTypeString
+from AppKit import (
+    NSPasteboard,
+    NSPasteboardTypeFileURL,
+    NSPasteboardTypePNG,
+    NSPasteboardTypeString,
+)
 
 from actions import load_actions
 from actions._base import ClipboardAction
@@ -19,6 +25,32 @@ def set_clipboard_text(text: str) -> None:
     pb = NSPasteboard.generalPasteboard()
     pb.clearContents()
     pb.setString_forType_(text, NSPasteboardTypeString)
+
+
+def set_clipboard_item(item) -> bool:
+    """按类型把剪贴板项重新写回系统剪贴板（Quick Paste / 点击复制共用）。
+
+    图片读回 PNG 字节；文件写 file-url + 文件路径（支持多类型粘贴）。
+    返回是否成功。
+    """
+    pb = NSPasteboard.generalPasteboard()
+    pb.clearContents()
+    try:
+        if item.type in ("text", "url") and item.content:
+            pb.setString_forType_(item.content, NSPasteboardTypeString)
+        elif item.type == "image" and item.file_path:
+            data = Path(item.file_path).read_bytes()
+            pb.setData_forType_(data, NSPasteboardTypePNG)
+            pb.setString_forType_(item.preview or item.file_path, NSPasteboardTypeString)
+        elif item.type == "file" and item.file_path:
+            pb.setString_forType_(Path(item.file_path).as_uri(), NSPasteboardTypeFileURL)
+            pb.setPropertyList_forType_([item.file_path], "NSFilenamesPboardType")
+        else:
+            return False
+        return True
+    except OSError:
+        logger.exception("剪贴板写入失败: %s", item.file_path or item.content)
+        return False
 
 
 class ActionService:
