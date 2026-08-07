@@ -41,7 +41,7 @@ class CleanDataDialog(QDialog):
         layout.setContentsMargins(20, 16, 20, 16)
         layout.setSpacing(10)
 
-        # 筛选行：时间 + 类型
+        # 筛选行：时间 + 类型 + 会话
         filter_row = QHBoxLayout()
         filter_row.setSpacing(6)
         self._days = QComboBox()
@@ -52,6 +52,13 @@ class CleanDataDialog(QDialog):
         for value, label in _TYPE_OPTIONS:
             self._types.addItem(label, value)
         filter_row.addWidget(self._types)
+        self._sessions = QComboBox()
+        from services import session_service
+
+        self._sessions.addItem("全部会话", None)
+        for s in session_service.list_sessions(engine):
+            self._sessions.addItem(s["name"], s["id"])
+        filter_row.addWidget(self._sessions)
         query_btn = QPushButton("查询")
         query_btn.setObjectName("secondaryButton")
         query_btn.clicked.connect(self._query)
@@ -93,8 +100,9 @@ class CleanDataDialog(QDialog):
 
         days = self._days.currentData()
         item_type = self._types.currentData()
+        session_id = self._sessions.currentData()
         self._items = history_service.list_older_than(
-            self._engine, days, item_type)
+            self._engine, days, item_type, session_id)
         self._list.clear()
         for item in self._items:
             row = QListWidgetItem(

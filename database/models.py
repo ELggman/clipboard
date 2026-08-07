@@ -27,6 +27,8 @@ class ClipboardItem(Base):
     pinned: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    # v4：所属会话（默认 1 = 普通会话；server_default 兼容裸 SQL 插入）
+    session_id: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
     # Code Mode 元数据（§8.16）
     # server_default：裸 SQL INSERT（测试/迁移回填）不提供这些列时也不违反约束
     language: Mapped[str | None] = mapped_column(String(32))
@@ -38,6 +40,17 @@ class ClipboardItem(Base):
     sensitive: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     sensitive_type: Mapped[str | None] = mapped_column(String(32))
     expires_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+
+class Session(Base):
+    """会话：任务型内容分组（v4）。默认「普通」会话不可删除。"""
+
+    __tablename__ = "sessions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    is_default: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
 
 
 class Collection(Base):

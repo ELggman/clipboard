@@ -20,6 +20,10 @@ privacy:
   temp_minutes: 5          # save_temporarily 的到期分钟数
   ignored_apps: []         # 来源应用排除列表，如 ["1Password"]（§9.5）
 
+# 会话（v4）：任务型内容分组。激活会话 = 新复制内容保存目标，重启恢复
+session:
+  active_id: 1             # 1 = 「普通」默认会话
+
 hotkey:
   enabled: true
   keycode: 9               # 物理键 vk 码：V = 9（不依赖键盘布局）

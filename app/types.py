@@ -24,6 +24,9 @@ class ClipboardItem:
     id: int = 0               # 数据库主键（落库后回填，右键菜单操作需要）
     pinned: int = 0           # 置顶（列表排序优先）
     favorite: int = 0         # 收藏
+    # 会话（v4）：所属会话 id 与展示名（_to_item LEFT JOIN 填充）
+    session_id: int = 0
+    session_name: str = ""
     # Code Mode 元数据（§8.16；text 条目也可能带辅助语言信息，§8.4.3）
     language: str = ""            # 检测语言：python / javascript / ...
     language_confidence: float = 0.0   # 0.0 - 1.0

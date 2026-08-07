@@ -13,6 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from app.types import ClipboardItem
 from database.engine import make_session_factory
 from database.models import ClipboardItem as ItemRow
+from database.models import Session
 
 logger = logging.getLogger(__name__)
 
@@ -39,47 +40,63 @@ def _parse_expires(expires_at: str) -> datetime | None:
         return None
 
 
-def list_recent(engine: Engine, limit: int = 500) -> list[ClipboardItem]:
+def list_recent(engine: Engine, limit: int = 500,
+                session_id: int | None = None) -> list[ClipboardItem]:
     """加载最近 N 条（置顶优先，其余最新优先），启动恢复/分页/右键刷新共用。
 
+    session_id=None 返回全部会话（旧调用兼容）；指定则只返回该会话。
     用 Session + ORM select（而非 raw SQL / Connection.scalars）：
     - raw text() 拿到的 created_at 是字符串，ORM 的 DateTime 会解析为 datetime
     - Connection.execute(select(实体)).scalars() 返回的是第一列(id)而非实体，
       必须走 Session（实测踩坑）
     """
     with make_session_factory(engine)() as session:
-        rows = session.execute(
-            select(ItemRow)
-            .order_by(ItemRow.pinned.desc(), ItemRow.created_at.desc(),
-                      ItemRow.id.desc())
-            .limit(limit)
-        ).scalars().all()
-    return [_to_item(row) for row in rows]
+        stmt = select(ItemRow).order_by(
+            ItemRow.pinned.desc(), ItemRow.created_at.desc(), ItemRow.id.desc())
+        if session_id is not None:
+            stmt = stmt.where(ItemRow.session_id == session_id)
+        rows = session.execute(stmt.limit(limit)).scalars().all()
+        names = dict(session.execute(
+            select(Session.id, Session.name)).all())
+    return [_to_item(row, names.get(row.session_id, "")) for row in rows]
 
 
 def search_items(engine: Engine, query: str, limit: int = 200,
-                 regex: bool = False) -> list[ClipboardItem]:
+                 regex: bool = False,
+                 session_id: int | None = None) -> list[ClipboardItem]:
     """FTS5 搜索并返回展示用条目（最新优先），搜索栏接线用。
 
     SearchService 只返回 id 列表，这里按 id 顺序取行映射回 ClipboardItem。
+    session_id=None 全局搜索；指定则限定该会话。
     """
     from services.search_service import SearchService
 
-    ids = SearchService(engine).search(query, limit=limit, regex=regex)
+    ids = SearchService(engine).search(query, limit=limit, regex=regex,
+                                       session_id=session_id)
     if not ids:
         return []
     with make_session_factory(engine)() as session:
         rows = session.execute(
             select(ItemRow).where(ItemRow.id.in_(ids))
         ).scalars().all()
+        names = dict(session.execute(
+            select(Session.id, Session.name)).all())
     by_id = {row.id: row for row in rows}
     ordered = [by_id[i] for i in ids if i in by_id]
     # 置顶优先（稳定排序，组内保持 FTS 相关顺序）
     ordered.sort(key=lambda r: -r.pinned)
-    return [_to_item(r) for r in ordered]
+    return [_to_item(r, names.get(r.session_id, "")) for r in ordered]
 
 
-def _to_item(row: ItemRow) -> ClipboardItem:
+def _session_names(engine: Engine) -> dict[int, str]:
+    """会话 id → 名称（全局搜索结果展示来源用）。"""
+    from database.models import Session
+
+    with make_session_factory(engine)() as session:
+        return dict(session.execute(select(Session.id, Session.name)).all())
+
+
+def _to_item(row: ItemRow, session_name: str = "") -> ClipboardItem:
     """ORM 行 → 展示用 ClipboardItem（created_at 格式化为 %m-%d %H:%M）。"""
     return ClipboardItem(
         type=row.type,
@@ -91,6 +108,8 @@ def _to_item(row: ItemRow) -> ClipboardItem:
         id=row.id,
         pinned=row.pinned,
         favorite=row.favorite,
+        session_id=row.session_id or 0,
+        session_name=session_name,
         language=row.language or "",
         language_confidence=row.language_confidence or 0.0,
         line_count=row.line_count or 0,
@@ -210,8 +229,12 @@ def list_favorites(engine: Engine, limit: int = 500) -> list[ClipboardItem]:
     return [_to_item(row) for row in rows]
 
 
-def list_grouped(engine: Engine, limit: int = 500) -> list[tuple[str, list[ClipboardItem]]]:
-    """按时间分组：今天 / 昨天 / 本周 / 更早（按月）——Timeline 页（DEVELOPMENT.md §4.7）。"""
+def list_grouped(engine: Engine, limit: int = 500,
+                 session_id: int | None = None) -> list[tuple[str, list[ClipboardItem]]]:
+    """按时间分组：今天 / 昨天 / 本周 / 更早（按月）——Timeline 页（DEVELOPMENT.md §4.7）。
+
+    session_id=None 全部会话（时间线保持全局）；指定则限定会话。
+    """
     from datetime import date, timedelta
 
     today = date.today()
@@ -228,18 +251,20 @@ def list_grouped(engine: Engine, limit: int = 500) -> list[tuple[str, list[Clipb
         return f"{dt.year}年{dt.month}月"
 
     with make_session_factory(engine)() as session:
-        rows = session.execute(
-            select(ItemRow)
-            .order_by(ItemRow.created_at.desc(), ItemRow.id.desc())
-            .limit(limit)
-        ).scalars().all()
+        stmt = select(ItemRow).order_by(
+            ItemRow.created_at.desc(), ItemRow.id.desc())
+        if session_id is not None:
+            stmt = stmt.where(ItemRow.session_id == session_id)
+        rows = session.execute(stmt.limit(limit)).scalars().all()
+        names = dict(session.execute(
+            select(Session.id, Session.name)).all())
 
     groups: list[tuple[str, list[ClipboardItem]]] = []
     for row in rows:
         label = bucket_label(row.created_at)
         if not groups or groups[-1][0] != label:
             groups.append((label, []))
-        groups[-1][1].append(_to_item(row))
+        groups[-1][1].append(_to_item(row, names.get(row.session_id, "")))
     return groups
 
 
@@ -262,8 +287,9 @@ def delete_item(engine: Engine, item_id: int) -> list[str]:
 
 
 def list_older_than(engine: Engine, days: int = 0,
-                    item_type: str = "") -> list[ClipboardItem]:
-    """筛选条件查询（清理数据预览用）：时间（N 天前，0=全部）+ 类型，最新在前。"""
+                    item_type: str = "",
+                    session_id: int | None = None) -> list[ClipboardItem]:
+    """筛选条件查询（清理数据预览用）：时间（N 天前，0=全部）+ 类型 + 会话，最新在前。"""
     from datetime import timedelta
 
     stmt = select(ItemRow).order_by(
@@ -273,6 +299,8 @@ def list_older_than(engine: Engine, days: int = 0,
         stmt = stmt.where(ItemRow.created_at < cutoff)
     if item_type:
         stmt = stmt.where(ItemRow.type == item_type)
+    if session_id is not None:
+        stmt = stmt.where(ItemRow.session_id == session_id)
     with make_session_factory(engine)() as session:
         rows = session.execute(stmt).scalars().all()
     return [_to_item(row) for row in rows]
@@ -373,10 +401,10 @@ def save_item(engine: Engine, item: ClipboardItem, max_items: int = 500) -> bool
                 text(
                     "INSERT INTO clipboard_items"
                     " (type, content, preview, file_path, hash, source_app,"
-                    "  favorite, pinned, created_at, updated_at,"
+                    "  favorite, pinned, created_at, updated_at, session_id,"
                     "  language, language_confidence, line_count, character_count,"
                     "  is_structured, sensitive, sensitive_type, expires_at)"
-                    " VALUES (:t, :c, :p, :f, :h, :s, 0, 0, :now, :now,"
+                    " VALUES (:t, :c, :p, :f, :h, :s, 0, 0, :now, :now, :sid,"
                     "  :lang, :lang_conf, :lines, :chars, :structured,"
                     "  :sens, :sens_type, :expires)"
                 ),
@@ -388,6 +416,7 @@ def save_item(engine: Engine, item: ClipboardItem, max_items: int = 500) -> bool
                     "h": item.hash,
                     "s": item.source_app,
                     "now": now,
+                    "sid": item.session_id or 1,  # 默认归「普通」会话
                     "lang": item.language or None,
                     "lang_conf": item.language_confidence or None,
                     "lines": item.line_count or 0,

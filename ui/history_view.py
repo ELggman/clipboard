@@ -23,11 +23,14 @@ from PySide6.QtGui import (
     QStandardItemModel,
 )
 from PySide6.QtWidgets import (
+    QComboBox,
     QDialog,
+    QHBoxLayout,
     QListView,
     QListWidget,
     QListWidgetItem,
     QMenu,
+    QPushButton,
     QStyledItemDelegate,
     QStyle,
     QVBoxLayout,
@@ -84,6 +87,7 @@ class HistoryDelegate(QStyledItemDelegate):
         self._pixmap_cache: dict[str, QPixmap] = {}
         self._main_font_px = BASE_FONT_PX        # 基准字号（设置页可调）
         self._small_font_px = BASE_FONT_SMALL_PX
+        self._view_session_id: int | None = None  # 当前视图会话（None=全局搜索）
 
     def set_image_service(self, service) -> None:
         self._provider = service
@@ -96,6 +100,19 @@ class HistoryDelegate(QStyledItemDelegate):
         """设置页字体大小：主文字 + 次要文字（默认主-2），随 scale 等比例放大。"""
         self._main_font_px = max(10, main_px)
         self._small_font_px = max(9, small_px if small_px is not None else main_px - 2)
+
+    def set_view_session_id(self, session_id: int | None) -> None:
+        """设置当前视图会话：None=全局搜索（所有条目显示 [会话名] 标签）；
+        指定会话 → 非本会话条目才显示标签（本会话视图内不冗余标注）。"""
+        self._view_session_id = session_id
+
+    def _session_tag(self, item) -> str:
+        """会话来源标签（全局搜索/跨会话视图用）。"""
+        if item.session_name and (
+                self._view_session_id is None
+                or item.session_id != self._view_session_id):
+            return f"[{item.session_name}] "
+        return ""
 
     def set_scale(self, scale: float) -> None:
         """窗口放大时等比例放大所有几何（字号/缩略图/行高/间距）。"""
@@ -199,9 +216,9 @@ class HistoryDelegate(QStyledItemDelegate):
         # 基线 = top+15（12px 字 ascent≈10）→ 字形顶 ≈ top+5，完整落在
         # 高亮框（top+1）内——之前 top+7 时字形顶 ≈ top-3，超出高亮 3px
         # （ASCII 像素可视化实测：时间·类型顶部被高亮框截断）
-        # 第一行：📌(置顶) 时间 · 类型 · 来源软件（小号次要色）
+        # 第一行：[会话名] 📌(置顶) 时间 · 类型 · 来源软件（小号次要色）
         painter.setPen(secondary)
-        meta = self._meta_line(item)
+        meta = self._session_tag(item) + self._meta_line(item)
         self._draw_line(painter, meta,
                         rect.left() + self._s(_MARGIN_X),
                         rect.top() + self._s(15), small=True,
@@ -318,9 +335,9 @@ class HistoryDelegate(QStyledItemDelegate):
                       else option.palette.text().color())
         secondary = option.palette.placeholderText().color()
 
-        # meta：📌 ★ 🐍 Python · 08-06 18:00 · 8 行 · 来源
+        # meta：[会话名] 📌 ★ 🐍 Python · 08-06 18:00 · 8 行 · 来源
         painter.setPen(secondary)
-        self._draw_line(painter, self._code_meta(item),
+        self._draw_line(painter, self._session_tag(item) + self._code_meta(item),
                         rect.left() + self._s(_MARGIN_X), rect.top() + self._s(15),
                         small=True, avail=rect.width() - 2 * self._s(_MARGIN_X))
 
@@ -356,7 +373,7 @@ class HistoryDelegate(QStyledItemDelegate):
             base += f" · {item.source_app}"
         marks = ("📌 " if item.pinned else "") + ("★ " if item.favorite else "")
         painter.setPen(secondary)
-        self._draw_line(painter, f"🔐 {marks}{base}",
+        self._draw_line(painter, f"🔐 {self._session_tag(item)}{marks}{base}",
                         rect.left() + self._s(_MARGIN_X), rect.top() + self._s(15),
                         small=True, avail=rect.width() - 2 * self._s(_MARGIN_X))
 
@@ -442,9 +459,30 @@ class HistoryView(QWidget):
         self._refresh_cb = None          # 菜单操作后重载列表
         self._active_menus: list = []    # 持有菜单引用防 GC（PySide 包装器 Python 所有）
 
+        # 会话（v4）：下拉切换 + 管理菜单；bootstrap 注入
+        self._session_service = None
+        self._on_active_changed = None   # 切换会话 → 持久化激活（bootstrap 闭包）
+        self._view_session_id: int | None = 1  # 当前视图会话（None=全局搜索）
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
+
+        # 会话行：下拉（显示名 · 条数）+ ⋯ 管理菜单
+        session_row = QHBoxLayout()
+        session_row.setContentsMargins(8, 6, 8, 0)
+        session_row.setSpacing(4)
+        self._session_combo = QComboBox()
+        self._session_combo.setObjectName("sessionCombo")
+        self._session_combo.currentIndexChanged.connect(self._on_session_changed)
+        session_row.addWidget(self._session_combo, 1)
+        self._session_menu_btn = QPushButton("⋯")
+        self._session_menu_btn.setObjectName("sessionMenuBtn")
+        self._session_menu_btn.setFixedWidth(28)
+        self._session_menu_btn.clicked.connect(self._show_session_menu)
+        session_row.addWidget(self._session_menu_btn)
+        layout.addLayout(session_row)
+
         layout.addWidget(self._type_tabs)
         layout.addWidget(self._list)
 
@@ -502,6 +540,118 @@ class HistoryView(QWidget):
         self._engine = engine
         self._actions = action_service
         self._refresh_cb = refresh_cb
+
+    # ---- 会话（v4）----
+
+    def set_session_context(self, engine, session_service,
+                            on_active_changed=None) -> None:
+        """注入会话服务 + 激活切换回调（bootstrap 装配）。"""
+        self._engine = engine
+        self._session_service = session_service
+        self._on_active_changed = on_active_changed
+
+    def reload_sessions(self, active_id: int) -> None:
+        """填充会话下拉（显示名 · 条数），并激活 active_id 刷新视图。"""
+        if self._session_service is None or self._engine is None:
+            return
+        sessions = self._session_service.list_sessions(self._engine)
+        self._session_combo.blockSignals(True)
+        self._session_combo.clear()
+        for s in sessions:
+            self._session_combo.addItem(f"{s['name']} · {s['count']} 条", s["id"])
+        idx = self._session_combo.findData(active_id)
+        self._session_combo.setCurrentIndex(max(0, idx))
+        self._session_combo.blockSignals(False)
+        self.load_session(active_id)
+
+    def load_session(self, session_id: int) -> None:
+        """切换到指定会话视图（delegate 标签状态 + 从数据库加载）。"""
+        self._view_session_id = session_id
+        self._delegate.set_view_session_id(session_id)
+        if self._engine is not None:
+            from services import history_service
+
+            self.set_items(history_service.list_recent(
+                self._engine,
+                limit=getattr(self, "_history_limit", 500),
+                session_id=session_id))
+
+    def set_global_view(self) -> None:
+        """全局搜索视图：显示所有会话条目并标注 [会话名] 标签。"""
+        self._view_session_id = None
+        self._delegate.set_view_session_id(None)
+
+    def set_view_session_id(self, session_id: int | None) -> None:
+        """设置视图会话（不影响数据，只控制 [会话名] 标签显示）。"""
+        self._view_session_id = session_id
+        self._delegate.set_view_session_id(session_id)
+
+    def _on_session_changed(self, row: int) -> None:
+        sid = self._session_combo.itemData(row)
+        if sid is None or sid == self._view_session_id:
+            return
+        self.load_session(sid)
+        if self._on_active_changed is not None:
+            self._on_active_changed(sid)  # bootstrap：持久化 + 主窗口同步
+        self.feedback.emit("已切换到会话")
+
+    def _show_session_menu(self) -> None:
+        """会话管理菜单：新建 / 重命名当前 / 删除当前。"""
+        menu = QMenu(self)
+        self._active_menus.append(menu)
+        menu.addAction("新建会话…").triggered.connect(self._create_session)
+        current = self._session_combo.currentData()
+        if current is not None and current != 1:
+            menu.addAction("重命名当前会话…").triggered.connect(
+                lambda: self._rename_session(current))
+            menu.addAction("删除当前会话").triggered.connect(
+                lambda: self._delete_session(current))
+        else:
+            menu.addAction("重命名/删除仅对非默认会话可用").setEnabled(False)
+        menu.exec(self._session_menu_btn.mapToGlobal(
+            self._session_menu_btn.rect().bottomLeft()))
+
+    def _create_session(self) -> None:
+        if self._session_service is None:
+            return
+        from ui.dialogs import NameDialog
+
+        dialog = NameDialog("新建会话", "名称：", placeholder="如：论文写作优化",
+                            confirm_text="创建")
+        if dialog.exec() == QDialog.DialogCode.Accepted and dialog.text():
+            sid = self._session_service.create_session(self._engine, dialog.text())
+            if sid:
+                self.reload_sessions(sid)  # 新建后自动激活
+                if self._on_active_changed is not None:
+                    self._on_active_changed(sid)
+                self.feedback.emit(f"已切换到「{dialog.text()}」")
+
+    def _rename_session(self, session_id: int) -> None:
+        if self._session_service is None:
+            return
+        from ui.dialogs import NameDialog
+
+        dialog = NameDialog("重命名会话", "名称：", confirm_text="保存")
+        if dialog.exec() == QDialog.DialogCode.Accepted and dialog.text():
+            self._session_service.rename_session(self._engine, session_id,
+                                                 dialog.text())
+            self.reload_sessions(self._view_session_id or 1)
+
+    def _delete_session(self, session_id: int) -> None:
+        if self._session_service is None:
+            return
+        from ui.dialogs import ConfirmDialog
+
+        dialog = ConfirmDialog(
+            "删除会话",
+            "删除会话后，其中的内容将全部移回「普通」会话（不丢数据）。确定删除？",
+            confirm_text="删除")
+        if dialog.exec() == ConfirmDialog.DialogCode.Accepted:
+            if self._session_service.delete_session(self._engine, session_id):
+                self.reload_sessions(1)  # 回到普通会话
+                if self._on_active_changed is not None:
+                    self._on_active_changed(1)
+                self.feedback.emit("会话已删除，内容已移回「普通」")
 
     # ---- 点击 ----
 

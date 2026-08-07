@@ -6,6 +6,8 @@ import logging
 
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import (
+    QComboBox,
+    QHBoxLayout,
     QLabel,
     QLineEdit,
     QListView,
@@ -46,6 +48,7 @@ class MainWindow(QMainWindow):
         self.statusBar().setSizeGripEnabled(False)
         self._engine = None          # FTS5 搜索（bootstrap 注入）
         self._full_items: list = []  # 完整历史缓存（清空搜索时恢复）
+        self._active_session_id = 1  # 当前激活会话（保存目标 + 本会话搜索）
         # 隐私模式状态指示（§9.4）：右侧永久控件 📋 监控中 / 🔒 监控已暂停
         self._privacy_label = QLabel("📋 监控中")
         self._privacy_label.setObjectName("privacyStatus")
@@ -76,13 +79,25 @@ class MainWindow(QMainWindow):
         right = QVBoxLayout()
         right.setContentsMargins(10, 8, 10, 0)
         right.setSpacing(8)
+        search_row = QHBoxLayout()
+        search_row.setSpacing(6)
         self._search = QLineEdit()
         self._search.setObjectName("searchBox")
         self._search.setFixedHeight(30)
         self._search.setPlaceholderText("搜索历史…")
         self._search.setClearButtonEnabled(True)
         self._search.textChanged.connect(self._on_search)
-        right.addWidget(self._search)
+        search_row.addWidget(self._search, 1)
+        # 搜索范围：全部会话 / 本会话（会话机制，v4）
+        self._search_scope = QComboBox()
+        self._search_scope.setObjectName("searchScope")
+        self._search_scope.setFixedHeight(30)
+        self._search_scope.addItem("全部会话", None)
+        self._search_scope.addItem("本会话", "current")
+        self._search_scope.currentIndexChanged.connect(
+            lambda _: self._apply_search() if self._search.text().strip() else None)
+        search_row.addWidget(self._search_scope)
+        right.addLayout(search_row)
 
         self._pages = QStackedWidget()
         for name, view_cls in _NAV_PAGES:
@@ -132,21 +147,31 @@ class MainWindow(QMainWindow):
         self._search_timer.start()
 
     def _apply_search(self) -> None:
-        """执行查询：非空 → FTS5 搜索回填；清空 → 恢复完整历史。"""
+        """执行查询：非空 → FTS5 搜索回填；清空 → 恢复完整历史。
+
+        范围：全部会话（结果带 [会话名] 标签）或本会话（当前激活）。
+        """
         page = self._pages.widget(0)
         if not isinstance(page, HistoryView):
             return
         query = self._search.text().strip()
         if not query:
+            page.set_view_session_id(self._active_session_id)
             page.set_items(getattr(self, "_full_items", []))
             return
         if self._engine is None:
             return
         from services import history_service
 
-        results = history_service.search_items(self._engine, query)
+        sid = (self._active_session_id
+               if self._search_scope.currentData() == "current" else None)
+        results = history_service.search_items(self._engine, query,
+                                               session_id=sid)
+        page.set_global_view()  # 全局/跨会话结果标注 [会话名] 标签
         page.set_items(results)
-        self.statusBar().showMessage(f"搜索「{query}」：{len(results)} 条")
+        scope = "本会话" if sid is not None else "全部会话"
+        self.statusBar().showMessage(
+            f"搜索「{query}」（{scope}）：{len(results)} 条")
 
     def set_search(self, engine) -> None:
         """注入数据库引擎（FTS5 搜索用，bootstrap 装配时调用）。"""
@@ -177,18 +202,39 @@ class MainWindow(QMainWindow):
             self._history_limit = limit
         page = self._pages.widget(0)
         if isinstance(page, HistoryView):
+            page.set_view_session_id(self._active_session_id)
             page.set_items(items)
         self.statusBar().showMessage(f"已恢复 {len(items)} 条历史")
 
     def _reload_history(self) -> None:
-        """从数据库重载列表（置顶/收藏等菜单操作后刷新）。"""
+        """从数据库重载列表（置顶/收藏等菜单操作后刷新；当前激活会话）。"""
         if self._engine is None:
             return
         from services import history_service
 
         self.load_history(
-            history_service.list_recent(self._engine,
-                                        limit=getattr(self, "_history_limit", 500)))
+            history_service.list_recent(
+                self._engine,
+                limit=getattr(self, "_history_limit", 500),
+                session_id=self._active_session_id))
+
+    def set_active_session(self, session_id: int) -> None:
+        """当前激活会话（保存目标 + 本会话搜索范围），bootstrap 切换时同步。"""
+        self._active_session_id = session_id
+
+    def set_session_context(self, engine, session_service,
+                            on_active_changed=None) -> None:
+        """注入会话服务（转发历史页）。"""
+        page = self._pages.widget(0)
+        if isinstance(page, HistoryView):
+            page.set_session_context(engine, session_service,
+                                     on_active_changed)
+
+    def reload_sessions(self, active_id: int) -> None:
+        """填充会话下拉并激活视图（bootstrap 启动/会话增删后调用）。"""
+        page = self._pages.widget(0)
+        if isinstance(page, HistoryView):
+            page.reload_sessions(active_id)
 
     def set_menu_context(self, engine, action_service) -> None:
         """注入右键菜单依赖（透传历史列表）。"""

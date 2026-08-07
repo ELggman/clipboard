@@ -12,7 +12,7 @@ from .models import Base
 
 logger = logging.getLogger(__name__)
 
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 
 # 幂等扩展 DDL（FTS5 全文索引 + 常用索引）
 _EXTRA_DDL = [
@@ -35,6 +35,8 @@ def migrate(engine: Engine) -> None:
         _upgrade_v2_collection_snapshot(engine)
     if current < 3:
         _upgrade_v3_code_privacy(engine)
+    if current < 4:
+        _upgrade_v4_sessions(engine)
 
     with engine.begin() as conn:
         for ddl in _EXTRA_DDL:
@@ -106,3 +108,38 @@ def _upgrade_v3_code_privacy(engine: Engine) -> None:
             "CREATE INDEX IF NOT EXISTS ix_items_expires "
             "ON clipboard_items (expires_at)"))
     logger.info("v3 迁移：code/privacy 元数据列已添加")
+
+
+def _upgrade_v4_sessions(engine: Engine) -> None:
+    """v3 → v4：会话机制——sessions 表 + clipboard_items.session_id。
+
+    默认会话固定 id=1（普通）；历史数据全部归入。删除会话时内容
+    移回普通会话（session_service.delete_session）。
+    """
+    with engine.begin() as conn:
+        conn.execute(text(
+            "CREATE TABLE IF NOT EXISTS sessions ("
+            " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            " name VARCHAR(128) NOT NULL,"
+            " is_default INTEGER DEFAULT 0,"
+            " created_at DATETIME NOT NULL)"))
+        # 幂等插入默认会话（id=1 固定）
+        row = conn.execute(text(
+            "SELECT id FROM sessions WHERE id = 1")).fetchone()
+        if row is None:
+            conn.execute(text(
+                "INSERT INTO sessions (id, name, is_default, created_at)"
+                " VALUES (1, '普通', 1, datetime('now'))"))
+        else:
+            conn.execute(text(
+                "UPDATE sessions SET is_default = 1 WHERE id = 1"))
+        cols = {r[1] for r in conn.execute(
+            text("PRAGMA table_info(clipboard_items)")).fetchall()}
+        if "session_id" not in cols:
+            conn.execute(text(
+                "ALTER TABLE clipboard_items ADD COLUMN session_id"
+                " INTEGER NOT NULL DEFAULT 1"))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_items_session"
+            " ON clipboard_items (session_id)"))
+    logger.info("v4 迁移：会话机制已建立（默认「普通」id=1）")

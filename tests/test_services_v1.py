@@ -326,10 +326,10 @@ def test_migration_v3_from_v2(tmp_path):
         cols = {r[1] for r in conn.execute(
             text("PRAGMA table_info(clipboard_items)")).fetchall()}
         assert {"language", "language_confidence", "line_count", "sensitive",
-                "sensitive_type", "expires_at"} <= cols
+                "sensitive_type", "expires_at", "session_id"} <= cols
         row = conn.execute(text("SELECT content FROM clipboard_items")).fetchone()
         assert row[0] == "old row"
-        assert conn.execute(text("PRAGMA user_version")).scalar() == 3
+        assert conn.execute(text("PRAGMA user_version")).scalar() == 4
     eng.dispose()
 
 

@@ -828,7 +828,7 @@ def test_context_menu_bottom_row_hit(tmp_path):
     view = HistoryView()
     items = [ClipboardItem(type="text", content=f"item {i}") for i in range(30)]
     view.set_items(items)
-    view.resize(420, 300)
+    view.resize(420, 400)  # 高度含顶部会话行（v4）+ 类型筛选条
     view.show()
     pytest_app.processEvents()
 
@@ -1215,3 +1215,53 @@ def test_detail_popup_code_copy_selected_multiline():
     pb = NSPasteboard.generalPasteboard()
     assert pb.stringForType_(NSPasteboardTypeString) == "line one\nline t"
     popup.close()
+
+
+def test_history_session_switch_reloads(tmp_path):
+    """会话下拉切换：视图内容随会话切换（v4）。"""
+    import hashlib
+
+    from database.engine import create_db_engine
+    from database.migrations import migrate
+    from services import history_service, session_service
+    from ui.history_view import HistoryView
+
+    engine = create_db_engine(tmp_path / "ss.db")
+    migrate(engine)
+    session_service.ensure_default(engine)
+    sid = session_service.create_session(engine, "任务A")
+    for content, sid_ in (("默认内容", 1), ("任务内容", sid)):
+        item = ClipboardItem(type="text", content=content, session_id=sid_)
+        item.hash = hashlib.sha256(content.encode()).hexdigest()
+        history_service.save_item(engine, item)
+
+    view = HistoryView()
+    view.set_session_context(engine, session_service)
+    view.reload_sessions(1)
+    assert view._session_combo.count() == 2
+    assert view._model.index(0, 0).data(ROLE_ITEM).content == "默认内容"
+
+    view._session_combo.setCurrentIndex(1)  # 切到任务A
+    pytest_app.processEvents()
+    assert view._model.index(0, 0).data(ROLE_ITEM).content == "任务内容"
+    assert view._view_session_id == sid
+    view.close()
+
+
+def test_global_search_shows_session_tag():
+    """全局搜索结果：[会话名] 标签由 delegate 渲染（跨会话标注）。"""
+    from ui.history_view import HistoryDelegate
+
+    delegate = HistoryDelegate()
+    other = ClipboardItem(type="text", content="x", session_id=2,
+                          session_name="论文", created_at="08-07 10:00")
+    same = ClipboardItem(type="text", content="y", session_id=1,
+                         session_name="普通", created_at="08-07 10:00")
+
+    delegate.set_view_session_id(None)  # 全局：都标注
+    assert delegate._session_tag(other) == "[论文] "
+    assert delegate._session_tag(same) == "[普通] "
+
+    delegate.set_view_session_id(2)  # 会话视图：本会话不标注
+    assert delegate._session_tag(other) == ""
+    assert delegate._session_tag(same) == "[普通] "

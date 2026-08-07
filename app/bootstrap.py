@@ -61,6 +61,15 @@ def start_workspace(app: QApplication) -> None:
     engine = create_db_engine(DB_PATH)
     migrate(engine)
 
+    # 会话（v4）：默认会话 + 恢复上次激活的会话（第二天继续任务的场景）
+    from services import session_service
+
+    session_service.ensure_default(engine)
+    active_id = int(config["session"].get("active_id", 1))
+    session_ids = {s["id"] for s in session_service.list_sessions(engine)}
+    if active_id not in session_ids:
+        active_id = 1  # 配置指向已删除会话 → 回退默认
+
     # 服务
     from services import history_service
     from services.action_service import ActionService, set_clipboard_item
@@ -89,6 +98,20 @@ def start_workspace(app: QApplication) -> None:
     window.set_search(engine)
     window.set_menu_context(engine, action_service)  # 右键菜单
     window.set_data_context(engine, image_service)  # 收藏夹/片段/时间线页
+
+    # 会话：激活状态注入历史页 + 切换持久化（重启恢复）
+    def set_active_session(sid: int) -> None:
+        config["session"]["active_id"] = sid
+        from app.config import save_user_config
+
+        save_user_config({"session": {"active_id": sid}})
+        window.set_active_session(sid)
+        logger.info("已切换激活会话: id=%s", sid)
+
+    window.set_active_session(active_id)
+    window.set_session_context(engine, session_service,
+                               on_active_changed=set_active_session)
+    window.reload_sessions(active_id)  # 填充会话下拉 + 加载激活会话视图
     window.set_item_activated_handler(  # 各列表页单击 → 详情弹层（可选中部分复制）
         lambda item: detail_popup.show_item(item, image_service))
     window.show()
@@ -115,10 +138,12 @@ def start_workspace(app: QApplication) -> None:
     app.applicationStateChanged.connect(on_app_state)
 
     # 启动恢复：历史在 SQLite 持久化，重启后从数据库回填列表
+    # （仅恢复**激活会话**的内容；其余会话通过下拉切换查看）
     max_items = int(config["history"]["max_items"])
     restore_limit = 1000 if max_items < 0 else max_items
-    window.load_history(history_service.list_recent(engine, limit=restore_limit),
-                        limit=restore_limit)
+    window.load_history(history_service.list_recent(
+        engine, limit=restore_limit, session_id=active_id),
+        limit=restore_limit)
 
     # 设置页：改动即生效的回调
     from ui.theme import apply_theme
@@ -193,6 +218,8 @@ def start_workspace(app: QApplication) -> None:
 
     # 闭环：监听 → 隐私管线（排除/敏感策略）→ 图片落盘 → 去重落库 → UI 刷新
     def on_clipboard_changed(item: ClipboardItem) -> None:
+        # 保存到当前激活会话（任务型内容分组，v4）
+        item.session_id = int(config["session"].get("active_id", 1))
         decision = apply_privacy_policy(item, config["privacy"])
         if decision != "save":
             # 跳过原因（不含内容，§9.23）→ 状态栏 3 秒反馈

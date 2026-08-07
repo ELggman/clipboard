@@ -2,7 +2,7 @@
 
 > 基于《Clipboard Workspace.md》需求文档编写。本文档是开发与打包的长期参考，随项目演进持续更新。
 >
-> 最后更新：2026-08-07（Code Mode / Privacy Mode 落地，新增 §3.6/§3.7/§7.2 v3）
+> 最后更新：2026-08-07（Session 会话机制落地，新增 §3.8/§7.2 v4）
 
 ---
 
@@ -304,6 +304,30 @@ def load_actions(extra_dirs: list[Path] = ()) -> list[ClipboardAction]:
 - **日志规范（§9.23）**：一律不含剪贴板原文——`reason=application_exclusion` / `type=api_key action=warn` 结构，搜索日志不记查询词
 - **删除保护**：见 §3.5——删除历史只清理受管图片，绝不碰用户文档
 
+### 3.8 Session 会话机制（v4）
+
+**定位**：任务型内容分组。论文翻译/写作优化等场景的大量复制粘贴会把其他内容挤到很靠后、次日难以找回——会话把内容按任务隔离。默认「普通」会话接收所有内容；可新建任务会话并**激活**，激活期间新复制内容保存到该会话；可随时切回普通。
+
+**数据**：`sessions` 表（id/name/is_default/created_at，默认 id=1「普通」）+ `clipboard_items.session_id`（v4 迁移，旧数据默认归普通）。
+
+**服务（`services/session_service.py`）**：
+
+- `ensure_default`（幂等，启动调用）/ `list_sessions`（含 count）/ `create` / `rename` / `delete`
+- `delete_session`：**内容移回普通会话**（`UPDATE session_id=1`）——会话是临时分组，内容不丢；默认会话禁删禁改名
+- 激活持久化：`config/settings.yaml` 的 `session.active_id`，切换即写回，**重启恢复上次激活的会话**（次日继续任务的核心场景）
+
+**查询过滤**：`history_service.list_recent / search_items / list_grouped / list_older_than` 全部加 `session_id: int | None = None`（None=全部，旧调用兼容）；`search_service.search` 三条路径（FTS5/LIKE/regex）同样支持。
+
+**UI**：
+
+- 历史页顶部**会话下拉**（「普通 · 33 条」）+ ⋯ 管理菜单（新建/重命名/删除当前，删除红色确认提示"内容将移回普通"）；下方类型筛选 tabs 保持不变
+- 启动恢复仅加载**激活会话**内容；其余会话通过下拉切换查看
+- 搜索框旁**范围下拉**（全部会话/本会话）；全局搜索结果 meta 行加 `[会话名]` 前缀（delegate `_session_tag`：仅当条目不属于当前视图会话时标注——会话视图内不冗余）
+- 清理数据弹窗加会话筛选维度
+- 置顶在会话视图内正常（list_recent pinned DESC）；收藏快照独立不受影响；时间线保持全局
+
+**坑**：会话下拉必须在 bootstrap 装配时显式 `reload_sessions(active_id)` 填充（仅注入 context 不会填充，实测下拉空）。
+
 ---
 
 ## 4. 应用形态与 macOS 集成
@@ -430,6 +454,8 @@ CREATE TABLE clipboard_items (
     pinned      INTEGER DEFAULT 0,
     created_at  DATETIME NOT NULL,
     updated_at  DATETIME NOT NULL,
+    -- v4（Session 会话，2026-08-07）：所属会话，默认 1 = 普通
+    session_id  INTEGER NOT NULL DEFAULT 1,
     -- v3（Code Mode / Privacy Mode，2026-08-07）
     language            VARCHAR(32),    -- 检测语言（code 必有；text 可留辅助字段）
     language_confidence REAL,           -- 0.0-1.0
@@ -472,13 +498,23 @@ CREATE TABLE snippets (
     description TEXT,
     created_at  DATETIME NOT NULL
 );
+
+-- v4：会话（任务型内容分组，默认「普通」id=1 不可删）
+CREATE TABLE sessions (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       VARCHAR(128) NOT NULL,
+    is_default INTEGER DEFAULT 0,
+    created_at DATETIME NOT NULL
+);
+CREATE INDEX ix_items_session ON clipboard_items (session_id);
 ```
 
 - FTS5 同步：应用层在插入/删除后同步更新 items_fts（10k 量级足够，不引触发器）；code 内容正常全文检索
 - 自动删除策略（1/7/30/90/365 天/永不）：后台 `QTimer` 每日扫描一次，删除时同步删**受管**图片文件（置顶豁免，§9.22）
 - 历史数量上限（100/500/1000/无限）：插入前裁剪最旧记录（**置顶优先豁免**，与 list_recent 排序一致）
-- 迁移：`PRAGMA user_version`（当前 = 3）；v2 快照化、v3 加元数据列均用 `PRAGMA table_info` 防重 + ALTER TABLE（新列全部 nullable 或带 DEFAULT，SQLite 限制）
+- 迁移：`PRAGMA user_version`（当前 = 4）；v2 快照化、v3 加元数据列、v4 会话均用 `PRAGMA table_info` 防重 + ALTER TABLE（新列全部 nullable 或带 DEFAULT，SQLite 限制）
 - 文件大小上限：`history.max_file_size_mb`（默认 50MB，0=不限制），on_clipboard_changed 对 FILE 类型 stat 超限跳过
+- 会话：`sessions` 表 + `clipboard_items.session_id`（§3.8）；默认会话幂等创建
 
 ### 7.3 Snippet 变量
 
@@ -521,6 +557,8 @@ CREATE TABLE snippets (
 | Swift 判成 Python | import+缩进加分过宽 | 缩进加分要求强信号 ≥2（§3.6） |
 | 微信 URL 判成敏感 | 分享链接 token= 查询参数命中 token 正则 | URL 类型跳过敏感检测（§3.7） |
 | 复制新文本把置顶挤下去 | add_item 固定插行 0 | 插到置顶组之后（pinned DESC 一致） |
+| 会话下拉为空 | 只注入 context 未填充下拉 | bootstrap 装配时显式 `reload_sessions(active_id)`（§3.8） |
+| 全局搜索看不到会话来源 | 条目未带 session 名 | `_to_item` LEFT JOIN sessions 填 `session_name`，delegate `_session_tag` 标注（§3.8） |
 
 ---
 
@@ -530,6 +568,7 @@ CREATE TABLE snippets (
 |---|---|---|
 | V1 | 文本/图片/URL/文件历史、搜索、收藏、Snippet、Action | §3 全部就绪 |
 | V1.5 | 代码/图片/敏感条目渲染、列表卡片底色、详情弹窗、清理数据弹窗 | §3.5/§3.6 就绪 |
+| V1.5 | **Session 会话**（任务分组/激活切换/搜索范围/来源标注） | §3.8 就绪 |
 | V1.5 | **Code Mode**（代码检测/语言识别/语法高亮/代码 Actions）、**Privacy Mode**（暂停监控/应用排除/敏感检测/遮蔽/自动过期） | 新增.md §8/§9，本版本已完成 |
 | V1.5 | OCR、图片预览、拖拽、多窗口 | OCR 插件化（§6.4），拖拽/多窗口在 ui/ 层扩展 |
 | V2 | AI 插件（Summarize/Translate/Rewrite/Explain） | 需 AI Privacy Gateway（新增.md §9.25）后启用 |

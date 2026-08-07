@@ -50,31 +50,41 @@ class SearchService:
     # ---- 查询 ----
 
     def search(self, query: str, limit: int = 100, regex: bool = False,
-               ignore_case: bool = True) -> list[int]:
-        """返回命中的 clipboard_items.id 列表，最新优先。"""
+               ignore_case: bool = True,
+               session_id: int | None = None) -> list[int]:
+        """返回命中的 clipboard_items.id 列表，最新优先。
+
+        session_id=None 全局；指定则限定该会话。
+        """
         if not query.strip():
             return []
         if regex:
-            return self._search_regex(query, limit, ignore_case)
+            return self._search_regex(query, limit, ignore_case, session_id)
         if _contains_cjk(query):
-            return self._search_like(query, limit)
+            return self._search_like(query, limit, session_id)
         terms = _fts_terms(query)
+        where = " WHERE items_fts MATCH :q"
+        params: dict = {"q": terms, "limit": limit}
+        if session_id is not None:
+            where += " AND i.session_id = :sid"
+            params["sid"] = session_id
         sql = text(
             "SELECT i.id FROM items_fts f"
             " JOIN clipboard_items i ON i.id = f.rowid"
-            " WHERE items_fts MATCH :q"
+            + where +
             " ORDER BY i.created_at DESC, i.id DESC"
             " LIMIT :limit"
         )
         try:
             with self._engine.connect() as conn:
-                rows = conn.execute(sql, {"q": terms, "limit": limit}).fetchall()
+                rows = conn.execute(sql, params).fetchall()
         except Exception:
             logger.exception("FTS5 查询失败: %r", query)
             return []
         return [row[0] for row in rows]
 
-    def _search_like(self, query: str, limit: int) -> list[int]:
+    def _search_like(self, query: str, limit: int,
+                     session_id: int | None = None) -> list[int]:
         """CJK 子串搜索：每个空白分隔词做 LIKE '%词%'，AND 组合（10k 量级毫秒级）。"""
         terms = [t for t in query.split() if t.strip()]
         if not terms:
@@ -82,6 +92,9 @@ class SearchService:
         where = " AND ".join(f"content LIKE :t{i} ESCAPE '\\'" for i in range(len(terms)))
         params = {f"t{i}": f"%{_like_escape(t)}%" for i, t in enumerate(terms)}
         params["limit"] = limit
+        if session_id is not None:
+            where += " AND session_id = :sid"
+            params["sid"] = session_id
         sql = text(
             f"SELECT id FROM clipboard_items WHERE {where}"
             " ORDER BY created_at DESC, id DESC LIMIT :limit"
@@ -90,16 +103,20 @@ class SearchService:
             rows = conn.execute(sql, params).fetchall()
         return [row[0] for row in rows]
 
-    def _search_regex(self, pattern: str, limit: int, ignore_case: bool) -> list[int]:
+    def _search_regex(self, pattern: str, limit: int, ignore_case: bool,
+                      session_id: int | None = None) -> list[int]:
         try:
             rx = re.compile(pattern, re.IGNORECASE if ignore_case else 0)
         except re.error:
             logger.warning("无效正则: %r", pattern)
             return []
+        where = "" if session_id is None else " WHERE session_id = :sid"
+        params = {"sid": session_id} if session_id is not None else {}
         with self._engine.connect() as conn:
             rows = conn.execute(
-                text("SELECT id, content FROM clipboard_items"
-                     " ORDER BY created_at DESC, id DESC")
+                text("SELECT id, content FROM clipboard_items" + where +
+                     " ORDER BY created_at DESC, id DESC"),
+                params,
             ).fetchall()
         return [row[0] for row in rows if row[1] and rx.search(row[1])][:limit]
 

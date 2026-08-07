@@ -252,6 +252,39 @@ QLabel#sectionTitle { color: $secondary; font-size: 12px; font-weight: 600; }
 /* 设置页滚动容器：透明背景、无边框（内容少时不露灰底） */
 QScrollArea { background: transparent; border: none; }
 QWidget#settingsContainer { background: transparent; }
+
+/* 会话下拉（历史页顶部）与搜索范围下拉：搜索框风格 */
+QComboBox#sessionCombo, QComboBox#searchScope {
+    background: $search_bg;
+    border: none;
+    border-radius: 8px;
+    padding: 4px 10px;
+    font-size: 12px;
+    color: $text;
+}
+QComboBox#sessionCombo::drop-down, QComboBox#searchScope::drop-down {
+    border: none;
+    width: 18px;
+}
+QComboBox#sessionCombo QAbstractItemView,
+QComboBox#searchScope QAbstractItemView {
+    background: $window;
+    border: 1px solid $separator;
+    border-radius: 8px;
+    padding: 4px;
+    selection-background-color: $accent;
+    selection-color: $accent_text;
+    color: $text;
+}
+/* 会话管理菜单按钮：圆形省略号 */
+QPushButton#sessionMenuBtn {
+    background: transparent;
+    border: none;
+    border-radius: 6px;
+    color: $secondary;
+    font-size: 15px;
+}
+QPushButton#sessionMenuBtn:hover { background: $search_bg; }
 """)
 
 
