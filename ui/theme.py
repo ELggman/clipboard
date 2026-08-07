@@ -175,12 +175,15 @@ QPlainTextEdit { padding: 8px 10px; }
    与文本区并排。padding 必须为 0：通用 QPlainTextEdit 规则的 8px 顶部
    内边距会把文本压下半行高，与 gutter 的 contentOffset 行号错位。
    背景必须不透明（$window = 弹窗底色）：macOS 上透明 QPlainTextEdit
-   viewport 的首行合成渲染异常（实测：代码第一行显示不全/被裁剪） */
+   viewport 的首行合成渲染异常（实测：代码第一行显示不全/被裁剪）。
+   选中色用 $selection_bg（浅蓝）与文本弹窗一致——通用 QPlainTextEdit
+   规则的 $accent 深蓝在此显式覆盖 */
 QPlainTextEdit#codeView {
     background: $window;
     border: none;
     border-radius: 0;
     padding: 0px;
+    selection-background-color: $selection_bg;
 }
 
 /* 右键菜单：Apple 风格（圆角浮层、选中强调色、分隔线） */
