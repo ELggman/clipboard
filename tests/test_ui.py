@@ -1022,3 +1022,48 @@ def test_detail_popup_code_gutter_separate_widget():
     # 文本编辑区与 gutter 是兄弟组件（HBox 并排），互不重叠
     assert popup._code.edit.geometry().left() >= gutter.geometry().right() - 1
     popup.close()
+
+
+def test_history_enter_copies_selected_item():
+    """上下键选中 + 回车 → 直接复制到剪贴板。"""
+    from AppKit import NSPasteboard, NSPasteboardTypeString
+
+    from ui.history_view import HistoryView
+
+    view = HistoryView()
+    view.add_item(ClipboardItem(type="text", content="enter copy target"))
+    view.show()
+    view._list.setCurrentIndex(view._model.index(0, 0))
+    view._list.setFocus()
+    QTest.keyClick(view._list, Qt.Key.Key_Return)
+    pb = NSPasteboard.generalPasteboard()
+    assert pb.stringForType_(NSPasteboardTypeString) == "enter copy target"
+    view.close()
+
+
+def test_history_list_item_spacing():
+    """条目间隔：白底下列表可区分（不挤在一起）。"""
+    from ui.history_view import HistoryView
+
+    view = HistoryView()
+    assert view._list.spacing() > 0
+    view.close()
+
+
+def test_app_picker_lists_installed_apps():
+    """应用选择器：扫描出系统应用、搜索过滤、已选排除。"""
+    from ui.app_picker_dialog import AppPickerDialog, list_installed_apps
+
+    apps = list_installed_apps()
+    assert len(apps) > 0  # /System/Applications 必有应用
+    dialog = AppPickerDialog(selected={apps[0]} if apps else set())
+    dialog.show()
+    pytest_app.processEvents()
+    assert dialog._list.count() >= len(apps) - 1  # 排除已选
+    assert "Safari" in apps  # 系统应用在列
+    if len(apps) > 1:
+        dialog._search.setText(apps[1][:3])
+        pytest_app.processEvents()
+        dialog._list.setCurrentRow(0)
+        assert dialog.selected_app() != ""
+    dialog.close()

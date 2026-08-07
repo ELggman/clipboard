@@ -317,7 +317,32 @@ def test_settings_file_size_persists(tmp_path):
     cfg_path = tmp_path / "settings.yaml"
     view = SettingsView()
     view.set_context(config, {}, cfg_path)
-    view._file_size.setCurrentIndex(2)  # 200 MB
+    view._file_size.setCurrentIndex(view._file_size.findData(200))  # 200 MB
     saved = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
     assert saved["history"]["max_file_size_mb"] == 200
     view.close()
+
+
+# ---- 删除保护（数据丢失回归）----
+
+def test_image_service_delete_protects_user_files(tmp_path):
+    """删除历史只清理受管图片，绝不删用户原文档。
+
+    回归：FILE 条目的 file_path 指向用户原始文档，清数据/右键删/
+    自动清扫曾把它 unlink 掉 → 收藏快照指向空路径，粘贴失败。
+    """
+    from services.image_service import ImageService
+
+    svc = ImageService(tmp_path / "images")
+    managed = svc._dir / "abc.png"
+    managed.write_bytes(b"img")
+    user_file = tmp_path / "用户文档.pdf"
+    user_file.write_bytes(b"pdf")
+
+    svc.delete(str(managed))
+    assert not managed.exists()  # 受管图片正常删除
+    svc.delete(str(user_file))
+    assert user_file.exists()    # 用户原文档被保护
+    svc.delete_many([str(user_file)])
+    assert user_file.exists()    # 批量删除同样保护
+    assert svc.is_managed(str(managed)) and not svc.is_managed(str(user_file))

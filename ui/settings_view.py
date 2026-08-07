@@ -32,7 +32,7 @@ _MAX_ITEMS_OPTIONS = [(100, "100"), (500, "500"), (1000, "1000"), (-1, "无限")
 _AUTO_DELETE_OPTIONS = [(1, "1 天"), (7, "7 天"), (30, "30 天"),
                         (90, "90 天"), (365, "365 天"), (-1, "永不")]
 # 复制文档大小上限（MB；0 = 不限制）
-_FILE_SIZE_OPTIONS = [(10, "10 MB"), (50, "50 MB"), (200, "200 MB"),
+_FILE_SIZE_OPTIONS = [(10, "10 MB"), (20, "20 MB"), (50, "50 MB"), (200, "200 MB"),
                       (1024, "1 GB"), (0, "不限制")]
 # 敏感内容策略（§9.17）：warn 默认
 _POLICY_OPTIONS = [("warn", "提醒（保存并遮蔽显示）"),
@@ -245,16 +245,15 @@ class SettingsView(QWidget):
                 for i in range(self._ignored_list.count())]
 
     def _add_ignored_app(self) -> None:
+        """从已安装应用列表选择（不再手动输入，新增.md §9.5）。"""
         from PySide6.QtWidgets import QDialog
 
-        from ui.dialogs import NameDialog
+        from ui.app_picker_dialog import AppPickerDialog
 
-        dialog = NameDialog("添加忽略的应用", "应用名称：",
-                            placeholder="如：1Password / Bitwarden",
-                            confirm_text="添加")
-        if dialog.exec() == QDialog.DialogCode.Accepted and dialog.text():
-            name = dialog.text()
-            if name not in self._ignored_apps():
+        dialog = AppPickerDialog(self, selected=set(self._ignored_apps()))
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            name = dialog.selected_app()
+            if name and name not in self._ignored_apps():
                 self._ignored_list.addItem(QListWidgetItem(name))
                 self._on_change("privacy_ignored")
 

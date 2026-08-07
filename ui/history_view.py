@@ -373,7 +373,9 @@ class HistoryView(QWidget):
         self._list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._list.setWordWrap(False)
         self._list.setContextMenuPolicy(Qt.ContextMenuPolicy.DefaultContextMenu)
-        # ⌘Delete 手动删除（§9.20）：键盘事件经 eventFilter 处理
+        # 条目间隔：白底下列表更易区分（随窗口缩放，见 resizeEvent）
+        self._list.setSpacing(4)
+        # ⌘Delete 删除 / 回车复制：键盘事件经 eventFilter 处理
         self._list.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._list.installEventFilter(self)
 
@@ -415,18 +417,33 @@ class HistoryView(QWidget):
     def resizeEvent(self, event) -> None:
         """窗口放大 → 内容等比例放大（基准宽度 BASE_WIDTH）。"""
         super().resizeEvent(event)
-        self._delegate.set_scale(event.size().width() / BASE_WIDTH)
+        scale = event.size().width() / BASE_WIDTH
+        self._delegate.set_scale(scale)
+        self._list.setSpacing(max(2, round(4 * scale)))  # 条目间隔随缩放
         self._list.doItemsLayout()  # 行高随 scale 变化，重新布局
 
     def eventFilter(self, obj, event) -> bool:
-        """⌘Delete 删除选中条目（§9.20 手动删除快捷键）。"""
+        """键盘快捷键：⌘Delete 删除（§9.20）；Enter/Return 直接复制选中条目。"""
         if obj is self._list and event.type() == QEvent.Type.KeyPress:
-            if event.key() == Qt.Key.Key_Delete:
+            # ⌘⌫（macOS 主删除键）或 ⌦ 前向删除 → 删除选中条目（§9.20）；
+            # 普通 ⌫ 不删，防误触
+            if event.key() == Qt.Key.Key_Delete or (
+                    event.key() == Qt.Key.Key_Backspace
+                    and event.modifiers() & Qt.KeyboardModifier.ControlModifier):
                 index = self._list.currentIndex()
                 if index.isValid():
                     item = index.data(ROLE_ITEM)
                     if item is not None:
                         self._delete_item(item)
+                return True
+            if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                # 上下键选中后回车 = 复制（与 Quick Paste 的 Enter 语义一致）
+                index = self._list.currentIndex()
+                if index.isValid():
+                    item = index.data(ROLE_ITEM)
+                    if item is not None:
+                        self._run_copy(item)
+                        self.feedback.emit("已复制到剪贴板")
                 return True
         return super().eventFilter(obj, event)
 
