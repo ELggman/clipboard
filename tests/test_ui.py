@@ -253,7 +253,7 @@ def test_context_menu_copy_action(tmp_path):
     menu = view._build_menu(item)
 
     labels = [a.text() for a in menu.actions()]
-    assert labels == ["复制", "置顶", "收藏", "", "删除"]  # "" = 分隔线
+    assert labels == ["复制", "置顶", "标记为敏感", "收藏", "", "删除"]  # "" = 分隔线
 
     menu.actions()[0].trigger()  # 复制
     pb = NSPasteboard.generalPasteboard()
@@ -1067,3 +1067,54 @@ def test_app_picker_lists_installed_apps():
         dialog._list.setCurrentRow(0)
         assert dialog.selected_app() != ""
     dialog.close()
+
+
+def test_code_meta_shows_pin_and_favorite_marks():
+    """代码条目置顶/收藏后 meta 显示 📌/★（与其他类型一致）。"""
+    from ui.history_view import HistoryDelegate
+
+    item = ClipboardItem(type="code", content="def f():\n    pass",
+                         language="python", line_count=2,
+                         created_at="08-07 10:00")
+    assert "🐍 Python" in HistoryDelegate._code_meta(item)
+    item.pinned = 1
+    assert "📌" in HistoryDelegate._code_meta(item)
+    item.favorite = 1
+    assert "★" in HistoryDelegate._code_meta(item)
+    assert "2 行" in HistoryDelegate._code_meta(item)
+
+
+def test_context_menu_toggle_sensitive(tmp_path):
+    """右键标记为敏感：写库 + 内存同步（列表遮蔽立即生效）。"""
+    import hashlib
+
+    from database.engine import create_db_engine
+    from database.migrations import migrate
+    from services import history_service
+    from ui.history_view import HistoryView
+
+    engine = create_db_engine(tmp_path / "sens.db")
+    migrate(engine)
+    item = ClipboardItem(type="text", content="sensitive note")
+    item.hash = hashlib.sha256(b"sensitive note").hexdigest()
+    history_service.save_item(engine, item)
+
+    view = HistoryView()
+    view.set_menu_context(engine, None, None)
+    items = history_service.list_recent(engine)
+    view.set_items(items)
+    loaded = view._model.index(0, 0).data(ROLE_ITEM)
+    assert loaded.sensitive == 0
+
+    menu = view._build_menu(loaded)
+    labels = [a.text() for a in menu.actions()]
+    sens_idx = labels.index("标记为敏感")
+    menu.actions()[sens_idx].trigger()
+    assert loaded.sensitive == 1  # 内存同步
+    assert history_service.list_recent(engine)[0].sensitive == 1  # 落库
+
+    # 再次构建菜单 → 变为取消
+    menu2 = view._build_menu(loaded)
+    labels2 = [a.text() for a in menu2.actions()]
+    assert "取消敏感标记" in labels2
+    view.close()

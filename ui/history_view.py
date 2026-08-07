@@ -270,23 +270,29 @@ class HistoryDelegate(QStyledItemDelegate):
         has_more = total > len(shown)
         return shown, has_more, total
 
+    @staticmethod
+    def _code_meta(item) -> str:
+        """代码条目 meta：📌(置顶) ★(收藏) 🐍 Python · 时间 · N 行 · 来源。"""
+        from services.code_detector import LANGUAGE_EMOJI, LANGUAGE_NAMES
+
+        lang = item.language or "code"
+        name = LANGUAGE_NAMES.get(lang, lang)
+        marks = ("📌 " if item.pinned else "") + ("★ " if item.favorite else "")
+        meta = (f"{marks}{LANGUAGE_EMOJI.get(lang, '🧾')} {name}"
+                f"{' · ' + item.created_at if item.created_at else ''}"
+                f" · {item.line_count or len((item.content or '').splitlines())} 行"
+                f"{' · ' + item.source_app if item.source_app else ''}")
+        return meta
+
     def _draw_code_row(self, painter, rect, option, item) -> None:
         text_color = (option.palette.highlightedText().color() if
                       option.state & QStyle.StateFlag.State_Selected
                       else option.palette.text().color())
         secondary = option.palette.placeholderText().color()
 
-        # meta：🐍 Python · 08-06 18:00 · 8 行 · 来源
-        from services.code_detector import LANGUAGE_EMOJI, LANGUAGE_NAMES
-
-        lang = item.language or "code"
-        name = LANGUAGE_NAMES.get(lang, lang)
-        meta = (f"{LANGUAGE_EMOJI.get(lang, '🧾')} {name}"
-                f"{' · ' + item.created_at if item.created_at else ''}"
-                f" · {item.line_count or len((item.content or '').splitlines())} 行"
-                f"{' · ' + item.source_app if item.source_app else ''}")
+        # meta：📌 ★ 🐍 Python · 08-06 18:00 · 8 行 · 来源
         painter.setPen(secondary)
-        self._draw_line(painter, meta,
+        self._draw_line(painter, self._code_meta(item),
                         rect.left() + self._s(_MARGIN_X), rect.top() + self._s(15),
                         small=True, avail=rect.width() - 2 * self._s(_MARGIN_X))
 
@@ -506,6 +512,10 @@ class HistoryView(QWidget):
         pin_label = "取消置顶" if item.pinned else "置顶"
         menu.addAction(pin_label).triggered.connect(
             lambda: self._toggle_flag(item, "pinned"))
+        # 手动标记/取消敏感（§9.17）：自动检测之外的兜底
+        sens_label = "取消敏感标记" if item.sensitive else "标记为敏感"
+        menu.addAction(sens_label).triggered.connect(
+            lambda: self._toggle_sensitive(item))
 
         # 收藏：单一入口（快速收藏 ★ / 具体收藏夹 / 新建收藏夹）
         fav_menu = menu.addMenu("收藏")
@@ -579,6 +589,24 @@ class HistoryView(QWidget):
             self._refresh_cb()  # 先刷新（会重置状态栏），再给反馈
         self.feedback.emit(label)  # 状态栏即时反馈（收藏后可见可感）
 
+    def _toggle_sensitive(self, item) -> None:
+        """手动标记/取消敏感：写库 + 内存同步（列表遮蔽立即生效）。"""
+        if not self._engine or not item.id:
+            logger.warning("条目未落库，无法标记敏感: id=%s", item.id)
+            return
+        from services import history_service
+        from services.sensitive_detector import MANUAL
+
+        new_val = 0 if item.sensitive else 1
+        history_service.set_sensitive(self._engine, item.id, bool(new_val))
+        item.sensitive = new_val
+        item.sensitive_type = MANUAL if new_val else ""
+        label = "已标记为敏感" if new_val else "已取消敏感标记"
+        logger.info("已切换敏感标记: id=%s -> %s", item.id, new_val)
+        if self._refresh_cb:
+            self._refresh_cb()  # 先刷新（会重置状态栏），再给反馈
+        self.feedback.emit(label)
+
     def _run_action(self, action, item) -> None:
         if self._actions.run(action, item):
             logger.info("Action 执行完成: %s", action.id)
@@ -600,9 +628,14 @@ class HistoryView(QWidget):
 
         files = history_service.delete_item(self._engine, item.id)
         provider = self._delegate._provider  # ImageService：清理图片文件
-        for path in files:
-            if provider is not None:
-                provider.delete(path)
+        if provider is not None:
+            from services import collection_service
+
+            for path in files:
+                # 被收藏夹快照引用的图片保留（否则收藏粘贴失效）
+                if not collection_service.is_file_path_referenced(self._engine,
+                                                                  path):
+                    provider.delete(path)
         self.feedback.emit("已删除")
         if self._refresh_cb:
             self._refresh_cb()

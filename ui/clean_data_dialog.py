@@ -129,10 +129,13 @@ class CleanDataDialog(QDialog):
         if dialog.exec() != ConfirmDialog.DialogCode.Accepted:
             return
         files = history_service.delete_items(self._engine, ids)
+        from services import collection_service
         from services.image_service import ImageService
 
         svc = ImageService(Path(__file__).resolve().parent.parent / "images")
         for path in files:
-            svc.delete(path)
+            # 被收藏夹快照引用的图片保留（否则收藏粘贴失效）
+            if not collection_service.is_file_path_referenced(self._engine, path):
+                svc.delete(path)
         logger.info("清理数据完成: %d 条（图片 %d 个）", len(ids), len(files))
         self._query()  # 刷新预览

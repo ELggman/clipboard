@@ -6,7 +6,7 @@
 import logging
 from datetime import datetime
 
-from sqlalchemy import case, func, select
+from sqlalchemy import case, func, select, text
 from sqlalchemy.engine import Engine
 
 from app.types import ClipboardItem
@@ -91,6 +91,22 @@ def delete_collection(engine: Engine, collection_id: int) -> bool:
         session.delete(row)
         session.commit()
         return True
+
+
+def is_file_path_referenced(engine: Engine, file_path: str) -> bool:
+    """该路径是否被任一收藏夹快照引用（图片）。
+
+    删除历史前的守卫：图片条目的 file_path 指向 images/ 下的受管文件，
+    若被收藏快照引用则不能删（否则收藏粘贴失效，实测踩坑）。
+    """
+    if not file_path:
+        return False
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT 1 FROM collection_items WHERE file_path = :p LIMIT 1"),
+            {"p": file_path},
+        ).fetchone()
+    return row is not None
 
 
 def add_item(engine: Engine, collection_id: int, item: ClipboardItem) -> bool:

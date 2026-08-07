@@ -16,6 +16,7 @@ TOKEN = "token"
 JWT = "jwt"
 PRIVATE_KEY = "private_key"
 PASSWORD = "password"
+MANUAL = "manual"      # 用户右键手动标记（无固定模式，整段遮蔽）
 
 # 值最小长度门槛已在各正则中体现（≥8/≥20 字符），避免短变量名误报
 
@@ -56,8 +57,16 @@ class SensitiveResult:
 
 
 def detect(content: str) -> SensitiveResult | None:
-    """检测内容是否含潜在机密。返回首个命中的类型或 None。"""
+    """检测内容是否含潜在机密。返回首个命中的类型或 None。
+
+    URL 一律跳过：微信分享链接等携带 token=/key= 查询参数是常态
+    （mp.weixin.qq.com/s?...&token=xxx），误判噪声远大于收益
+    （实测踩坑：微信复制的 URL 被标为敏感）。
+    """
     if not content or not content.strip():
+        return None
+    stripped = content.lstrip()
+    if stripped.startswith(("http://", "https://")):
         return None
     for sensitive_type, pattern in _PATTERNS:
         if pattern.search(content):
@@ -75,6 +84,8 @@ def mask(content: str, sensitive_type: str = "") -> str:
         return "[PRIVATE KEY HIDDEN]"
     if sensitive_type == JWT:
         return content[:_KEEP_PREFIX + 2] + "••••••••"
+    if sensitive_type == MANUAL:
+        return "••••••••（已标记为敏感）"
     # api_key / token / password：遮蔽赋值符号后的值
     m = re.search(r"^(\s*\S+?\s*[=:]\s*['\"]?)([^\s'\"#;,]+)", content)
     if m:

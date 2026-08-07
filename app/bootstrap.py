@@ -177,7 +177,11 @@ def start_workspace(app: QApplication) -> None:
             removed_files += history_service.delete_older_than(engine, days)
         removed_files += history_service.delete_expired(engine)
         for path in removed_files:
-            image_service.delete(path)
+            # 被收藏夹快照引用的图片保留（否则收藏粘贴失效）
+            from services import collection_service
+
+            if not collection_service.is_file_path_referenced(engine, path):
+                image_service.delete(path)
         if removed_files:
             window._reload_history()
 
@@ -286,7 +290,9 @@ def apply_privacy_policy(item: ClipboardItem, privacy: dict) -> str:
                     " reason=application_exclusion", item.source_app)
         return "excluded"
 
-    if item.type in ("text", "url", "code") and item.content:
+    # url 跳过：微信等分享链接的 token=/key= 查询参数是常态（误判修复）；
+    # detect() 内还有 http(s) 兜底
+    if item.type in ("text", "code") and item.content:
         from services.sensitive_detector import detect as detect_sensitive
 
         result = detect_sensitive(item.content)

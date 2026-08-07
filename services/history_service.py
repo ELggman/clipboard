@@ -115,6 +115,26 @@ def set_pinned(engine: Engine, item_id: int, pinned: bool) -> bool:
     return True
 
 
+def set_sensitive(engine: Engine, item_id: int, sensitive: bool) -> bool:
+    """手动标记/取消敏感（右键菜单，§9.17 补充）。
+
+    手动标记类型为 manual（无固定模式，整段遮蔽）；取消时清空类型。
+    """
+    if not item_id:
+        return False
+    from services.sensitive_detector import MANUAL
+
+    with engine.begin() as conn:
+        conn.execute(
+            text("UPDATE clipboard_items SET sensitive = :s,"
+                 " sensitive_type = :t WHERE id = :id"),
+            {"s": 1 if sensitive else 0,
+             "t": MANUAL if sensitive else None,
+             "id": item_id},
+        )
+    return True
+
+
 def delete_older_than(engine: Engine, days: int) -> list[str]:
     """删除 N 天前且未置顶的记录（自动删除策略，置顶条目豁免）。
 

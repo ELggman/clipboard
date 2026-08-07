@@ -365,3 +365,82 @@ def test_delete_expired(tmp_path):
             text("SELECT content FROM clipboard_items")).fetchall()]
     assert remaining == ["still valid"]
     eng.dispose()
+
+
+def test_collection_image_survives_history_delete(tmp_path):
+    """收藏图片不因历史删除而失效：被引用的图片文件保留（回归）。
+
+    场景：复制图片 → 加入收藏 → 删除历史图片条目 → 收藏快照仍可粘贴。
+    """
+    import hashlib
+
+    from database.engine import create_db_engine
+    from database.migrations import migrate
+    from services import collection_service, history_service
+    from services.image_service import ImageService
+    from app.types import ClipboardItem
+
+    eng = create_db_engine(tmp_path / "ci.db")
+    migrate(eng)
+    svc = ImageService(tmp_path / "images")
+    from io import BytesIO
+    from PIL import Image
+
+    buf = BytesIO()
+    Image.new("RGB", (16, 16), "red").save(buf, "PNG")
+    img_path = svc.save(buf.getvalue())
+
+    item = ClipboardItem(type="image", file_path=str(img_path),
+                         preview="img.png")
+    item.hash = hashlib.sha256(b"img data").hexdigest()
+    history_service.save_item(eng, item)
+    cid = collection_service.create_collection(eng, "图集")
+    collection_service.add_item(eng, cid, item)
+
+    # 删除历史图片条目 → 文件应保留（被收藏引用）
+    files = history_service.delete_item(eng, item.id)
+    assert img_path.exists()  # 收藏引用保护
+    # 无引用时正常删除（对照）
+    orphan = svc._dir / "orphan.png"
+    orphan.write_bytes(b"x")
+    history_service.delete_item(eng, item.id)  # 行已删，无副作用
+    assert not collection_service.is_file_path_referenced(eng, str(orphan))
+    eng.dispose()
+
+
+def test_wechat_url_not_sensitive():
+    """微信分享链接的 token= 查询参数不应误判为敏感（回归）。"""
+    from services.sensitive_detector import detect
+
+    url = ("https://mp.weixin.qq.com/s?__biz=MzIxNjkzMDA0NQ==&mid=2650000000"
+           "&idx=1&sn=abcdef1234567890&token=9876543210abcdef")
+    assert detect(url) is None
+    assert detect("https://example.com/article?id=42&key=abcdefghijklmnopqrst") is None
+    # 非 URL 的 token= 赋值仍然检测
+    from services.sensitive_detector import TOKEN
+
+    r = detect("token=abcdefghijklmnopqrstuvwxyz123")
+    assert r is not None and r.sensitive_type == TOKEN
+
+
+def test_set_sensitive_manual_roundtrip(engine):
+    """手动标记敏感：set_sensitive 写库 + manual 类型遮蔽。"""
+    import hashlib
+
+    from app.types import ClipboardItem
+    from services import history_service
+    from services.sensitive_detector import MANUAL, mask
+
+    item = ClipboardItem(type="text", content="my private note")
+    item.hash = hashlib.sha256(b"my private note").hexdigest()
+    history_service.save_item(engine, item)
+
+    assert history_service.set_sensitive(engine, item.id, True) is True
+    loaded = history_service.list_recent(engine)[0]
+    assert loaded.sensitive == 1
+    assert loaded.sensitive_type == MANUAL
+    assert "private note" not in mask(loaded.content, loaded.sensitive_type)
+
+    assert history_service.set_sensitive(engine, item.id, False) is True
+    loaded = history_service.list_recent(engine)[0]
+    assert loaded.sensitive == 0 and loaded.sensitive_type == ""
