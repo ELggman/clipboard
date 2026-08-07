@@ -978,3 +978,47 @@ def test_settings_privacy_section_persists(tmp_path):
     assert saved["privacy"]["temp_minutes"] == 10
     assert saved["privacy"]["ignored_apps"] == ["1Password"]
     view.close()
+
+
+def test_detail_popup_highlight_formats_applied():
+    """Pygments 高亮真实生效：文档块带 4 类以上彩色格式（回归：token 匹配）。
+
+    之前 type(token).__mro__ 取元类继承链，全部 token 无格式 = 完全无高亮。
+    """
+    import collections
+
+    from ui.item_detail_popup import ItemDetailPopup
+
+    popup = ItemDetailPopup()
+    item = ClipboardItem(type="code",
+                         content="def hello():\n    # comment\n    return \"hi\"",
+                         language="python", line_count=3, character_count=40)
+    popup.show_item(item)
+    pytest_app.processEvents()
+    colored = collections.Counter()
+    for i in range(3):
+        block = popup._code.document().findBlockByNumber(i)
+        for span in block.layout().formats():
+            color = span.format.foreground().color().name()
+            if color != "#000000":
+                colored[color] += 1
+    # keyword(红) / function(紫) / comment(灰) / string(蓝) 至少各 1
+    assert len(colored) >= 4, f"高亮类别不足: {dict(colored)}"
+    popup.close()
+
+
+def test_detail_popup_code_gutter_separate_widget():
+    """行号 gutter 是独立组件（与文本区并排），文本不会压到行号下（回归）。"""
+    from ui.item_detail_popup import ItemDetailPopup
+
+    popup = ItemDetailPopup()
+    item = ClipboardItem(type="code", content="def f():\n    pass",
+                         language="python", line_count=2, character_count=12)
+    popup.show_item(item)
+    pytest_app.processEvents()
+    gutter = popup._code._gutter
+    assert gutter.isVisible()
+    assert gutter.width() == 42  # 与行号区宽度一致
+    # 文本编辑区与 gutter 是兄弟组件（HBox 并排），互不重叠
+    assert popup._code.edit.geometry().left() >= gutter.geometry().right() - 1
+    popup.close()

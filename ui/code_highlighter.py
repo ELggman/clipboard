@@ -101,11 +101,18 @@ class CodeHighlighter(QSyntaxHighlighter):
 
 
 def _token_key(token, formats: dict):
-    """Pygments token → formats 表键（沿类型继承链找最近匹配，如
-    Keyword.Constant → Keyword）。无匹配返回 None（用正文默认色）。"""
-    for cls in type(token).__mro__[1:]:
-        if cls in formats:
-            return cls
+    """Pygments token → formats 表键（沿 parent 链找最近匹配，如
+    Keyword.Constant → Keyword）。无匹配返回 None（用正文默认色）。
+
+    注意：Pygments 2.x 的 token 是 _TokenType **实例**（tuple 子类），
+    层级关系在 parent 链上，不是类继承（实测踩坑：token 无 __mro__；
+    type(token) 是元类 _TokenType，也没有任何子类信息）。
+    """
+    node = token
+    while node is not None:
+        if node in formats:
+            return node
+        node = node.parent
     return None
 
 

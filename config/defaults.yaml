@@ -12,6 +12,7 @@ history:
   auto_delete_days: 30     # 1 / 7 / 30 / 90 / 365 / -1(永不)
   poll_interval: 0.2       # 剪贴板轮询间隔（秒）
   show_image_filename: true  # 图片条目是否显示文件名（False 显示「时间 · image」）
+  max_file_size_mb: 50     # 复制文档大小上限（MB，0 = 不限制）
 
 # Privacy Mode（§9）：敏感内容处理策略与来源应用排除
 privacy:

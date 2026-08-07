@@ -4,6 +4,7 @@ V1 核心闭环已打通：ClipboardWatcher 解析 → history_service 去重落
 → MainWindow.refresh_history 刷新列表与状态栏。
 """
 import logging
+from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import QApplication
@@ -148,6 +149,10 @@ def start_workspace(app: QApplication) -> None:
             elif key == "privacy_ignored":
                 config["privacy"]["ignored_apps"] = list(
                     overrides["privacy"]["ignored_apps"])
+            elif key == "max_file_size":
+                # 文档大小上限即时生效（on_clipboard_changed 读内存 config）
+                config["history"]["max_file_size_mb"] = int(
+                    overrides["history"]["max_file_size_mb"])
             # save_images / auto_delete 下次插入或清扫时生效
         return _apply
 
@@ -156,7 +161,7 @@ def start_workspace(app: QApplication) -> None:
         {k: apply_setting(k) for k in ("theme", "font", "show_filename",
                                        "autostart", "max_items",
                                        "privacy_policy", "privacy_temp",
-                                       "privacy_ignored")},
+                                       "privacy_ignored", "max_file_size")},
         engine=engine,
         privacy_state=privacy_state,
     )
@@ -191,6 +196,14 @@ def start_workspace(app: QApplication) -> None:
                 "已忽略来自 %s 的剪贴板" % item.source_app
                 if decision == "excluded"
                 else "检测到潜在机密，已忽略", 3000)
+            return
+
+        # 文档大小上限（设置可调）：超限不加入历史
+        max_mb = int(config["history"].get("max_file_size_mb", 50))
+        if file_too_large(item, max_mb):
+            logger.info("Clipboard item ignored reason=file_too_large")
+            window.statusBar().showMessage(
+                f"已忽略超过 {max_mb}MB 的文件", 3000)
             return
 
         # 图片落盘
@@ -246,6 +259,17 @@ def start_workspace(app: QApplication) -> None:
 
 
 # ---- 回调 ----
+
+def file_too_large(item: ClipboardItem, max_mb: int) -> bool:
+    """文档大小超限检查（0 = 不限制；文件不可读按不超限处理）。"""
+    if max_mb <= 0 or item.type != "file" or not item.file_path:
+        return False
+    try:
+        return Path(item.file_path).stat().st_size > max_mb * 1024 * 1024
+    except OSError:
+        logger.debug("文件不可读，跳过大小检查: %s", item.file_path)
+        return False
+
 
 def apply_privacy_policy(item: ClipboardItem, privacy: dict) -> str:
     """隐私管线决策（新增.md §9.5-9.17），返回 "save" 或跳过原因。

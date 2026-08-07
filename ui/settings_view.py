@@ -7,15 +7,18 @@ import logging
 from pathlib import Path
 from typing import Any, Callable
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QFormLayout,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QListWidget,
     QListWidgetItem,
     QPushButton,
+    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
@@ -28,6 +31,9 @@ _MAX_ITEMS_OPTIONS = [(100, "100"), (500, "500"), (1000, "1000"), (-1, "无限")
 # §9.10：Never / 1 / 7 / 30 / 90 / 365 天
 _AUTO_DELETE_OPTIONS = [(1, "1 天"), (7, "7 天"), (30, "30 天"),
                         (90, "90 天"), (365, "365 天"), (-1, "永不")]
+# 复制文档大小上限（MB；0 = 不限制）
+_FILE_SIZE_OPTIONS = [(10, "10 MB"), (50, "50 MB"), (200, "200 MB"),
+                      (1024, "1 GB"), (0, "不限制")]
 # 敏感内容策略（§9.17）：warn 默认
 _POLICY_OPTIONS = [("warn", "提醒（保存并遮蔽显示）"),
                    ("ignore", "忽略（不保存）"),
@@ -62,10 +68,22 @@ class SettingsView(QWidget):
     # ---- 构建 ----
 
     def _build_ui(self) -> None:
-        layout = QFormLayout(self)
+        # 内容包进 QScrollArea：窗口高度有限（初始 560px），设置项多时
+        # 可滚动查看而非挤压在一起
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        container = QWidget()
+        container.setObjectName("settingsContainer")
+        layout = QFormLayout(container)
         layout.setContentsMargins(16, 14, 16, 14)
         layout.setHorizontalSpacing(16)
         layout.setVerticalSpacing(10)
+        scroll.setWidget(container)
+        outer.addWidget(scroll)
 
         self._theme = QComboBox()
         for value, label in _THEME_OPTIONS:
@@ -86,6 +104,11 @@ class SettingsView(QWidget):
         for value, label in _AUTO_DELETE_OPTIONS:
             self._auto_delete.addItem(label, value)
         layout.addRow("自动删除", self._auto_delete)
+
+        self._file_size = QComboBox()
+        for value, label in _FILE_SIZE_OPTIONS:
+            self._file_size.addItem(label, value)
+        layout.addRow("文件大小上限", self._file_size)
 
         self._save_images = QCheckBox("保存复制图片到本地")
         layout.addRow("图片保存", self._save_images)
@@ -157,6 +180,7 @@ class SettingsView(QWidget):
         self._autostart.toggled.connect(lambda _: self._on_change("autostart"))
         self._policy.currentIndexChanged.connect(lambda _: self._on_change("privacy_policy"))
         self._temp_minutes.currentIndexChanged.connect(lambda _: self._on_change("privacy_temp"))
+        self._file_size.currentIndexChanged.connect(lambda _: self._on_change("max_file_size"))
 
     # ---- 清理数据 ----
 
@@ -180,6 +204,8 @@ class SettingsView(QWidget):
         self._set_combo_value(self._font, app_cfg.get("font_size", 14))
         self._set_combo_value(self._max_items, hist_cfg.get("max_items", 500))
         self._set_combo_value(self._auto_delete, hist_cfg.get("auto_delete_days", 30))
+        self._set_combo_value(self._file_size,
+                              hist_cfg.get("max_file_size_mb", 50))
         self._save_images.setChecked(bool(hist_cfg.get("save_images", True)))
         self._show_filename.setChecked(bool(hist_cfg.get("show_image_filename", True)))
         self._autostart.setChecked(bool(app_cfg.get("launch_at_login", False)))
@@ -201,6 +227,7 @@ class SettingsView(QWidget):
             "history": {
                 "max_items": self._max_items.currentData(),
                 "auto_delete_days": self._auto_delete.currentData(),
+                "max_file_size_mb": self._file_size.currentData(),
                 "save_images": self._save_images.isChecked(),
                 "show_image_filename": self._show_filename.isChecked(),
             },
@@ -265,6 +292,6 @@ class SettingsView(QWidget):
 
     def _block_signals(self, blocked: bool) -> None:
         for w in (self._theme, self._font, self._max_items, self._auto_delete,
-                  self._save_images, self._show_filename, self._autostart,
-                  self._policy, self._temp_minutes):
+                  self._file_size, self._save_images, self._show_filename,
+                  self._autostart, self._policy, self._temp_minutes):
             w.blockSignals(blocked)

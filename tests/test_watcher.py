@@ -157,3 +157,17 @@ def test_watcher_paused_skips_emit_and_no_burst_on_resume():
 
     watcher._poll()  # changeCount 未再变 → 不重复
     assert len(seen) == 1
+
+
+def test_parse_file_url_chinese_name():
+    """file-url 的 percent-encoding 必须解码：中文文件名显示正常（回归）。"""
+    pb = NSPasteboard.generalPasteboard()
+    pb.clearContents()
+    pb.setString_forType_(
+        "file:///Users/tester/Documents/%E6%96%B0%E5%BB%BA%20%E6%96%87%E6%A1%A3.pdf",
+        NSPasteboardTypeFileURL)
+    item = ClipboardWatcher._parse(pb)
+    assert item is not None
+    assert item.type == "file"
+    assert item.content == "新建 文档.pdf"  # %E6%96%B0... 已解码
+    assert item.file_path == "/Users/tester/Documents/新建 文档.pdf"

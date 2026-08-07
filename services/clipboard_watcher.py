@@ -8,7 +8,7 @@
 import hashlib
 import logging
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 # 注意：pasteboard 类型常量是 AppKit 模块级导出，不是 NSPasteboard 类属性
 # （pyobjc 12.x 实测类属性访问为 None，会导致每次轮询 AttributeError）
@@ -94,7 +94,9 @@ class ClipboardWatcher(QObject):
         raw = pb.propertyListForType_(NSPasteboardTypeFileURL)
         urls = raw if isinstance(raw, list) else ([raw] if raw else [])
         if urls:
-            path = Path(urlparse(urls[0]).path)
+            # unquote：file-url 的路径是 percent-encoded（中文名显示为
+            # %E6%96%B0...，实测复制中文名文档 UI 显示乱码）
+            path = Path(unquote(urlparse(urls[0]).path))
             return ClipboardItem(
                 type=FILE,
                 content=path.name,

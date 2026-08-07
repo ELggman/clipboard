@@ -37,42 +37,70 @@ _MAX_WIDTH = 620      # 弹层最大宽度
 _MAX_HEIGHT = 460     # 弹层最大高度
 
 
-class _CodeEdit(QPlainTextEdit):
-    """只读代码视图：mono 字体 + 左侧行号 gutter（随滚动同步）。"""
+class _GutterWidget(QWidget):
+    """代码行号 gutter：独立组件，与代码编辑区并排（滚动同步）。
 
-    def __init__(self, parent: QWidget | None = None):
+    选型：不用 QPlainTextEdit.setViewportMargins —— QSS padding 会在
+    渲染层覆盖视口边距（实测文本起点 x≈4 压到行号区下，macOS 真实渲染
+    同样复现）。独立组件不受任何 QSS 影响。
+    """
+
+    def __init__(self, editor: "QPlainTextEdit", parent: QWidget | None = None):
         super().__init__(parent)
-        self.setObjectName("codeView")
-        self.setReadOnly(True)
-        self.setFrameShape(QPlainTextEdit.Shape.NoFrame)
-        self.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
-        self._gutter = 42
-        self.setViewportMargins(self._gutter, 0, 0, 0)
+        self._editor = editor
+        self.setFixedWidth(42)
         self.setFont(mono_font(12))
+        editor.verticalScrollBar().valueChanged.connect(self.update)
+        editor.verticalScrollBar().rangeChanged.connect(self.update)
 
     def paintEvent(self, event) -> None:
-        painter = QPainter(self.viewport())
-        bg = self.palette().color(QPalette.ColorRole.AlternateBase)
-        fg = self.palette().color(QPalette.ColorRole.PlaceholderText)
-        painter.fillRect(0, 0, self._gutter, self.viewport().height(), bg)
-        painter.setPen(fg)
-        block = self.firstVisibleBlock()
-        number = block.blockNumber()
-        top = round(self.blockBoundingGeometry(block)
-                    .translated(self.contentOffset()).top())
-        bottom = top + round(self.blockBoundingRect(block).height())
+        painter = QPainter(self)
+        palette = self._editor.palette()
+        painter.fillRect(self.rect(),
+                         palette.color(QPalette.ColorRole.AlternateBase))
+        painter.setPen(palette.color(QPalette.ColorRole.PlaceholderText))
         fm = self.fontMetrics()
+
+        block = self._editor.firstVisibleBlock()
+        number = block.blockNumber()
+        offset = self._editor.contentOffset()
+        top = round(self._editor.blockBoundingGeometry(block)
+                    .translated(offset).top())
+        bottom = top + round(self._editor.blockBoundingRect(block).height())
         while block.isValid() and top <= event.rect().bottom():
             if block.isVisible() and bottom >= event.rect().top():
-                painter.drawText(0, top, self._gutter - 8, fm.height(),
+                painter.drawText(0, top, self.width() - 8, fm.height(),
                                  Qt.AlignmentFlag.AlignRight, str(number + 1))
             block = block.next()
             top = bottom
-            bottom = top + round(self.blockBoundingRect(block).height())
+            bottom = top + round(self._editor.blockBoundingRect(block).height())
             number += 1
         painter.end()
-        super().paintEvent(event)
 
+
+class _CodeView(QWidget):
+    """代码视图容器：行号 gutter + 只读代码编辑区（mono 等宽）。"""
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        self.edit = QPlainTextEdit()
+        self.edit.setObjectName("codeView")
+        self.edit.setReadOnly(True)
+        self.edit.setFrameShape(QPlainTextEdit.Shape.NoFrame)
+        self.edit.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self.edit.setFont(mono_font(12))
+        self._gutter = _GutterWidget(self.edit)
+        layout.addWidget(self._gutter)
+        layout.addWidget(self.edit, 1)
+
+    def setPlainText(self, text: str) -> None:
+        self.edit.setPlainText(text)
+
+    def document(self):
+        return self.edit.document()
 
 class ItemDetailPopup(QWidget):
     def __init__(self, parent: QWidget | None = None):
@@ -98,7 +126,7 @@ class ItemDetailPopup(QWidget):
         self._text.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
         layout.addWidget(self._text, 1)
 
-        self._code = _CodeEdit()
+        self._code = _CodeView()
         self._code.hide()
         layout.addWidget(self._code, 1)
 
@@ -169,7 +197,6 @@ class ItemDetailPopup(QWidget):
             self._text.show()
         elif item.type == "code":
             self._code.setPlainText(item.content or "")
-            self._code.setFont(mono_font(12))
             from ui.code_highlighter import CodeHighlighter as _HL
 
             self._highlighter = _HL(self._code.document(), item.language)
@@ -292,4 +319,7 @@ class ItemDetailPopup(QWidget):
         from ui.animations import fade_in_window
 
         fade_in_window(self)  # 出现动画（origin-aware：从光标方向生长）
-        (self._code if self._code.isVisible() else self._text).setFocus()
+        if self._code.isVisible():
+            self._code.edit.setFocus()
+        else:
+            self._text.setFocus()

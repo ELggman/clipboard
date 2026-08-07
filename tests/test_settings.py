@@ -263,3 +263,61 @@ def test_privacy_pipeline_plain_content_passes():
     item.hash = hashlib.sha256(b"x").hexdigest()
     assert apply_privacy_policy(item, _privacy_config()) == "save"
     assert item.sensitive == 0
+
+
+# ---- 文档大小上限（设置可调）----
+
+def test_file_too_large_check(tmp_path):
+    """超过上限的文件跳过；未超/不限制/不可读不跳过。"""
+    from app.bootstrap import file_too_large
+    from app.types import ClipboardItem
+
+    big = tmp_path / "big.bin"
+    big.write_bytes(b"x" * (5 * 1024 * 1024))  # 5MB
+    small = tmp_path / "small.pdf"
+    small.write_bytes(b"pdf content")
+    missing = tmp_path / "gone.bin"
+
+    assert file_too_large(ClipboardItem(type="file", file_path=str(big)), 1) is True
+    assert file_too_large(ClipboardItem(type="file", file_path=str(small)), 1) is False
+    assert file_too_large(ClipboardItem(type="file", file_path=str(big)), 0) is False  # 不限制
+    assert file_too_large(ClipboardItem(type="file", file_path=str(missing)), 1) is False  # 不可读
+    assert file_too_large(ClipboardItem(type="text", content="x" * 100), 1) is False  # 仅文件
+
+
+def test_settings_view_has_scroll_area(tmp_path):
+    """设置页内容包在 QScrollArea 中：小窗口下可滚动而非挤压。"""
+    from PySide6.QtWidgets import QScrollArea
+
+    from ui.settings_view import SettingsView
+
+    view = SettingsView()
+    view.resize(380, 500)
+    view.show()
+    assert isinstance(view.findChild(QScrollArea), QScrollArea)
+    # 所有表单行都在滚动容器内
+    assert view._file_size.isVisible()
+    assert view._pause_btn.isVisible()
+    view.close()
+
+
+def test_settings_file_size_persists(tmp_path):
+    """文件大小上限设置写回配置。"""
+    import yaml
+
+    from ui.settings_view import SettingsView
+
+    config = {
+        "app": {"theme": "system", "font_size": 14, "launch_at_login": False},
+        "history": {"max_items": 500, "auto_delete_days": 30,
+                    "save_images": True, "show_image_filename": True,
+                    "max_file_size_mb": 50},
+        "privacy": {"policy": "warn", "temp_minutes": 5, "ignored_apps": []},
+    }
+    cfg_path = tmp_path / "settings.yaml"
+    view = SettingsView()
+    view.set_context(config, {}, cfg_path)
+    view._file_size.setCurrentIndex(2)  # 200 MB
+    saved = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    assert saved["history"]["max_file_size_mb"] == 200
+    view.close()

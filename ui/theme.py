@@ -171,12 +171,13 @@ QLineEdit, QPlainTextEdit {
     selection-background-color: $accent;
 }
 QPlainTextEdit { padding: 8px 10px; }
-/* 代码详情视图：行号 gutter 由 paintEvent 自绘，QSS 只清背景（padding 置 0 防冲突） */
+/* 代码详情视图：行号是独立 gutter 组件（item_detail_popup._CodeView），
+   与文本区并排，不受 QSS padding 影响（setViewportMargins 会被 QSS
+   padding 覆盖，实测文本压到行号区下） */
 QPlainTextEdit#codeView {
     background: transparent;
     border: none;
     border-radius: 0;
-    padding: 0px;
 }
 
 /* 右键菜单：Apple 风格（圆角浮层、选中强调色、分隔线） */
@@ -241,6 +242,10 @@ QLabel#privacyStatus[paused="true"] { color: $accent_soft; }
 
 /* 设置页分区标题（隐私模式等） */
 QLabel#sectionTitle { color: $secondary; font-size: 12px; font-weight: 600; }
+
+/* 设置页滚动容器：透明背景、无边框（内容少时不露灰底） */
+QScrollArea { background: transparent; border: none; }
+QWidget#settingsContainer { background: transparent; }
 """)
 
 
