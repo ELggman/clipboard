@@ -1321,3 +1321,17 @@ def test_main_window_initial_size_660():
     assert w.minimumHeight() == 660
     assert w.height() == 660
     w.close()
+
+
+def test_combo_popup_views_min_width():
+    """搜索范围/会话下拉的弹出列表有最小宽度（长文本不裁切，回归）。"""
+    from ui.history_view import HistoryView
+    from ui.main_window import MainWindow
+
+    w = MainWindow()
+    assert w._search_scope.view().minimumWidth() >= 120
+    w.close()
+
+    view = HistoryView()
+    assert view._session_combo.view().minimumWidth() >= 150
+    view.close()

@@ -272,6 +272,7 @@ QComboBox#searchScope QAbstractItemView {
     border: 1px solid $separator;
     border-radius: 8px;
     padding: 4px;
+    min-width: 150px;  /* 弹出列表宽度：默认跟随按钮，长文本被裁（实测） */
     selection-background-color: $accent;
     selection-color: $accent_text;
     color: $text;

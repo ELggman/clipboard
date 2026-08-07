@@ -95,6 +95,8 @@ class MainWindow(QMainWindow):
         self._search_scope.setFixedHeight(30)
         # 初始 380 宽下也要完整显示「全部会话」：QSS padding 会裁切文本
         self._search_scope.setMinimumWidth(96)
+        # 弹出列表宽度不跟随按钮（长文本裁切，实测）→ 显式最小宽度
+        self._search_scope.view().setMinimumWidth(120)
         self._search_scope.addItem("全部会话", None)
         self._search_scope.addItem("本会话", "current")
         self._search_scope.currentIndexChanged.connect(
