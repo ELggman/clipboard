@@ -23,6 +23,7 @@ from PySide6.QtGui import (
     QStandardItemModel,
 )
 from PySide6.QtWidgets import (
+    QAbstractScrollArea,
     QComboBox,
     QDialog,
     QHBoxLayout,
@@ -475,9 +476,10 @@ class HistoryView(QWidget):
         session_row.setSpacing(4)
         self._session_combo = QComboBox()
         self._session_combo.setObjectName("sessionCombo")
-        # 弹出列表最小宽度：会话名可能较长（如「论文写作优化 · 123 条」），
-        # 默认 popup 宽度跟随按钮会裁切（实测）
-        self._session_combo.view().setMinimumWidth(180)
+        # 弹出列表宽度由内容自适应：会话名可能较长（「论文写作优化 · 123 条」），
+        # 默认跟随按钮会裁切，固定 min-width 又过宽（实测）
+        self._session_combo.view().setSizeAdjustPolicy(
+            QAbstractScrollArea.SizeAdjustPolicy.AdjustToContents)
         self._session_combo.currentIndexChanged.connect(self._on_session_changed)
         session_row.addWidget(self._session_combo, 1)
         self._session_menu_btn = QPushButton("⋯")

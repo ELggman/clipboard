@@ -1323,15 +1323,58 @@ def test_main_window_initial_size_660():
     w.close()
 
 
-def test_combo_popup_views_min_width():
-    """搜索范围/会话下拉的弹出列表有最小宽度（长文本不裁切，回归）。"""
+def test_combo_popup_views_content_adaptive():
+    """搜索范围/会话下拉弹层宽度由内容自适应（长文本不裁、短文本不宽）。"""
+    from PySide6.QtWidgets import QAbstractScrollArea
+
     from ui.history_view import HistoryView
     from ui.main_window import MainWindow
 
     w = MainWindow()
-    assert w._search_scope.view().minimumWidth() >= 120
+    policy = w._search_scope.view().sizeAdjustPolicy()
+    assert policy == QAbstractScrollArea.SizeAdjustPolicy.AdjustToContents
     w.close()
 
     view = HistoryView()
-    assert view._session_combo.view().minimumWidth() >= 150
+    assert view._session_combo.view().sizeAdjustPolicy() \
+        == QAbstractScrollArea.SizeAdjustPolicy.AdjustToContents
+    view.close()
+
+
+def test_collections_panel_hover_show_hide(tmp_path):
+    """收藏夹面板：悬停触发条展开，离开自动收回（不占常驻空间）。"""
+    from PySide6.QtCore import QEvent
+
+    from database.engine import create_db_engine
+    from database.migrations import migrate
+    from ui.collections_view import CollectionsView
+
+    engine = create_db_engine(tmp_path / "cp.db")
+    migrate(engine)
+    view = CollectionsView()
+    view.set_context(engine)
+    view.resize(500, 400)
+    view.show()
+    pytest_app.processEvents()
+    assert not view._panel.isVisible()  # 默认隐藏（不占空间）
+
+    # 悬停触发条 → 展开
+    QApplication.sendEvent(view._trigger, QEvent(QEvent.Type.Enter))
+    pytest_app.processEvents()
+    assert view._panel.isVisible()
+    assert view._panel.x() >= view._trigger.width()  # 在触发条右侧
+    assert view._panel.height() == view.height()
+
+    # 离开面板 → 延时收回
+    QApplication.sendEvent(view._panel, QEvent(QEvent.Type.Leave))
+    QTest.qWait(400)  # 超过 _PANEL_HIDE_MS
+    assert not view._panel.isVisible()
+
+    # 离开触发条但移入面板 → 不收回
+    QApplication.sendEvent(view._trigger, QEvent(QEvent.Type.Enter))
+    pytest_app.processEvents()
+    QApplication.sendEvent(view._trigger, QEvent(QEvent.Type.Leave))
+    QApplication.sendEvent(view._panel, QEvent(QEvent.Type.Enter))
+    QTest.qWait(400)
+    assert view._panel.isVisible()
     view.close()

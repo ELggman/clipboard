@@ -6,6 +6,7 @@ import logging
 
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import (
+    QAbstractScrollArea,
     QComboBox,
     QHBoxLayout,
     QLabel,
@@ -95,8 +96,11 @@ class MainWindow(QMainWindow):
         self._search_scope.setFixedHeight(30)
         # 初始 380 宽下也要完整显示「全部会话」：QSS padding 会裁切文本
         self._search_scope.setMinimumWidth(96)
-        # 弹出列表宽度不跟随按钮（长文本裁切，实测）→ 显式最小宽度
-        self._search_scope.view().setMinimumWidth(120)
+        # 弹出列表宽度**由内容自适应**（AdjustToContents）：
+        # 默认跟随按钮宽度会裁切长文本；固定 min-width 又过宽——
+        # 自适应在短文本时窄、长文本时刚好容纳（实测 popup 宽 156）
+        self._search_scope.view().setSizeAdjustPolicy(
+            QAbstractScrollArea.SizeAdjustPolicy.AdjustToContents)
         self._search_scope.addItem("全部会话", None)
         self._search_scope.addItem("本会话", "current")
         self._search_scope.currentIndexChanged.connect(

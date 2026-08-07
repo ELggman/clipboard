@@ -272,7 +272,6 @@ QComboBox#searchScope QAbstractItemView {
     border: 1px solid $separator;
     border-radius: 8px;
     padding: 4px;
-    min-width: 150px;  /* 弹出列表宽度：默认跟随按钮，长文本被裁（实测） */
     selection-background-color: $accent;
     selection-color: $accent_text;
     color: $text;
@@ -286,6 +285,23 @@ QPushButton#sessionMenuBtn {
     font-size: 15px;
 }
 QPushButton#sessionMenuBtn:hover { background: $search_bg; }
+
+/* 收藏夹触发条：悬停展开浮层面板 */
+QPushButton#collectionTrigger {
+    background: transparent;
+    border: none;
+    border-radius: 8px;
+    font-size: 16px;
+    color: $secondary;
+}
+QPushButton#collectionTrigger:hover { background: $search_bg; }
+
+/* 收藏夹浮层面板：悬浮覆盖在条目区上方 */
+QFrame#collectionPanel {
+    background: $window;
+    border: 1px solid $separator;
+    border-radius: 10px;
+}
 """)
 
 

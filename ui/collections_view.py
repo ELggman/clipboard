@@ -1,15 +1,17 @@
-"""收藏夹页：左侧收藏夹列表，右侧条目（DEVELOPMENT.md §4.4）。
+"""收藏夹页：左侧触发条 + 悬浮收藏夹面板，右侧条目（DEVELOPMENT.md §4.4）。
 
-- 新建/双击重命名/右键删除收藏夹
+- 收藏夹列表不常驻：悬停左侧 📁 图标 → 浮层面板出现（选择/新建/重命名/
+  右键删除），鼠标离开自动收回；主界面只显示收藏内容
 - 条目复用 HistoryDelegate 渲染（缩略图/两行布局），点击 → 详情弹层，
   右键：复制 / 从收藏夹移除 / Actions
 """
 import logging
 
-from PySide6.QtCore import QModelIndex, QRect, Qt, Signal
+from PySide6.QtCore import QEvent, QModelIndex, QRect, Qt, QTimer, Signal
 from PySide6.QtGui import QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
     QDialog,
+    QFrame,
     QHBoxLayout,
     QListView,
     QListWidget,
@@ -26,6 +28,9 @@ logger = logging.getLogger(__name__)
 
 ROLE_ITEM = Qt.ItemDataRole.UserRole + 1  # 与 HistoryView 保持一致
 
+_PANEL_WIDTH = 180       # 浮层面板宽度
+_PANEL_HIDE_MS = 250     # 鼠标离开浮层后的收回延时（进入浮层内控件可取消）
+
 
 class CollectionsView(QWidget):
     item_activated = Signal(object)  # 单击条目 → 详情弹层
@@ -37,6 +42,10 @@ class CollectionsView(QWidget):
         self._image_service = None     # 删除条目时清理图片文件
         self._active_menus: list = []  # 防 GC（PySide 菜单包装器 Python 所有）
         self._build_ui()
+        self._hide_timer = QTimer(self)
+        self._hide_timer.setSingleShot(True)
+        self._hide_timer.setInterval(_PANEL_HIDE_MS)
+        self._hide_timer.timeout.connect(self._panel.hide)
 
     def set_context(self, engine, image_service=None) -> None:
         self._engine = engine
@@ -55,23 +64,17 @@ class CollectionsView(QWidget):
     def _build_ui(self) -> None:
         layout = QHBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(10)
+        layout.setSpacing(6)
 
-        left = QVBoxLayout()
-        left.setSpacing(6)
-        self._list = QListWidget()
-        self._list.setObjectName("sideList")
-        self._list.currentRowChanged.connect(self._on_select)
-        self._list.itemDoubleClicked.connect(self._rename)
-        self._list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self._list.customContextMenuRequested.connect(self._on_list_menu)
-        left.addWidget(self._list, 1)
-        new_btn = QPushButton("新建收藏夹")
-        new_btn.setObjectName("primaryButton")
-        new_btn.clicked.connect(self._create)
-        left.addWidget(new_btn)
-        layout.addLayout(left, 2)
+        # 左侧触发条：悬停展开浮层面板
+        self._trigger = QPushButton("📁")
+        self._trigger.setObjectName("collectionTrigger")
+        self._trigger.setFixedWidth(30)
+        self._trigger.setToolTip("收藏夹（悬停展开）")
+        self._trigger.installEventFilter(self)
+        layout.addWidget(self._trigger)
 
+        # 右侧条目区占满（收藏夹列表在浮层中，不占常驻空间）
         self._model = QStandardItemModel(self)
         self._items = QListView()
         self._items.setObjectName("historyList")
@@ -82,7 +85,56 @@ class CollectionsView(QWidget):
         self._delegate = HistoryDelegate(self._items)
         self._items.setItemDelegate(self._delegate)
         self._items.clicked.connect(self._on_item_clicked)
-        layout.addWidget(self._items, 3)
+        layout.addWidget(self._items, 1)
+
+        # 浮层面板：覆盖在条目区上方（收藏夹列表 + 新建按钮）
+        self._panel = QFrame(self)
+        self._panel.setObjectName("collectionPanel")
+        self._panel.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self._panel.setFixedWidth(_PANEL_WIDTH)
+        self._panel.installEventFilter(self)
+        panel_layout = QVBoxLayout(self._panel)
+        panel_layout.setContentsMargins(10, 10, 10, 10)
+        panel_layout.setSpacing(6)
+        self._list = QListWidget()
+        self._list.setObjectName("sideList")
+        self._list.currentRowChanged.connect(self._on_select)
+        self._list.itemDoubleClicked.connect(self._rename)
+        self._list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._list.customContextMenuRequested.connect(self._on_list_menu)
+        panel_layout.addWidget(self._list, 1)
+        new_btn = QPushButton("新建收藏夹")
+        new_btn.setObjectName("primaryButton")
+        new_btn.clicked.connect(self._create)
+        panel_layout.addWidget(new_btn)
+        self._panel.hide()
+
+    # ---- 悬浮面板显隐（hover 展开/离开收回）----
+
+    def eventFilter(self, obj, event) -> bool:
+        """触发条/面板的 hover 显隐：进入显示，离开延时收回。"""
+        if event.type() == QEvent.Type.Enter:
+            if obj is self._trigger or obj is self._panel:
+                self._hide_timer.stop()
+                self._show_panel()
+        elif event.type() == QEvent.Type.Leave:
+            if obj is self._trigger or obj is self._panel:
+                # 离开触发条但移入面板 → 面板的 Enter 会取消；
+                # 都离开才真正收回
+                self._hide_timer.start()
+        return super().eventFilter(obj, event)
+
+    def _show_panel(self) -> None:
+        self._panel.move(self._trigger.width() + 4, 0)
+        self._panel.setFixedHeight(self.height())
+        self._panel.raise_()
+        self._panel.show()
+
+    def resizeEvent(self, event) -> None:
+        """面板高度跟随视图（悬浮覆盖，不占布局）。"""
+        super().resizeEvent(event)
+        if self._panel.isVisible():
+            self._panel.setFixedHeight(self.height())
 
     # ---- 数据 ----
 
