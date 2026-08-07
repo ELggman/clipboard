@@ -43,8 +43,9 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Clipboard Workspace")
         # 唤起类工具：初始尺寸即最小尺寸（380 宽为内容缩放的基准档，
         # 放大后列表内容等比例放大，见 history_view.BASE_WIDTH）。
-        self.resize(380, 560)
-        self.setMinimumSize(380, 560)
+        # 高度 660：顶部会话行 + 类型筛选条 + 列表 + 状态栏（原 560 偏挤）
+        self.resize(380, 660)
+        self.setMinimumSize(380, 660)
         self.statusBar().setSizeGripEnabled(False)
         self._engine = None          # FTS5 搜索（bootstrap 注入）
         self._full_items: list = []  # 完整历史缓存（清空搜索时恢复）
@@ -92,6 +93,8 @@ class MainWindow(QMainWindow):
         self._search_scope = QComboBox()
         self._search_scope.setObjectName("searchScope")
         self._search_scope.setFixedHeight(30)
+        # 初始 380 宽下也要完整显示「全部会话」：QSS padding 会裁切文本
+        self._search_scope.setMinimumWidth(96)
         self._search_scope.addItem("全部会话", None)
         self._search_scope.addItem("本会话", "current")
         self._search_scope.currentIndexChanged.connect(
@@ -236,6 +239,12 @@ class MainWindow(QMainWindow):
         if isinstance(page, HistoryView):
             page.reload_sessions(active_id)
 
+    def refresh_session_counts(self) -> None:
+        """实时刷新会话下拉计数（保存成功后调用，不重载列表）。"""
+        page = self._pages.widget(0)
+        if isinstance(page, HistoryView):
+            page.refresh_session_counts()
+
     def set_menu_context(self, engine, action_service) -> None:
         """注入右键菜单依赖（透传历史列表）。"""
         page = self._pages.widget(0)
@@ -282,8 +291,12 @@ class MainWindow(QMainWindow):
             self._privacy_label.setProperty("paused", False)
 
     def refresh_history(self, clipboard_item, is_new: bool = True) -> None:
-        """剪贴板条目回调：is_new=True 追加列表；状态栏区分新增/去重。"""
-        if is_new:
+        """剪贴板条目回调：is_new=True 追加列表；状态栏区分新增/去重。
+
+        _full_items 缓存当前激活会话的完整列表——其他会话的新条目
+        不得混入（否则清空搜索恢复时出现跨会话内容，实测）。
+        """
+        if is_new and clipboard_item.session_id == self._active_session_id:
             self._full_items.insert(0, clipboard_item)
         page = self._pages.widget(0)
         if isinstance(page, HistoryView):

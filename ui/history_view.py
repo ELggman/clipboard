@@ -469,8 +469,9 @@ class HistoryView(QWidget):
         layout.setSpacing(0)
 
         # 会话行：下拉（显示名 · 条数）+ ⋯ 管理菜单
+        # 独立区域：底部留 8px 与类型筛选条分隔（靠太近视觉粘连，实测）
         session_row = QHBoxLayout()
-        session_row.setContentsMargins(8, 6, 8, 0)
+        session_row.setContentsMargins(8, 6, 8, 8)
         session_row.setSpacing(4)
         self._session_combo = QComboBox()
         self._session_combo.setObjectName("sessionCombo")
@@ -580,6 +581,24 @@ class HistoryView(QWidget):
         """全局搜索视图：显示所有会话条目并标注 [会话名] 标签。"""
         self._view_session_id = None
         self._delegate.set_view_session_id(None)
+
+    def refresh_session_counts(self) -> None:
+        """实时刷新会话下拉计数（保留当前选中，不重载列表）。
+
+        新建会话后复制内容：计数若不刷新，下拉一直显示 0 条直到重启
+        （实测踩坑）。bootstrap 在保存成功后调用。
+        """
+        if self._session_service is None or self._engine is None:
+            return
+        current_id = self._session_combo.currentData()
+        sessions = self._session_service.list_sessions(self._engine)
+        self._session_combo.blockSignals(True)
+        self._session_combo.clear()
+        for s in sessions:
+            self._session_combo.addItem(f"{s['name']} · {s['count']} 条", s["id"])
+        idx = self._session_combo.findData(current_id)
+        self._session_combo.setCurrentIndex(max(0, idx))
+        self._session_combo.blockSignals(False)
 
     def set_view_session_id(self, session_id: int | None) -> None:
         """设置视图会话（不影响数据，只控制 [会话名] 标签显示）。"""
@@ -842,7 +861,13 @@ class HistoryView(QWidget):
 
         与 list_recent 的 pinned DESC 排序一致——新条目（未置顶）不得
         把置顶条目挤下去（实测踩坑：复制新文本后置顶跑到列表底部）。
+        只插入**属于当前视图会话**的条目：视图是具体会话时，其他会话的
+        新条目不得混入（否则显示在错误会话，切走再切回才正常，实测）。
         """
+        if (self._view_session_id is not None
+                and clipboard_item.session_id
+                and clipboard_item.session_id != self._view_session_id):
+            return  # 属于其他会话：切换到该会话自然可见
         pos = sum(1 for it in self._all_items if it.pinned)  # 置顶组大小
         self._all_items.insert(pos, clipboard_item)
         if not self._filter_type or clipboard_item.type == self._filter_type:

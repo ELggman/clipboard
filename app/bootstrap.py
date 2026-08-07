@@ -249,6 +249,8 @@ def start_workspace(app: QApplication) -> None:
             engine, item, max_items=int(config["history"]["max_items"])
         )
         window.refresh_history(item, is_new)
+        if is_new:
+            window.refresh_session_counts()  # 会话下拉计数实时更新
         logger.info("已%s: type=%s hash=%s", "新增" if is_new else "去重更新", item.type, item.hash[:12])
 
     watcher.changed.connect(on_clipboard_changed)

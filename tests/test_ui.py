@@ -1265,3 +1265,59 @@ def test_global_search_shows_session_tag():
     delegate.set_view_session_id(2)  # 会话视图：本会话不标注
     assert delegate._session_tag(other) == ""
     assert delegate._session_tag(same) == "[普通] "
+
+
+def test_add_item_filters_by_view_session():
+    """实时捕获只插入当前视图会话的条目（跨会话不混入，回归）。"""
+    from ui.history_view import HistoryView
+
+    view = HistoryView()
+    view.set_view_session_id(2)  # 视图 = 会话 2
+    view.add_item(ClipboardItem(type="text", content="belongs to 2",
+                                session_id=2))
+    view.add_item(ClipboardItem(type="text", content="belongs to 1",
+                                session_id=1))  # 其他会话 → 不插入
+    assert view._model.rowCount() == 1
+    assert view._model.index(0, 0).data(ROLE_ITEM).content == "belongs to 2"
+    view.close()
+
+
+def test_refresh_session_counts_updates_combo(tmp_path):
+    """新建会话复制内容后：下拉计数实时刷新（不用重启，回归）。"""
+    import hashlib
+
+    from database.engine import create_db_engine
+    from database.migrations import migrate
+    from services import history_service, session_service
+    from ui.history_view import HistoryView
+
+    engine = create_db_engine(tmp_path / "cnt.db")
+    migrate(engine)
+    session_service.ensure_default(engine)
+    sid = session_service.create_session(engine, "新任务")
+
+    view = HistoryView()
+    view.set_session_context(engine, session_service)
+    view.reload_sessions(sid)
+    assert "0 条" in view._session_combo.itemText(
+        view._session_combo.findData(sid))
+
+    # 模拟：复制内容落入新会话
+    item = ClipboardItem(type="text", content="new content", session_id=sid)
+    item.hash = hashlib.sha256(b"new content").hexdigest()
+    history_service.save_item(engine, item)
+    view.refresh_session_counts()
+    assert "1 条" in view._session_combo.itemText(
+        view._session_combo.findData(sid))
+    assert view._session_combo.currentData() == sid  # 选中保持不变
+    view.close()
+
+
+def test_main_window_initial_size_660():
+    """初始/最小窗口高度 660（顶部会话行 + 类型筛选 + 列表不挤压）。"""
+    from ui.main_window import MainWindow
+
+    w = MainWindow()
+    assert w.minimumHeight() == 660
+    assert w.height() == 660
+    w.close()
