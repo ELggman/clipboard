@@ -60,7 +60,9 @@ _RADIUS = 8                 # 选中/hover 圆角
 # 代码条目（§8.6）：meta 行 + 预览行数（最多 6 行）+ "+N more lines" 行
 _CODE_LINE_H = 18           # 代码预览行高
 _CODE_PREVIEW_MAX = 6       # 列表最多显示的代码行数
-_CODE_TOP_GAP = 26          # meta 基线到首行代码顶部
+# 首行代码基线 = 33（与文本行内容基线一致）——之前 26 时字形顶 ≈ meta 基线
+# 附近，内容紧贴时间·类型行（实测踩坑：看起来很靠上）
+_CODE_TOP_GAP = 33
 
 # 导出（scale=1 时的行高，测试用）
 ROW_HEIGHT = ROW_HEIGHT_BASE
@@ -660,10 +662,19 @@ class HistoryView(QWidget):
         self._apply_type_filter()
 
     def add_item(self, clipboard_item) -> None:
-        """追加一条实时捕获（最新在上；符合当前类型筛选才显示）。"""
-        self._all_items.insert(0, clipboard_item)
+        """追加一条实时捕获（置顶优先：插到置顶组之后，最新在上）。
+
+        与 list_recent 的 pinned DESC 排序一致——新条目（未置顶）不得
+        把置顶条目挤下去（实测踩坑：复制新文本后置顶跑到列表底部）。
+        """
+        pos = sum(1 for it in self._all_items if it.pinned)  # 置顶组大小
+        self._all_items.insert(pos, clipboard_item)
         if not self._filter_type or clipboard_item.type == self._filter_type:
-            self._model.insertRow(0, self._make_row(clipboard_item))
+            # 模型行号 = 新条目之前**可见**（符合筛选）的条目数
+            visible_before = sum(
+                1 for it in self._all_items[:pos]
+                if not self._filter_type or it.type == self._filter_type)
+            self._model.insertRow(visible_before, self._make_row(clipboard_item))
 
     # ---- 类型筛选 ----
 

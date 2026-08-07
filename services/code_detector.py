@@ -95,6 +95,9 @@ def detect(content: str) -> CodeResult | None:
         sql = _score_sql(text, lines)
         if sql >= 0.8:
             return CodeResult("sql", sql, True)
+        # 单行 rust：fn main() { println!("hi") }（fn 开头是 rust 专属签名）
+        if stripped.startswith("fn ") and "{" in stripped:
+            return CodeResult("rust", 0.9, False)
         yaml = _score_yaml(text, lines)
         if yaml >= 0.8:
             return CodeResult("yaml", yaml, True)
@@ -154,10 +157,11 @@ def _score_python(text: str, lines) -> float:
     strong = _hit_count(lines, "def ", "class ", "import ", "from ", "async ",
                         "@", "self.", "print(", "return ", "elif ", "except ",
                         "if __name__", ":=")
-    # 缩进结构：至少 2 行的行首空白 ≥ 2 空格（Python 显著特征）
+    # 缩进结构：≥2 空格缩进的行 ≥3 且强信号 ≥2 才加分
+    # （单行 import + 缩进会把 Swift 结构体误判为 Python，实测踩坑）
     indented = sum(1 for ln in lines if len(ln) - len(ln.lstrip()) >= 2)
     score = _score_from(strong)
-    if indented >= 3:
+    if indented >= 3 and strong >= 2:
         score = min(1.0, score + 0.15)
     return score
 
@@ -206,8 +210,9 @@ def _score_c(text: str, lines) -> float:
 
 
 def _score_cpp(text: str, lines) -> float:
-    hits = _hit_count(lines, "std::", "cout", "cin", "#include <iostream>",
-                      "namespace ", "template<", "class ", "public:", "private:")
+    hits = _hit_count(lines, "std::", "cout", "cin", "#include <", "int main",
+                      "using namespace", "namespace ", "template<", "class ",
+                      "public:", "private:", "push_back")
     score = _score_from(hits)
     if re.search(r"::", text):
         score = min(1.0, score + 0.1)
@@ -233,8 +238,9 @@ def _score_go(text: str, lines) -> float:
 
 
 def _score_rust(text: str, lines) -> float:
-    hits = _hit_count(lines, "fn ", "let mut", "impl ", "pub ", "use ",
-                      "match ", "println!", "struct ", "enum ")
+    hits = _hit_count(lines, "fn ", "fn main", "let mut", "impl ", "pub ",
+                      "use ", "match ", "println!", "struct ", "enum ",
+                      "vec!", "unwrap")
     score = _score_from(hits)
     if "::" in text or re.search(r"Option<|Result<", text):
         score = min(1.0, score + 0.1)
@@ -242,9 +248,9 @@ def _score_rust(text: str, lines) -> float:
 
 
 def _score_swift(text: str, lines) -> float:
-    hits = _hit_count(lines, "func ", "let ", "var ", "import Foundation",
-                      "guard ", "if let", "class ", "struct ", "override func",
-                      "return ")
+    hits = _hit_count(lines, "func ", "let ", "var ", "import ", "guard ",
+                      "if let", "class ", "struct ", "override func",
+                      "return ", "print(", "some View")
     score = _score_from(hits)
     if re.search(r"->\s*\w", text):  # 返回类型箭头
         score = min(1.0, score + 0.08)
@@ -291,7 +297,7 @@ _SHELL_CMDS = ("docker ", "git ", "brew ", "apt ", "apt-get", "sudo ", "cd ",
 _SINGLE_LINE_CMDS = ("docker ", "git ", "brew ", "apt ", "apt-get", "curl ",
                      "wget ", "npm ", "pip ", "pip3", "cargo ", "pnpm ",
                      "yarn ", "kubectl ", "ssh ", "scp ", "chmod ", "chown ",
-                     "make ", "export ")
+                     "make ", "export ", "echo ")
 
 
 def _looks_like_command(text: str) -> bool:
@@ -306,6 +312,13 @@ def _looks_like_command(text: str) -> bool:
     return ls.startswith(_SINGLE_LINE_CMDS)
 
 
+# 预处理器指令：不是 shell 注释（#include/#define/#if 等，实测把 C++ 误判为 shell）
+_PREPROCESSOR = ("#include", "#define", "#if", "#ifdef", "#ifndef", "#endif",
+                 "#elif", "#pragma", "#error", "#undef")
+# 重定向：> 前不能是 < 或单词字符（避免 <int> 泛型被当作重定向）
+_REDIRECT = re.compile(r"(?<![<\w])>\s*[\w./-]+")
+
+
 def _score_shell(text: str, lines) -> float:
     strong = 0
     for line in lines:
@@ -318,11 +331,11 @@ def _score_shell(text: str, lines) -> float:
             strong += 1
         elif re.search(r"\$\{?\w+\}?", ls):  # $VAR 引用
             strong += 1
-        elif ls.startswith("#") and ls != "#":
-            strong += 1  # 注释行
+        elif ls.startswith("#") and not ls.startswith(_PREPROCESSOR):
+            strong += 1  # 注释行（排除预处理器指令）
     if re.search(r"(&&|\|\|)", text):
         strong += 1
-    if "|" in text or re.search(r">\s*\S+", text):
+    if "|" in text or _REDIRECT.search(text):
         strong += 1
     return min(1.0, 0.45 + 0.18 * strong)
 

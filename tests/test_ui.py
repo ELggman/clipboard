@@ -1118,3 +1118,37 @@ def test_context_menu_toggle_sensitive(tmp_path):
     labels2 = [a.text() for a in menu2.actions()]
     assert "取消敏感标记" in labels2
     view.close()
+
+
+def test_add_item_pinned_stays_on_top():
+    """实时新增不把置顶条目挤下去（回归：pinned DESC 排序一致）。"""
+    from ui.history_view import HistoryView
+
+    view = HistoryView()
+    pinned = ClipboardItem(type="text", content="pinned item", pinned=1)
+    older = ClipboardItem(type="text", content="older unpinned")
+    view.set_items([older])
+    view.add_item(pinned)
+    assert view._model.index(0, 0).data(ROLE_ITEM).content == "pinned item"
+
+    # 新复制的内容（未置顶）→ 插到置顶组之后，不压顶
+    view.add_item(ClipboardItem(type="text", content="newest unpinned"))
+    assert view._model.index(0, 0).data(ROLE_ITEM).content == "pinned item"
+    assert view._model.index(1, 0).data(ROLE_ITEM).content == "newest unpinned"
+    assert view._model.index(2, 0).data(ROLE_ITEM).content == "older unpinned"
+    view.close()
+
+
+def test_add_item_pinned_with_type_filter():
+    """类型筛选激活时插入位置按可见项计算。"""
+    from ui.history_view import HistoryView
+
+    view = HistoryView()
+    pinned_img = ClipboardItem(type="image", file_path="/tmp/x.png", pinned=1)
+    txt = ClipboardItem(type="text", content="txt")
+    view.set_items([pinned_img, txt])
+    view._type_tabs.setCurrentRow(1)  # 文本筛选（pinned 图片不可见）
+    view.add_item(ClipboardItem(type="text", content="new txt"))
+    assert view._model.rowCount() == 2  # txt + new txt
+    assert view._model.index(0, 0).data(ROLE_ITEM).content == "new txt"
+    view.close()

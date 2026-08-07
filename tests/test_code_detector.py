@@ -128,3 +128,29 @@ def test_metadata_maps_available():
     assert EXTENSIONS["markdown"] == ".md"
     assert LANGUAGE_NAMES["csharp"] == "C#"
     assert LANGUAGE_EMOJI["python"] == "🐍"
+
+
+# ---- 回归：C++/Swift/Rust 误判（2026-08-07 用户实测）----
+
+REGRESSION_SAMPLES = [
+    # C++：using namespace + vector 泛型曾误判为 shell（#include 计为注释、
+    # <int> 计为重定向）
+    ("cpp", "#include <vector>\nusing namespace std;\nint main() {\n"
+            "    vector<int> v;\n    v.push_back(1);\n    return 0;\n}"),
+    # Swift：SwiftUI 结构体曾误判为 python（import+缩进加分）
+    ("swift", "import SwiftUI\nstruct ContentView: View {\n"
+              "    var body: some View {\n        Text(\"Hello\")\n    }\n}"),
+    # Rust 单行：fn 开头
+    ("rust", 'fn main() { println!("hello"); }'),
+    # Shell：echo 重定向单行
+    ("shell", "echo done > log.txt"),
+]
+
+
+@pytest.mark.parametrize("expected,content", REGRESSION_SAMPLES,
+                         ids=[s[0] + f"-{i}" for i, s in enumerate(REGRESSION_SAMPLES)])
+def test_detect_regression_misclassifications(expected, content):
+    r = detect(content)
+    assert r is not None, f"{expected} 应被检测到"
+    assert r.language == expected, f"期望 {expected}，实际 {r.language}"
+    assert r.confidence >= CODE_THRESHOLD
