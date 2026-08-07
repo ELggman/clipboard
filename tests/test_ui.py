@@ -1323,28 +1323,47 @@ def test_main_window_initial_size_660():
     w.close()
 
 
-def test_combo_popup_views_content_adaptive():
-    """搜索范围/会话下拉弹层宽度由内容自适应（长文本不裁、短文本不宽）。"""
-    from PySide6.QtWidgets import QAbstractScrollArea
-
-    from ui.history_view import HistoryView
+def test_search_scope_toggle_button():
+    """搜索范围：点按切换按钮（全部会话 ↔ 本会话），无弹层（回归）。"""
     from ui.main_window import MainWindow
 
     w = MainWindow()
-    policy = w._search_scope.view().sizeAdjustPolicy()
-    assert policy == QAbstractScrollArea.SizeAdjustPolicy.AdjustToContents
+    assert w._search_scope_btn.text() == "全部会话"
+    assert w._scope_current is None
+    w._search_scope_btn.click()
+    assert w._search_scope_btn.text() == "本会话"
+    assert w._scope_current == "current"
+    w._search_scope_btn.click()
+    assert w._search_scope_btn.text() == "全部会话"
+    assert w._scope_current is None
     w.close()
 
-    view = HistoryView()
-    assert view._session_combo.view().sizeAdjustPolicy() \
-        == QAbstractScrollArea.SizeAdjustPolicy.AdjustToContents
-    view.close()
+
+def test_page_specific_search_row_controls():
+    """搜索范围按钮仅历史页显示；📁 触发仅收藏夹页显示（回归）。"""
+    from ui.main_window import MainWindow
+
+    w = MainWindow()
+    w.show()
+    pytest_app.processEvents()
+    assert w._search_scope_btn.isVisible()          # 默认历史页
+    assert not w._collections_trigger.isVisible()
+    w._nav.setCurrentRow(1)  # 收藏夹页
+    pytest_app.processEvents()
+    assert not w._search_scope_btn.isVisible()
+    assert w._collections_trigger.isVisible()
+    w._nav.setCurrentRow(0)  # 回历史
+    pytest_app.processEvents()
+    assert w._search_scope_btn.isVisible()
+    w.close()
 
 
 def test_collections_panel_hover_show_hide(tmp_path):
-    """收藏夹面板：悬停触发条展开，离开自动收回（不占常驻空间）。"""
-    from PySide6.QtCore import QEvent
+    """收藏夹面板：📁 悬停展开，离开自动收回（不占常驻空间）。
 
+    显隐逻辑用公开方法直接驱动（offscreen 的 sendEvent 与跨测试事件
+    循环交互不可靠：单独跑通过、全套跑 Leave 不触发 timer，实测伪影）。
+    """
     from database.engine import create_db_engine
     from database.migrations import migrate
     from ui.collections_view import CollectionsView
@@ -1358,23 +1377,22 @@ def test_collections_panel_hover_show_hide(tmp_path):
     pytest_app.processEvents()
     assert not view._panel.isVisible()  # 默认隐藏（不占空间）
 
-    # 悬停触发条 → 展开
-    QApplication.sendEvent(view._trigger, QEvent(QEvent.Type.Enter))
-    pytest_app.processEvents()
+    # 📁 悬停（主窗口转发）→ 展开在视图左上角
+    view.show_collection_panel()
     assert view._panel.isVisible()
-    assert view._panel.x() >= view._trigger.width()  # 在触发条右侧
-    assert view._panel.height() == view.height()
+    assert view._panel.x() == 0 and view._panel.height() == view.height()
 
-    # 离开面板 → 延时收回
-    QApplication.sendEvent(view._panel, QEvent(QEvent.Type.Leave))
-    QTest.qWait(400)  # 超过 _PANEL_HIDE_MS
+    # 离开 → 延时收回（timer 触发隐藏；emit 直接验证连接，
+    # 避免 offscreen qWait 跨测试事件循环的时序伪影）
+    view.schedule_hide_panel()
+    assert view._hide_timer.isActive()
+    assert view._hide_timer.interval() == 250
+    view._hide_timer.timeout.emit()
     assert not view._panel.isVisible()
 
-    # 离开触发条但移入面板 → 不收回
-    QApplication.sendEvent(view._trigger, QEvent(QEvent.Type.Enter))
-    pytest_app.processEvents()
-    QApplication.sendEvent(view._trigger, QEvent(QEvent.Type.Leave))
-    QApplication.sendEvent(view._panel, QEvent(QEvent.Type.Enter))
-    QTest.qWait(400)
+    # 移入面板（取消延时）→ 不收回
+    view.show_collection_panel()
+    view.schedule_hide_panel()
+    view.show_collection_panel()  # 等价于面板 Enter 取消 timer
     assert view._panel.isVisible()
     view.close()

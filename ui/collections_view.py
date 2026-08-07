@@ -1,7 +1,8 @@
-"""收藏夹页：左侧触发条 + 悬浮收藏夹面板，右侧条目（DEVELOPMENT.md §4.4）。
+"""收藏夹页：悬浮收藏夹面板 + 条目区（DEVELOPMENT.md §4.4）。
 
-- 收藏夹列表不常驻：悬停左侧 📁 图标 → 浮层面板出现（选择/新建/重命名/
-  右键删除），鼠标离开自动收回；主界面只显示收藏内容
+- 收藏夹列表不常驻：📁 触发图标在主窗口搜索行（仅本页显示），
+  悬停 → 浮层面板出现（选择/新建/重命名/右键删除），鼠标离开自动收回；
+  主界面只显示收藏内容，条目区占满全宽
 - 条目复用 HistoryDelegate 渲染（缩略图/两行布局），点击 → 详情弹层，
   右键：复制 / 从收藏夹移除 / Actions
 """
@@ -66,15 +67,7 @@ class CollectionsView(QWidget):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(6)
 
-        # 左侧触发条：悬停展开浮层面板
-        self._trigger = QPushButton("📁")
-        self._trigger.setObjectName("collectionTrigger")
-        self._trigger.setFixedWidth(30)
-        self._trigger.setToolTip("收藏夹（悬停展开）")
-        self._trigger.installEventFilter(self)
-        layout.addWidget(self._trigger)
-
-        # 右侧条目区占满（收藏夹列表在浮层中，不占常驻空间）
+        # 条目区占满（收藏夹列表在浮层中；📁 触发图标在主窗口搜索行）
         self._model = QStandardItemModel(self)
         self._items = QListView()
         self._items.setObjectName("historyList")
@@ -109,26 +102,28 @@ class CollectionsView(QWidget):
         panel_layout.addWidget(new_btn)
         self._panel.hide()
 
-    # ---- 悬浮面板显隐（hover 展开/离开收回）----
+    # ---- 悬浮面板显隐（主窗口 📁 图标驱动）----
 
     def eventFilter(self, obj, event) -> bool:
-        """触发条/面板的 hover 显隐：进入显示，离开延时收回。"""
-        if event.type() == QEvent.Type.Enter:
-            if obj is self._trigger or obj is self._panel:
+        """面板自身 hover：进入取消收回，离开延时收回。"""
+        if obj is self._panel:
+            if event.type() == QEvent.Type.Enter:
                 self._hide_timer.stop()
-                self._show_panel()
-        elif event.type() == QEvent.Type.Leave:
-            if obj is self._trigger or obj is self._panel:
-                # 离开触发条但移入面板 → 面板的 Enter 会取消；
-                # 都离开才真正收回
+            elif event.type() == QEvent.Type.Leave:
                 self._hide_timer.start()
         return super().eventFilter(obj, event)
 
-    def _show_panel(self) -> None:
-        self._panel.move(self._trigger.width() + 4, 0)
+    def show_collection_panel(self) -> None:
+        """展开收藏夹面板（主窗口 📁 图标悬停调用）。"""
+        self._hide_timer.stop()
+        self._panel.move(0, 0)
         self._panel.setFixedHeight(self.height())
         self._panel.raise_()
         self._panel.show()
+
+    def schedule_hide_panel(self) -> None:
+        """延时收回（📁 图标移出；移入面板由 eventFilter 取消）。"""
+        self._hide_timer.start()
 
     def resizeEvent(self, event) -> None:
         """面板高度跟随视图（悬浮覆盖，不占布局）。"""

@@ -4,10 +4,8 @@
 """
 import logging
 
-from PySide6.QtCore import QTimer, Qt
+from PySide6.QtCore import QEvent, QTimer, Qt
 from PySide6.QtWidgets import (
-    QAbstractScrollArea,
-    QComboBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -15,6 +13,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QPushButton,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -51,6 +50,7 @@ class MainWindow(QMainWindow):
         self._engine = None          # FTS5 搜索（bootstrap 注入）
         self._full_items: list = []  # 完整历史缓存（清空搜索时恢复）
         self._active_session_id = 1  # 当前激活会话（保存目标 + 本会话搜索）
+        self._scope_current = None   # 搜索范围：None=全部会话 / "current"=本会话
         # 隐私模式状态指示（§9.4）：右侧永久控件 📋 监控中 / 🔒 监控已暂停
         self._privacy_label = QLabel("📋 监控中")
         self._privacy_label.setObjectName("privacyStatus")
@@ -90,22 +90,21 @@ class MainWindow(QMainWindow):
         self._search.setClearButtonEnabled(True)
         self._search.textChanged.connect(self._on_search)
         search_row.addWidget(self._search, 1)
-        # 搜索范围：全部会话 / 本会话（会话机制，v4）
-        self._search_scope = QComboBox()
-        self._search_scope.setObjectName("searchScope")
-        self._search_scope.setFixedHeight(30)
-        # 初始 380 宽下也要完整显示「全部会话」：QSS padding 会裁切文本
-        self._search_scope.setMinimumWidth(96)
-        # 弹出列表宽度**由内容自适应**（AdjustToContents）：
-        # 默认跟随按钮宽度会裁切长文本；固定 min-width 又过宽——
-        # 自适应在短文本时窄、长文本时刚好容纳（实测 popup 宽 156）
-        self._search_scope.view().setSizeAdjustPolicy(
-            QAbstractScrollArea.SizeAdjustPolicy.AdjustToContents)
-        self._search_scope.addItem("全部会话", None)
-        self._search_scope.addItem("本会话", "current")
-        self._search_scope.currentIndexChanged.connect(
-            lambda _: self._apply_search() if self._search.text().strip() else None)
-        search_row.addWidget(self._search_scope)
+        # 搜索范围（仅历史页显示）：点击切换「全部会话/本会话」。
+        # 不用下拉：弹层宽度在 380 窗口下反复出问题（先裁切后超宽），
+        # 点按切换按钮无弹层、文字即当前范围（实测最稳）
+        self._search_scope_btn = QPushButton("全部会话")
+        self._search_scope_btn.setObjectName("searchScopeBtn")
+        self._search_scope_btn.setFixedSize(76, 30)
+        self._search_scope_btn.clicked.connect(self._toggle_search_scope)
+        search_row.addWidget(self._search_scope_btn)
+        # 收藏夹触发图标（仅收藏夹页显示）：悬停展开收藏夹面板
+        self._collections_trigger = QPushButton("📁")
+        self._collections_trigger.setObjectName("collectionTrigger")
+        self._collections_trigger.setFixedSize(30, 30)
+        self._collections_trigger.setToolTip("收藏夹（悬停展开）")
+        self._collections_trigger.installEventFilter(self)
+        search_row.addWidget(self._collections_trigger)
         right.addLayout(search_row)
 
         self._pages = QStackedWidget()
@@ -130,8 +129,12 @@ class MainWindow(QMainWindow):
         返回历史页时从数据库重载：清理数据弹窗等外部删除后列表保持同步
         （收藏夹/时间线页自带 showEvent 重载，历史页数据由主窗口注入，
         故在此按搜索状态刷新——有搜索词重跑查询，否则重载完整历史）。
+        搜索范围按钮仅历史页显示；📁 收藏夹触发仅收藏夹页显示（页面专属
+        控件不跨页出现，实测收藏夹页出现范围选择是噪声）。
         """
         self._pages.setCurrentIndex(row)
+        self._search_scope_btn.setVisible(row == 0)
+        self._collections_trigger.setVisible(row == 1)
         if row == 0:
             if self._search.text().strip():
                 self._apply_search()  # 有搜索词：重新执行查询（结果同样可能过期）
@@ -140,6 +143,29 @@ class MainWindow(QMainWindow):
         from ui.animations import fade_in_widget
 
         fade_in_widget(self._pages.currentWidget())
+
+    def eventFilter(self, obj, event) -> bool:
+        """📁 触发图标：悬停展开收藏夹面板，离开延时收回（面板内可取消）。
+
+        仅收藏夹页为当前页时响应（防御：offscreen 测试中窗口 show 可能
+        向可见控件派发 Enter，导致面板误显示）。
+        """
+        if obj is self._collections_trigger and self._pages.currentIndex() == 1:
+            if event.type() == QEvent.Type.Enter:
+                self._show_collections_panel()
+            elif event.type() == QEvent.Type.Leave:
+                self._schedule_hide_collections_panel()
+        return super().eventFilter(obj, event)
+
+    def _show_collections_panel(self) -> None:
+        cv = self._pages.widget(1)
+        if isinstance(cv, CollectionsView):
+            cv.show_collection_panel()
+
+    def _schedule_hide_collections_panel(self) -> None:
+        cv = self._pages.widget(1)
+        if isinstance(cv, CollectionsView):
+            cv.schedule_hide_panel()
 
     def closeEvent(self, event) -> None:
         """关窗不退出：隐藏窗口、保持后台监听（菜单栏应用模式）。
@@ -172,8 +198,7 @@ class MainWindow(QMainWindow):
             return
         from services import history_service
 
-        sid = (self._active_session_id
-               if self._search_scope.currentData() == "current" else None)
+        sid = (self._active_session_id if self._scope_current else None)
         results = history_service.search_items(self._engine, query,
                                                session_id=sid)
         page.set_global_view()  # 全局/跨会话结果标注 [会话名] 标签
@@ -181,6 +206,14 @@ class MainWindow(QMainWindow):
         scope = "本会话" if sid is not None else "全部会话"
         self.statusBar().showMessage(
             f"搜索「{query}」（{scope}）：{len(results)} 条")
+
+    def _toggle_search_scope(self) -> None:
+        """点击切换搜索范围（全部会话 ↔ 本会话），按钮文字即时反映。"""
+        self._scope_current = None if self._scope_current else "current"
+        self._search_scope_btn.setText(
+            "本会话" if self._scope_current else "全部会话")
+        if self._search.text().strip():
+            self._apply_search()
 
     def set_search(self, engine) -> None:
         """注入数据库引擎（FTS5 搜索用，bootstrap 装配时调用）。"""

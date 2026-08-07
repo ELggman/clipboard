@@ -286,7 +286,19 @@ QPushButton#sessionMenuBtn {
 }
 QPushButton#sessionMenuBtn:hover { background: $search_bg; }
 
-/* 收藏夹触发条：悬停展开浮层面板 */
+/* 搜索范围切换按钮（全部会话/本会话，历史页）：点按切换无弹层 */
+QPushButton#searchScopeBtn {
+    background: $search_bg;
+    border: none;
+    border-radius: 8px;
+    padding: 0;
+    font-size: 12px;
+    color: $text;
+}
+QPushButton#searchScopeBtn:hover { background: $separator; }
+QPushButton#searchScopeBtn:pressed { background: $scrollbar_hover; }
+
+/* 收藏夹触发图标（搜索行，仅收藏夹页显示）：悬停展开浮层面板 */
 QPushButton#collectionTrigger {
     background: transparent;
     border: none;
