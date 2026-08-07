@@ -26,10 +26,10 @@ _PATTERNS: list[tuple[str, re.Pattern]] = [
         r"github_token|aws_access_key_id|stripe_secret_key)"
         r"\s*[=:]\s*['\"]?(?:sk-[A-Za-z0-9_\-]{10,}|[A-Za-z0-9_\-]{20,})['\"]?",
         re.IGNORECASE)),
-    # Token：access_token=/refresh_token=/auth_token=/bearer
+    # Token：token=/access_token=/refresh_token=/bearer（§9.13 含裸 token=）
     (TOKEN, re.compile(
         r"\b(?:access[_-]?token|refresh[_-]?token|auth[_-]?token|"
-        r"id[_-]?token|bearer\s+)\s*"
+        r"id[_-]?token|token|bearer\s+)\s*"
         r"[=:]\s*['\"]?[A-Za-z0-9._\-+/=]{20,}['\"]?",
         re.IGNORECASE)),
     # JWT：eyJ 开头三段 base64url

@@ -183,3 +183,83 @@ def test_settings_view_apply_and_persist(tmp_path):
     # 切换历史上限
     view._max_items.setCurrentIndex(2)  # 1000
     assert applied.get("max_items", {}).get("history", {}).get("max_items") == 1000
+
+
+# ---- 隐私管线决策（新增.md §9.5-9.17）----
+
+def _privacy_config(**overrides) -> dict:
+    cfg = {"policy": "warn", "temp_minutes": 5, "ignored_apps": []}
+    cfg.update(overrides)
+    return cfg
+
+
+def test_privacy_pipeline_excluded_app():
+    """来源应用在忽略列表 → 不保存（§9.6）。"""
+    import hashlib
+
+    from app.bootstrap import apply_privacy_policy
+    from app.types import ClipboardItem
+
+    item = ClipboardItem(type="text", content="secret from app",
+                         source_app="1Password")
+    item.hash = hashlib.sha256(b"x").hexdigest()
+    decision = apply_privacy_policy(item, _privacy_config(ignored_apps=["1Password"]))
+    assert decision == "excluded"
+    assert item.sensitive == 0  # 未进入检测
+
+
+def test_privacy_pipeline_warn_marks_sensitive():
+    """warn（默认）：保存但置 sensitive 标记（§9.17）。"""
+    import hashlib
+
+    from app.bootstrap import apply_privacy_policy
+    from app.types import ClipboardItem
+
+    item = ClipboardItem(type="text", content="OPENAI_API_KEY=sk-1234567890abcdef")
+    item.hash = hashlib.sha256(b"x").hexdigest()
+    assert apply_privacy_policy(item, _privacy_config()) == "save"
+    assert item.sensitive == 1
+    assert item.sensitive_type == "api_key"
+    assert item.expires_at == ""  # warn 不过期
+
+
+def test_privacy_pipeline_ignore_skips():
+    """ignore：不保存（§9.17）。"""
+    import hashlib
+
+    from app.bootstrap import apply_privacy_policy
+    from app.types import ClipboardItem
+
+    item = ClipboardItem(type="text", content="password='hunter2secret'")
+    item.hash = hashlib.sha256(b"x").hexdigest()
+    decision = apply_privacy_policy(item, _privacy_config(policy="ignore"))
+    assert decision == "sensitive_ignore"
+
+
+def test_privacy_pipeline_save_temporarily_sets_expiry():
+    """save_temporarily：保存并设置 expires_at（§9.9/§9.17）。"""
+    import hashlib
+
+    from app.bootstrap import apply_privacy_policy
+    from app.types import ClipboardItem
+
+    item = ClipboardItem(type="text", content="token=abcdefghijklmnopqrstuvwxyz123")
+    item.hash = hashlib.sha256(b"x").hexdigest()
+    decision = apply_privacy_policy(
+        item, _privacy_config(policy="save_temporarily", temp_minutes=10))
+    assert decision == "save"
+    assert item.sensitive == 1
+    assert item.expires_at != ""
+
+
+def test_privacy_pipeline_plain_content_passes():
+    """普通内容不受影响（§9.7：无法判断来源也不丢弃）。"""
+    import hashlib
+
+    from app.bootstrap import apply_privacy_policy
+    from app.types import ClipboardItem
+
+    item = ClipboardItem(type="text", content="hello world")
+    item.hash = hashlib.sha256(b"x").hexdigest()
+    assert apply_privacy_policy(item, _privacy_config()) == "save"
+    assert item.sensitive == 0

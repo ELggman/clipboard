@@ -184,46 +184,16 @@ def start_workspace(app: QApplication) -> None:
 
     # 闭环：监听 → 隐私管线（排除/敏感策略）→ 图片落盘 → 去重落库 → UI 刷新
     def on_clipboard_changed(item: ClipboardItem) -> None:
-        # 1) 来源应用排除（§9.5/§9.6）：不落库、不进 FTS，仅日志（不含内容）
-        privacy = config["privacy"]
-        if item.source_app and item.source_app in privacy["ignored_apps"]:
-            logger.info("Clipboard item ignored source_app=%s"
-                        " reason=application_exclusion", item.source_app)
+        decision = apply_privacy_policy(item, config["privacy"])
+        if decision != "save":
+            # 跳过原因（不含内容，§9.23）→ 状态栏 3 秒反馈
             window.statusBar().showMessage(
-                f"已忽略来自 {item.source_app} 的剪贴板", 3000)
+                "已忽略来自 %s 的剪贴板" % item.source_app
+                if decision == "excluded"
+                else "检测到潜在机密，已忽略", 3000)
             return
 
-        # 2) 敏感内容检测（§9.11-9.17）：warn → 保存但标记遮蔽；
-        #    ignore → 不保存；save_temporarily → 保存并设 expires_at
-        if item.type in ("text", "url", "code") and item.content:
-            from services.sensitive_detector import detect as detect_sensitive
-
-            result = detect_sensitive(item.content)
-            if result is not None:
-                item.sensitive = 1
-                item.sensitive_type = result.sensitive_type
-                policy = privacy["policy"]
-                if policy == "ignore":
-                    logger.info("Sensitive clipboard detected type=%s"
-                                " action=ignore", result.sensitive_type)
-                    window.statusBar().showMessage(
-                        f"检测到潜在机密（{result.sensitive_type}），已忽略",
-                        3000)
-                    return
-                if policy == "save_temporarily":
-                    from datetime import datetime, timedelta
-
-                    item.expires_at = (datetime.now() + timedelta(
-                        minutes=int(privacy["temp_minutes"])
-                    )).strftime("%Y-%m-%d %H:%M:%S")
-                    logger.info("Sensitive clipboard detected type=%s"
-                                " action=save_temporarily expires_at=%s",
-                                result.sensitive_type, item.expires_at)
-                else:
-                    logger.info("Sensitive clipboard detected type=%s"
-                                " action=warn", result.sensitive_type)
-
-        # 3) 图片落盘
+        # 图片落盘
         if item.type == "image" and item.data:
             try:
                 item.file_path = str(image_service.save(item.data))
@@ -276,6 +246,48 @@ def start_workspace(app: QApplication) -> None:
 
 
 # ---- 回调 ----
+
+def apply_privacy_policy(item: ClipboardItem, privacy: dict) -> str:
+    """隐私管线决策（新增.md §9.5-9.17），返回 "save" 或跳过原因。
+
+    - "excluded"：来源应用在忽略列表（§9.6）——不落库、不进 FTS
+    - "sensitive_ignore"：敏感策略 ignore（§9.17）
+    - "save"：继续保存（warn 置 sensitive 标记；save_temporarily 设 expires_at）
+
+    副作用：按策略修改 item.sensitive / sensitive_type / expires_at。
+    日志一律不含剪贴板原文（§9.23）。
+    """
+    if item.source_app and item.source_app in privacy["ignored_apps"]:
+        logger.info("Clipboard item ignored source_app=%s"
+                    " reason=application_exclusion", item.source_app)
+        return "excluded"
+
+    if item.type in ("text", "url", "code") and item.content:
+        from services.sensitive_detector import detect as detect_sensitive
+
+        result = detect_sensitive(item.content)
+        if result is not None:
+            item.sensitive = 1
+            item.sensitive_type = result.sensitive_type
+            policy = privacy.get("policy", "warn")
+            if policy == "ignore":
+                logger.info("Sensitive clipboard detected type=%s"
+                            " action=ignore", result.sensitive_type)
+                return "sensitive_ignore"
+            if policy == "save_temporarily":
+                from datetime import datetime, timedelta
+
+                item.expires_at = (datetime.now() + timedelta(
+                    minutes=int(privacy.get("temp_minutes", 5))
+                )).strftime("%Y-%m-%d %H:%M:%S")
+                logger.info("Sensitive clipboard detected type=%s"
+                            " action=save_temporarily expires_at=%s",
+                            result.sensitive_type, item.expires_at)
+            else:
+                logger.info("Sensitive clipboard detected type=%s"
+                            " action=warn", result.sensitive_type)
+    return "save"
+
 
 def _on_permission_required() -> None:
     """辅助功能未授权：提示引导，不弹窗打断（V1.5 做引导对话框）。"""
