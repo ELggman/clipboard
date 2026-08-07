@@ -9,14 +9,21 @@ app:
 history:
   max_items: 500           # 100 / 500 / 1000 / -1(无限)
   save_images: true
-  auto_delete_days: 30     # 7 / 30 / 90 / -1(永不)
+  auto_delete_days: 30     # 1 / 7 / 30 / 90 / 365 / -1(永不)
   poll_interval: 0.2       # 剪贴板轮询间隔（秒）
   show_image_filename: true  # 图片条目是否显示文件名（False 显示「时间 · image」）
+
+# Privacy Mode（§9）：敏感内容处理策略与来源应用排除
+privacy:
+  policy: warn             # warn(提醒,保存但遮蔽显示) / ignore(不保存) / save_temporarily(临时保存)
+  temp_minutes: 5          # save_temporarily 的到期分钟数
+  ignored_apps: []         # 来源应用排除列表，如 ["1Password"]（§9.5）
 
 hotkey:
   enabled: true
   keycode: 9               # 物理键 vk 码：V = 9（不依赖键盘布局）
-  flags: [command, shift]  # ⌘⇧V
+  flags: [command, shift]  # ⌘⇧V（Quick Paste）
+  privacy_keycode: 35      # ⌘⇧P 隐私模式开关（P = 35）
 
 snippet:
   date_format: "%Y-%m-%d"

@@ -6,13 +6,14 @@ TEXT = "text"
 URL = "url"
 IMAGE = "image"
 FILE = "file"
+CODE = "code"          # 代码模式：启发式检测置信度 ≥0.80 时标记（§8）
 
 
 @dataclass
 class ClipboardItem:
     """一条待处理/已解析的剪贴板内容。"""
 
-    type: str = TEXT          # text / url / image / file
+    type: str = TEXT          # text / url / image / file / code
     content: str = ""         # 文本内容；url 存 URL
     preview: str = ""         # 列表预览文案
     file_path: str = ""       # image/file 的存储路径
@@ -23,6 +24,16 @@ class ClipboardItem:
     id: int = 0               # 数据库主键（落库后回填，右键菜单操作需要）
     pinned: int = 0           # 置顶（列表排序优先）
     favorite: int = 0         # 收藏
+    # Code Mode 元数据（§8.16；text 条目也可能带辅助语言信息，§8.4.3）
+    language: str = ""            # 检测语言：python / javascript / ...
+    language_confidence: float = 0.0   # 0.0 - 1.0
+    line_count: int = 0         # 代码行数
+    character_count: int = 0    # 字符数
+    is_structured: int = 0      # json/yaml/sql 结构化数据
+    # Privacy Mode（§9）
+    sensitive: int = 0          # 敏感标记（warn 策略保存后置 1）
+    sensitive_type: str = ""    # api_key / token / jwt / private_key / password
+    expires_at: str = ""        # 临时条目到期时间（save_temporarily）
 
     def display_text(self, max_len: int = 100) -> str:
         return self.preview or self.content[:max_len]

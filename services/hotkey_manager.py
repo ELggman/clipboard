@@ -17,6 +17,8 @@ logger = logging.getLogger(__name__)
 
 # ⌘⇧V：V 的物理 vk 码 = 9（不依赖键盘布局）
 KEY_V = 9
+# ⌘⇧P：P 的物理 vk 码 = 35（隐私模式开关，新增.md §9.4）
+KEY_P = 35
 MASK_HOTKEY = Quartz.kCGEventFlagMaskCommand | Quartz.kCGEventFlagMaskShift
 
 _INSTANCE: "HotkeyManager | None" = None
@@ -46,17 +48,25 @@ def _tap_callback(_proxy, _event_type, event, _refcon):
 
 
 class HotkeyManager(QObject):
-    """全局热键监听。回调内只做轻量匹配；跨线程用 Qt signal 派发到主线程。"""
+    """全局热键监听（多绑定）。回调内只做轻量匹配；跨线程用 Qt signal 派发到主线程。
 
-    activated = Signal()           # 热键触发（主线程接收）
+    绑定：构造函数注册默认 ⌘⇧V → activated；add_binding() 可追加其它热键
+    （如 ⌘⇧P → privacy_toggle）。所有绑定共享一个 CGEventTap。
+    """
+
+    activated = Signal()           # ⌘⇧V Quick Paste（主线程接收）
+    privacy_toggle = Signal()      # ⌘⇧P 隐私模式开关（新增.md §9.4）
     permission_required = Signal()  # 未授权/创建失败
 
     def __init__(self, keycode: int = KEY_V, mask: int = MASK_HOTKEY, parent: QObject | None = None):
         super().__init__(parent)
-        self._keycode = keycode
-        self._mask = mask
+        self._bindings: list[tuple[int, int, Signal]] = [(keycode, mask, self.activated)]
         self._tap = None
         self._thread: threading.Thread | None = None
+
+    def add_binding(self, keycode: int, mask: int, signal: Signal) -> None:
+        """追加热键绑定（start() 前调用）。"""
+        self._bindings.append((keycode, mask, signal))
 
     def start(self) -> bool:
         global _INSTANCE
@@ -82,7 +92,7 @@ class HotkeyManager(QObject):
             target=self._run_loop, name="hotkey-tap", daemon=True
         )
         self._thread.start()
-        logger.info("全局热键启动 (vk=%d mask=%d)", self._keycode, self._mask)
+        logger.info("全局热键启动 (%d 个绑定)", len(self._bindings))
         return True
 
     def stop(self) -> None:
@@ -93,17 +103,16 @@ class HotkeyManager(QObject):
         logger.info("全局热键已停止")
 
     def handle_event(self, event) -> bool:
-        """匹配热键。返回 True 表示已消费事件。回调内不得做重活。"""
-        flags = Quartz.CGEventGetFlags(event)
-        keycode = Quartz.CGEventGetIntegerValueField(event, Quartz.kCGKeyboardEventKeycode)
-        if keycode != self._keycode:
-            return False
-        if flags & self._mask != self._mask:
-            return False
+        """匹配热键（遍历所有绑定）。返回 True 表示已消费事件。回调内不得做重活。"""
         if Quartz.CGEventGetIntegerValueField(event, Quartz.kCGKeyboardEventAutorepeat):
             return True  # 自动重复直接吞掉，不重复触发
-        self.activated.emit()
-        return True
+        flags = Quartz.CGEventGetFlags(event)
+        keycode = Quartz.CGEventGetIntegerValueField(event, Quartz.kCGKeyboardEventKeycode)
+        for kc, mask, signal in self._bindings:
+            if keycode == kc and flags & mask == mask:
+                signal.emit()
+                return True
+        return False
 
     # ---- 内部 ----
 

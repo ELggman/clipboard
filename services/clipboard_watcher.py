@@ -23,7 +23,7 @@ from AppKit import (
 )
 from PySide6.QtCore import QObject, QTimer, Signal
 
-from app.types import FILE, IMAGE, TEXT, URL, ClipboardItem
+from app.types import CODE, FILE, IMAGE, TEXT, URL, ClipboardItem
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +36,7 @@ class ClipboardWatcher(QObject):
     def __init__(self, poll_interval: float = 0.2, parent: QObject | None = None):
         super().__init__(parent)
         self._last_change = NSPasteboard.generalPasteboard().changeCount()
+        self._paused = False          # 隐私模式：暂停保存（§9.3）
         self._timer = QTimer(self)
         self._timer.setInterval(int(poll_interval * 1000))
         self._timer.timeout.connect(self._poll)
@@ -47,6 +48,11 @@ class ClipboardWatcher(QObject):
     def stop(self) -> None:
         self._timer.stop()
 
+    def set_paused(self, paused: bool) -> None:
+        """暂停/恢复监听。暂停期间仍记录 changeCount（恢复时不爆发补抓）。"""
+        self._paused = paused
+        logger.info("剪贴板监听已%s", "暂停" if paused else "恢复")
+
     # ---- 内部 ----
 
     def _poll(self) -> None:
@@ -55,6 +61,9 @@ class ClipboardWatcher(QObject):
         if change == self._last_change:
             return
         self._last_change = change
+        if self._paused:
+            logger.debug("剪贴板变化但监听已暂停，忽略")
+            return
         item = self._parse(pb)
         if item is None:
             logger.debug("剪贴板变化，但无可解析内容")
@@ -110,9 +119,26 @@ class ClipboardWatcher(QObject):
                 type=URL, content=text, source_app=source_app,
                 hash=ClipboardWatcher._digest(text),
             )
+        # Code Mode（§8）：启发式检测，置信度 >= 0.80 → type=code；
+        # 否则保留语言作为辅助信息（§8.4.3）
+        from services.code_detector import CODE_THRESHOLD, detect as detect_code
+
+        result = detect_code(text)
+        if result is not None and result.confidence >= CODE_THRESHOLD:
+            return ClipboardItem(
+                type=CODE, content=text, source_app=source_app,
+                hash=ClipboardWatcher._digest(text),
+                language=result.language,
+                language_confidence=result.confidence,
+                line_count=len(text.splitlines()),
+                character_count=len(text),
+                is_structured=1 if result.is_structured else 0,
+            )
         return ClipboardItem(
             type=TEXT, content=text, source_app=source_app,
             hash=ClipboardWatcher._digest(text),
+            language=result.language if result else "",
+            language_confidence=result.confidence if result else 0.0,
         )
 
     @staticmethod

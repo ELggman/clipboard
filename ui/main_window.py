@@ -6,6 +6,7 @@ import logging
 
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import (
+    QLabel,
     QLineEdit,
     QListView,
     QListWidget,
@@ -45,6 +46,10 @@ class MainWindow(QMainWindow):
         self.statusBar().setSizeGripEnabled(False)
         self._engine = None          # FTS5 搜索（bootstrap 注入）
         self._full_items: list = []  # 完整历史缓存（清空搜索时恢复）
+        # 隐私模式状态指示（§9.4）：右侧永久控件 📋 监控中 / 🔒 监控已暂停
+        self._privacy_label = QLabel("📋 监控中")
+        self._privacy_label.setObjectName("privacyStatus")
+        self.statusBar().addPermanentWidget(self._privacy_label)
         self._build_ui()
         self._bind_feedback()
         self.statusBar().showMessage("就绪")
@@ -215,12 +220,21 @@ class MainWindow(QMainWindow):
             page.feedback.connect(self.statusBar().showMessage)
 
     def set_settings_context(self, config, appliers, config_path=None,
-                             engine=None) -> None:
-        """设置页注入：当前配置 + 生效回调 + 引擎（清理数据，bootstrap 装配）。"""
+                             engine=None, privacy_state=None) -> None:
+        """设置页注入：当前配置 + 生效回调 + 引擎 + 隐私状态（bootstrap 装配）。"""
         page = next((self._pages.widget(i) for i in range(self._pages.count())
                      if isinstance(self._pages.widget(i), SettingsView)), None)
         if page is not None:
-            page.set_context(config, appliers, config_path, engine)
+            page.set_context(config, appliers, config_path, engine, privacy_state)
+
+    def set_privacy_status(self, paused: bool) -> None:
+        """隐私模式状态栏指示（bootstrap 的 PrivacyState.changed 驱动）。"""
+        if paused:
+            self._privacy_label.setText("🔒 监控已暂停")
+            self._privacy_label.setProperty("paused", True)
+        else:
+            self._privacy_label.setText("📋 监控中")
+            self._privacy_label.setProperty("paused", False)
 
     def refresh_history(self, clipboard_item, is_new: bool = True) -> None:
         """剪贴板条目回调：is_new=True 追加列表；状态栏区分新增/去重。"""

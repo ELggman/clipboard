@@ -1,0 +1,130 @@
+"""Code Detector 单元测试：18 语言识别、置信度、负例、性能。"""
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import pytest
+
+from services.code_detector import CODE_THRESHOLD, CodeResult, detect
+
+
+# ---- 正例：每种语言一个典型片段 ----
+
+SAMPLES = [
+    ("python", "def hello(name):\n    return f\"Hello {name}\"\n\n"
+               "if __name__ == '__main__':\n    print(hello('world'))"),
+    ("javascript", "function add(a, b) {\n    return a + b;\n}\n"
+                   "const result = add(1, 2);\nconsole.log(result);"),
+    ("typescript", "interface User {\n    id: number;\n    name: string;\n}\n"
+                   "const u: User = { id: 1, name: 'a' };\nconsole.log(u);"),
+    ("java", "public class Hello {\n    public static void main(String[] args) {\n"
+             "        System.out.println(\"hi\");\n    }\n}"),
+    ("c", "#include <stdio.h>\nint main() {\n    printf(\"hi\\n\");\n"
+          "    return 0;\n}"),
+    ("cpp", "#include <iostream>\nint main() {\n    std::cout << \"hi\";\n"
+            "    return 0;\n}"),
+    ("csharp", "using System;\npublic class Program {\n"
+               "    public static void Main() {\n"
+               "        Console.WriteLine(\"hi\");\n    }\n}"),
+    ("go", "package main\n\nimport \"fmt\"\n\nfunc main() {\n"
+           "    fmt.Println(\"hi\")\n}"),
+    ("rust", "fn main() {\n    let msg = String::from(\"hi\");\n"
+             "    println!(\"{}\", msg);\n}"),
+    ("swift", "import Foundation\nfunc greet(name: String) -> String {\n"
+              "    return \"Hello \\(name)\"\n}\nlet g = greet(name: \"a\")"),
+    ("kotlin", "fun main() {\n    val msg = \"hi\"\n    println(msg)\n}"),
+    ("sql", "SELECT name, age\nFROM users\nWHERE age > 18\n"
+            "ORDER BY age DESC;"),
+    ("shell", "#!/bin/bash\nexport APP_ENV=production\n"
+              "docker compose up -d && docker ps"),
+    ("html", "<!DOCTYPE html>\n<html>\n<head><title>Page</title></head>\n"
+             "<body>\n  <div class=\"main\">Hello</div>\n</body>\n</html>"),
+    ("css", ".btn {\n    color: #fff;\n    background: #007aff;\n"
+            "    border-radius: 8px;\n}\n@media (max-width: 600px) {\n"
+            "    .btn { font-size: 12px; }\n}"),
+    ("json", '{"name": "Alice", "age": 20, "skills": ["Python", "SQL"]}'),
+    ("yaml", "server:\n  host: localhost\n  ports:\n    - 8080\n    - 9090\n"
+             "name: test"),
+    ("markdown", "# 标题\n\n- 列表项一\n- 列表项二\n\n```python\nprint(1)\n```"),
+]
+
+
+@pytest.mark.parametrize("expected,content", SAMPLES,
+                         ids=[s[0] for s in SAMPLES])
+def test_detect_known_languages(expected, content):
+    result = detect(content)
+    assert result is not None, f"{expected} 应被检测到"
+    assert result.language == expected, f"期望 {expected}，实际 {result.language}"
+    assert result.confidence >= CODE_THRESHOLD, (
+        f"{expected} 置信度 {result.confidence} 应 >= {CODE_THRESHOLD}")
+
+
+def test_detect_none_for_plain_text():
+    assert detect("Hello, how are you?") is None
+    assert detect("") is None
+    assert detect("   \n  ") is None
+    assert detect("今天天气不错，我们去公园散步吧") is None
+
+
+def test_detect_short_text_is_not_code():
+    """短内容（<2 行且无强信号）不算代码。"""
+    assert detect("hi") is None
+    assert detect("a b c") is None
+
+
+def test_python_scores_highest_than_js():
+    py = "def hello():\n    return 1\n\nprint(hello())"
+    r = detect(py)
+    assert r.language == "python"
+    # 直接对比 python 与 javascript 的原始分
+    from services import code_detector as cd
+
+    scores = {
+        "python": cd._score_python(py, py.splitlines()),
+        "javascript": cd._score_javascript(py, py.splitlines()),
+    }
+    assert scores["python"] > scores["javascript"]
+
+
+def test_json_structured_flag():
+    r = detect('{"a": 1, "b": [2, 3]}')
+    assert r is not None and r.is_structured and r.language == "json"
+    r = detect("SELECT * FROM t WHERE x = 1;")
+    assert r is not None and r.is_structured and r.language == "sql"
+
+
+def test_low_confidence_keeps_language_auxiliary():
+    """弱证据：仍有语言信息但置信度低于阈值（调用方保留为辅助字段）。"""
+    # 仅两处 'def '，结构证据弱 → 0.73 < 0.80
+    r = detect("def a():\n    pass\n\ndef b():\n    pass")
+    assert r is not None
+    assert r.language == "python"
+    assert r.confidence < CODE_THRESHOLD
+
+
+def test_shell_export_detected():
+    """联动场景：shell 导出环境变量（§10 示例）。"""
+    r = detect('export OPENAI_API_KEY="sk-xxxxxxxxxxxxxxxx"')
+    assert r is not None and r.language == "shell"
+
+
+def test_performance_under_20ms():
+    """§11.2：代码检测 < 20ms（含最坏情况长文本）。"""
+    snippet = "def f(a):\n    return a * 2\n\nprint(f(21))\n"
+    long_text = snippet * 200  # ~4400 字符，触发截断路径
+    start = time.perf_counter()
+    for _ in range(100):
+        detect(long_text)
+    elapsed_ms = (time.perf_counter() - start) * 1000 / 100
+    assert elapsed_ms < 20, f"检测耗时 {elapsed_ms:.1f}ms，超出 20ms 限制"
+
+
+def test_metadata_maps_available():
+    from services.code_detector import EXTENSIONS, LANGUAGE_EMOJI, LANGUAGE_NAMES
+
+    assert EXTENSIONS["python"] == ".py"
+    assert EXTENSIONS["markdown"] == ".md"
+    assert LANGUAGE_NAMES["csharp"] == "C#"
+    assert LANGUAGE_EMOJI["python"] == "🐍"

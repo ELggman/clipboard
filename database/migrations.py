@@ -12,7 +12,7 @@ from .models import Base
 
 logger = logging.getLogger(__name__)
 
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 
 # 幂等扩展 DDL（FTS5 全文索引 + 常用索引）
 _EXTRA_DDL = [
@@ -33,6 +33,8 @@ def migrate(engine: Engine) -> None:
 
     if current < 2:
         _upgrade_v2_collection_snapshot(engine)
+    if current < 3:
+        _upgrade_v3_code_privacy(engine)
 
     with engine.begin() as conn:
         for ddl in _EXTRA_DDL:
@@ -75,3 +77,32 @@ def _upgrade_v2_collection_snapshot(engine: Engine) -> None:
             " LEFT JOIN clipboard_items i ON i.id = o.clipboard_id"))
         conn.execute(text("DROP TABLE collection_items_old"))
         logger.info("v2 迁移：collection_items 已快照化并回填")
+
+
+def _upgrade_v3_code_privacy(engine: Engine) -> None:
+    """v2 → v3：clipboard_items 增加 Code Mode / Privacy Mode 元数据列。
+
+    全部 nullable 或带 DEFAULT（SQLite ALTER TABLE ADD COLUMN 限制），
+    PRAGMA table_info 防重（新库由 create_all 已建好全部列）。
+    """
+    new_cols = [
+        ("language", "VARCHAR(32)"),
+        ("language_confidence", "REAL"),
+        ("line_count", "INTEGER DEFAULT 0"),
+        ("character_count", "INTEGER DEFAULT 0"),
+        ("is_structured", "INTEGER DEFAULT 0"),
+        ("sensitive", "INTEGER DEFAULT 0"),
+        ("sensitive_type", "VARCHAR(32)"),
+        ("expires_at", "DATETIME"),
+    ]
+    with engine.begin() as conn:
+        existing = {r[1] for r in conn.execute(
+            text("PRAGMA table_info(clipboard_items)")).fetchall()}
+        for col_name, col_type in new_cols:
+            if col_name not in existing:
+                conn.execute(text(
+                    f"ALTER TABLE clipboard_items ADD COLUMN {col_name} {col_type}"))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_items_expires "
+            "ON clipboard_items (expires_at)"))
+    logger.info("v3 迁移：code/privacy 元数据列已添加")

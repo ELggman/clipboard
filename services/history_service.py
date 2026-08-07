@@ -28,6 +28,17 @@ def compute_preview(item: ClipboardItem) -> str:
     return item.content[:_PREVIEW_LEN]
 
 
+def _parse_expires(expires_at: str) -> datetime | None:
+    """临时条目的 expires_at 字符串 → datetime（空/非法返回 None）。"""
+    if not expires_at:
+        return None
+    try:
+        return datetime.strptime(expires_at, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        logger.warning("expires_at 格式无法解析，按不过期处理: %s", expires_at)
+        return None
+
+
 def list_recent(engine: Engine, limit: int = 500) -> list[ClipboardItem]:
     """加载最近 N 条（置顶优先，其余最新优先），启动恢复/分页/右键刷新共用。
 
@@ -80,6 +91,15 @@ def _to_item(row: ItemRow) -> ClipboardItem:
         id=row.id,
         pinned=row.pinned,
         favorite=row.favorite,
+        language=row.language or "",
+        language_confidence=row.language_confidence or 0.0,
+        line_count=row.line_count or 0,
+        character_count=row.character_count or 0,
+        is_structured=row.is_structured or 0,
+        sensitive=row.sensitive or 0,
+        sensitive_type=row.sensitive_type or "",
+        expires_at=(row.expires_at.strftime("%Y-%m-%d %H:%M:%S")
+                    if row.expires_at else ""),
     )
 
 
@@ -117,6 +137,27 @@ def delete_older_than(engine: Engine, days: int) -> list[str]:
     with engine.begin() as conn:
         _delete_rows_and_rebuild(conn, ids)
     logger.info("自动删除 %d 条旧历史（%d 天前）", len(ids), days)
+    return [row[1] for row in rows if row[1]]
+
+
+def delete_expired(engine: Engine) -> list[str]:
+    """删除已过期的临时条目（save_temporarily 策略，§9.9）。
+
+    返回图片文件路径供调用方清理磁盘文件。
+    """
+    now = datetime.now()
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text("SELECT id, file_path FROM clipboard_items"
+                 " WHERE expires_at IS NOT NULL AND expires_at < :now"),
+            {"now": now},
+        ).fetchall()
+        ids = [row[0] for row in rows]
+        if not ids:
+            return []
+    with engine.begin() as conn:
+        _delete_rows_and_rebuild(conn, ids)
+    logger.info("已删除 %d 条过期临时条目", len(ids))
     return [row[1] for row in rows if row[1]]
 
 
@@ -312,8 +353,12 @@ def save_item(engine: Engine, item: ClipboardItem, max_items: int = 500) -> bool
                 text(
                     "INSERT INTO clipboard_items"
                     " (type, content, preview, file_path, hash, source_app,"
-                    "  favorite, pinned, created_at, updated_at)"
-                    " VALUES (:t, :c, :p, :f, :h, :s, 0, 0, :now, :now)"
+                    "  favorite, pinned, created_at, updated_at,"
+                    "  language, language_confidence, line_count, character_count,"
+                    "  is_structured, sensitive, sensitive_type, expires_at)"
+                    " VALUES (:t, :c, :p, :f, :h, :s, 0, 0, :now, :now,"
+                    "  :lang, :lang_conf, :lines, :chars, :structured,"
+                    "  :sens, :sens_type, :expires)"
                 ),
                 {
                     "t": item.type,
@@ -323,6 +368,14 @@ def save_item(engine: Engine, item: ClipboardItem, max_items: int = 500) -> bool
                     "h": item.hash,
                     "s": item.source_app,
                     "now": now,
+                    "lang": item.language or None,
+                    "lang_conf": item.language_confidence or None,
+                    "lines": item.line_count or 0,
+                    "chars": item.character_count or 0,
+                    "structured": item.is_structured or 0,
+                    "sens": item.sensitive or 0,
+                    "sens_type": item.sensitive_type or None,
+                    "expires": _parse_expires(item.expires_at),
                 },
             )
         except IntegrityError:
@@ -337,11 +390,13 @@ def save_item(engine: Engine, item: ClipboardItem, max_items: int = 500) -> bool
         )
 
         # 数量上限裁剪：删除第 max_items 新之后的所有旧记录（同步删 FTS 索引）
+        # 置顶优先豁免（§9.22：pinned 不参与自动删除，与 trim_history 一致）
         # LIMIT -1 = 不限行数，从 OFFSET :m 位置取到末尾
         if max_items > 0:
             overflow = conn.execute(
                 text("SELECT id FROM clipboard_items"
-                     " ORDER BY created_at DESC, id DESC LIMIT -1 OFFSET :m"),
+                     " ORDER BY pinned DESC, created_at DESC, id DESC"
+                     " LIMIT -1 OFFSET :m"),
                 {"m": max_items},
             ).fetchall()
             for (old_id,) in overflow:

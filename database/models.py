@@ -17,7 +17,7 @@ class ClipboardItem(Base):
     __tablename__ = "clipboard_items"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    type: Mapped[str] = mapped_column(String(16), nullable=False)  # text/url/image/file
+    type: Mapped[str] = mapped_column(String(16), nullable=False)  # text/url/image/file/code
     content: Mapped[str | None] = mapped_column(Text)              # 文本；url 存 URL
     preview: Mapped[str | None] = mapped_column(Text)              # 列表预览文案
     file_path: Mapped[str | None] = mapped_column(Text)            # image/file 存储路径
@@ -27,6 +27,17 @@ class ClipboardItem(Base):
     pinned: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    # Code Mode 元数据（§8.16）
+    # server_default：裸 SQL INSERT（测试/迁移回填）不提供这些列时也不违反约束
+    language: Mapped[str | None] = mapped_column(String(32))
+    language_confidence: Mapped[float | None] = mapped_column()
+    line_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    character_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    is_structured: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    # Privacy Mode（§9）
+    sensitive: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    sensitive_type: Mapped[str | None] = mapped_column(String(32))
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime)
 
 
 class Collection(Base):

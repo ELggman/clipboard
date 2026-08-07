@@ -5,6 +5,7 @@ V1 核心闭环已打通：ClipboardWatcher 解析 → history_service 去重落
 """
 import logging
 
+from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import QApplication
 
 from app import ROOT_DIR
@@ -15,6 +16,28 @@ logger = logging.getLogger(__name__)
 
 DB_PATH = ROOT_DIR / "data" / "clipboard.db"
 IMAGES_DIR = ROOT_DIR / "images"
+
+
+class PrivacyState(QObject):
+    """隐私模式运行时状态：暂停监控开关（⌘⇧P / 设置页按钮共用）。
+
+    不是持久化配置——仅本次运行的暂停/恢复（新增.md §9.3/§9.8）。
+    """
+
+    changed = Signal(bool)  # 是否已暂停
+
+    def __init__(self, parent: QObject | None = None):
+        super().__init__(parent)
+        self._paused = False
+
+    @property
+    def paused(self) -> bool:
+        return self._paused
+
+    def toggle(self) -> None:
+        self._paused = not self._paused
+        logger.info("隐私模式已%s", "暂停" if self._paused else "恢复")
+        self.changed.emit(self._paused)
 
 
 def start_workspace(app: QApplication) -> None:
@@ -69,6 +92,16 @@ def start_workspace(app: QApplication) -> None:
         lambda item: detail_popup.show_item(item, image_service))
     window.show()
 
+    # 隐私模式：⌘⇧P 暂停/恢复监听 → watcher 停止保存 + 状态栏指示（§9.3/§9.4）
+    privacy_state = PrivacyState(app)
+
+    def on_privacy_changed(paused: bool) -> None:
+        watcher.set_paused(paused)
+        window.set_privacy_status(paused)
+
+    privacy_state.changed.connect(on_privacy_changed)
+    window.set_privacy_status(False)  # 初始「📋 监控中」
+
     # 关窗后（窗口隐藏）点 Dock 图标 → 应用激活 → 重新显示窗口
     from PySide6.QtCore import Qt
 
@@ -106,24 +139,38 @@ def start_workspace(app: QApplication) -> None:
                 n = int(overrides["history"]["max_items"])
                 if history_service.trim_history(engine, n) and window.isVisible():
                     window._reload_history()
+            elif key == "privacy_policy":
+                # 敏感策略即时生效（on_clipboard_changed 读内存 config）
+                config["privacy"]["policy"] = overrides["privacy"]["policy"]
+            elif key == "privacy_temp":
+                config["privacy"]["temp_minutes"] = int(
+                    overrides["privacy"]["temp_minutes"])
+            elif key == "privacy_ignored":
+                config["privacy"]["ignored_apps"] = list(
+                    overrides["privacy"]["ignored_apps"])
             # save_images / auto_delete 下次插入或清扫时生效
         return _apply
 
     window.set_settings_context(
         config,
         {k: apply_setting(k) for k in ("theme", "font", "show_filename",
-                                       "autostart", "max_items")},
+                                       "autostart", "max_items",
+                                       "privacy_policy", "privacy_temp",
+                                       "privacy_ignored")},
         engine=engine,
+        privacy_state=privacy_state,
     )
 
     # 自动删除：每日清扫一次（启动 1 分钟后首扫）
     from PySide6.QtCore import QTimer
 
     def sweep_old_history() -> None:
+        # 按保留天数清扫（置顶豁免，§9.10/§9.22）+ 过期临时条目（§9.9）
+        removed_files: list[str] = []
         days = int(config["history"]["auto_delete_days"])
-        if days <= 0:
-            return
-        removed_files = history_service.delete_older_than(engine, days)
+        if days > 0:
+            removed_files += history_service.delete_older_than(engine, days)
+        removed_files += history_service.delete_expired(engine)
         for path in removed_files:
             image_service.delete(path)
         if removed_files:
@@ -135,8 +182,48 @@ def start_workspace(app: QApplication) -> None:
     sweep_timer.start()
     QTimer.singleShot(60_000, sweep_old_history)
 
-    # 闭环：监听 → 图片落盘 → 去重落库 → UI 刷新
+    # 闭环：监听 → 隐私管线（排除/敏感策略）→ 图片落盘 → 去重落库 → UI 刷新
     def on_clipboard_changed(item: ClipboardItem) -> None:
+        # 1) 来源应用排除（§9.5/§9.6）：不落库、不进 FTS，仅日志（不含内容）
+        privacy = config["privacy"]
+        if item.source_app and item.source_app in privacy["ignored_apps"]:
+            logger.info("Clipboard item ignored source_app=%s"
+                        " reason=application_exclusion", item.source_app)
+            window.statusBar().showMessage(
+                f"已忽略来自 {item.source_app} 的剪贴板", 3000)
+            return
+
+        # 2) 敏感内容检测（§9.11-9.17）：warn → 保存但标记遮蔽；
+        #    ignore → 不保存；save_temporarily → 保存并设 expires_at
+        if item.type in ("text", "url", "code") and item.content:
+            from services.sensitive_detector import detect as detect_sensitive
+
+            result = detect_sensitive(item.content)
+            if result is not None:
+                item.sensitive = 1
+                item.sensitive_type = result.sensitive_type
+                policy = privacy["policy"]
+                if policy == "ignore":
+                    logger.info("Sensitive clipboard detected type=%s"
+                                " action=ignore", result.sensitive_type)
+                    window.statusBar().showMessage(
+                        f"检测到潜在机密（{result.sensitive_type}），已忽略",
+                        3000)
+                    return
+                if policy == "save_temporarily":
+                    from datetime import datetime, timedelta
+
+                    item.expires_at = (datetime.now() + timedelta(
+                        minutes=int(privacy["temp_minutes"])
+                    )).strftime("%Y-%m-%d %H:%M:%S")
+                    logger.info("Sensitive clipboard detected type=%s"
+                                " action=save_temporarily expires_at=%s",
+                                result.sensitive_type, item.expires_at)
+                else:
+                    logger.info("Sensitive clipboard detected type=%s"
+                                " action=warn", result.sensitive_type)
+
+        # 3) 图片落盘
         if item.type == "image" and item.data:
             try:
                 item.file_path = str(image_service.save(item.data))
@@ -172,6 +259,11 @@ def start_workspace(app: QApplication) -> None:
 
     popup.selected.connect(on_picked)
     hotkey.activated.connect(on_quick_paste)
+    # 隐私模式热键 ⌘⇧P（§9.4）：同一 CGEventTap 多绑定
+    from services.hotkey_manager import KEY_P, MASK_HOTKEY
+
+    hotkey.add_binding(KEY_P, MASK_HOTKEY, hotkey.privacy_toggle)
+    hotkey.privacy_toggle.connect(privacy_state.toggle)
     hotkey.permission_required.connect(_on_permission_required)
     if config["hotkey"]["enabled"]:
         hotkey.start()
