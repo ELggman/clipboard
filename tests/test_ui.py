@@ -844,3 +844,137 @@ def test_theme_scrollbar_qss():
     qss = build_stylesheet(DARK)
     assert "QScrollBar::handle:vertical" in qss
     assert "$" not in qss
+
+
+def test_history_code_row_renders(tmp_path):
+    """代码条目：行高自适应（高于普通文本行）+ 渲染冒烟。"""
+    from ui.history_view import HistoryView
+
+    view = HistoryView()
+    item = ClipboardItem(type="code", content="def hello():\n    return 1\n\n\n\n\nprint(1)",
+                         language="python", line_count=6, character_count=30)
+    view.add_item(item)
+    view.show()
+    view.grab()  # 渲染冒烟（不崩溃）
+    from PySide6.QtWidgets import QStyleOptionViewItem
+
+    opt = QStyleOptionViewItem()
+    opt.rect = view._list.visualRect(view._model.index(0, 0))
+    h = view._list.itemDelegate().sizeHint(opt, view._model.index(0, 0)).height()
+    assert h > 44  # 代码行高于普通文本行
+    view.close()
+
+
+def test_history_sensitive_row_renders(tmp_path):
+    """敏感条目：遮蔽分支渲染冒烟。"""
+    from ui.history_view import HistoryView
+
+    view = HistoryView()
+    item = ClipboardItem(type="text", content="OPENAI_API_KEY=sk-1234567890abcdef",
+                         sensitive=1, sensitive_type="api_key")
+    view.add_item(item)
+    view.show()
+    view.grab()
+    view.close()
+
+
+def test_detail_popup_code_view():
+    """详情弹层代码分支：mono 视图 + Pygments 高亮 + 按钮（§8.8）。"""
+    from ui.item_detail_popup import ItemDetailPopup
+
+    popup = ItemDetailPopup()
+    item = ClipboardItem(type="code", content="def hello():\n    return 1",
+                         language="python", line_count=2, character_count=20)
+    popup.show_item(item)
+    pytest_app.processEvents()
+    assert popup._code.isVisible()
+    assert popup._plain_btn.isVisible() and popup._save_btn.isVisible()
+    assert "Python" in popup._meta.text()
+    assert popup._highlighter is not None
+    assert popup._highlighter._lexer is not None  # Pygments lexer 已装载
+    popup.close()
+
+
+def test_detail_popup_sensitive_reveal():
+    """敏感条目：默认遮蔽，点「显示」露出原文（§9.18）。"""
+    from ui.item_detail_popup import ItemDetailPopup
+
+    popup = ItemDetailPopup()
+    item = ClipboardItem(type="text", content="password='MySecret123'",
+                         sensitive=1, sensitive_type="password")
+    popup.show_item(item)
+    pytest_app.processEvents()
+    assert "MySecret123" not in popup._text.toPlainText()
+    assert popup._reveal_btn.isVisible()
+    popup._reveal_btn.click()
+    pytest_app.processEvents()
+    assert "MySecret123" in popup._text.toPlainText()
+    popup.close()
+
+
+def test_history_delete_key_removes_item(tmp_path):
+    """⌘Delete 删除选中条目（§9.20 手动删除）。"""
+    import hashlib
+
+    from database.engine import create_db_engine
+    from database.migrations import migrate
+    from services import history_service
+    from sqlalchemy import text
+    from ui.history_view import HistoryView
+
+    engine = create_db_engine(tmp_path / "k.db")
+    migrate(engine)
+    item = ClipboardItem(type="text", content="delete me")
+    item.hash = hashlib.sha256(b"delete me").hexdigest()
+    history_service.save_item(engine, item)
+
+    view = HistoryView()
+    view.set_menu_context(engine, None, None)
+    view.set_items(history_service.list_recent(engine))
+    view._list.setCurrentIndex(view._model.index(0, 0))
+    view._list.setFocus()
+    QTest.keyClick(view._list, Qt.Key.Key_Delete)
+    with engine.connect() as conn:
+        remaining = conn.execute(
+            text("SELECT COUNT(*) FROM clipboard_items")).scalar()
+    assert remaining == 0
+    view.close()
+
+
+def test_main_window_privacy_status_label():
+    """状态栏隐私指示：暂停/恢复切换文案（§9.4）。"""
+    from ui.main_window import MainWindow
+
+    w = MainWindow()
+    assert "📋" in w._privacy_label.text()
+    w.set_privacy_status(True)
+    assert "🔒" in w._privacy_label.text()
+    w.set_privacy_status(False)
+    assert "📋" in w._privacy_label.text()
+    w.close()
+
+
+def test_settings_privacy_section_persists(tmp_path):
+    """设置页隐私区：策略/时长/忽略应用写回配置（§9.17/§9.5）。"""
+    import yaml
+
+    from ui.settings_view import SettingsView
+
+    config = {
+        "app": {"theme": "system", "font_size": 14, "launch_at_login": False},
+        "history": {"max_items": 500, "auto_delete_days": 30,
+                    "save_images": True, "show_image_filename": True},
+        "privacy": {"policy": "warn", "temp_minutes": 5, "ignored_apps": []},
+    }
+    cfg_path = tmp_path / "settings.yaml"
+    view = SettingsView()
+    view.set_context(config, {}, cfg_path)
+    view._policy.setCurrentIndex(1)       # ignore
+    view._temp_minutes.setCurrentIndex(2)  # 10 分钟
+    view._ignored_list.addItem("1Password")
+    view._on_change("privacy_ignored")
+    saved = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    assert saved["privacy"]["policy"] == "ignore"
+    assert saved["privacy"]["temp_minutes"] == 10
+    assert saved["privacy"]["ignored_apps"] == ["1Password"]
+    view.close()

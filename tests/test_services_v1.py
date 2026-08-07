@@ -267,3 +267,101 @@ def test_list_grouped_buckets(engine):
     # 40 天前归入「更早」的月份桶
     assert any("月" in l for l in labels)
     assert groups[0][1][0].content == "today"  # 组内最新在前
+
+
+# ---- Code/Privacy v3 字段与迁移 ----
+
+def test_save_item_roundtrips_v3_fields(engine):
+    """v3 字段 save/load round-trip（language/sensitive/expires_at）。"""
+    import datetime
+    import hashlib
+
+    from app.types import ClipboardItem
+    from services import history_service
+
+    item = ClipboardItem(
+        type="code", content="def f():\n    pass",
+        language="python", language_confidence=0.94,
+        line_count=2, character_count=14, is_structured=0,
+        sensitive=1, sensitive_type="api_key",
+        expires_at=(datetime.datetime.now()
+                    + datetime.timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S"))
+    item.hash = hashlib.sha256(b"code sample").hexdigest()
+    history_service.save_item(engine, item)
+
+    loaded = history_service.list_recent(engine)[0]
+    assert loaded.type == "code"
+    assert loaded.language == "python"
+    assert loaded.language_confidence == pytest.approx(0.94)
+    assert loaded.line_count == 2
+    assert loaded.character_count == 14
+    assert loaded.sensitive == 1
+    assert loaded.sensitive_type == "api_key"
+    assert loaded.expires_at.startswith("202")
+
+
+def test_migration_v3_from_v2(tmp_path):
+    """v2 老库迁移 v3：新列存在、旧数据保留、user_version=3。"""
+    from database.engine import create_db_engine
+    from database.migrations import migrate
+
+    eng = create_db_engine(tmp_path / "old.db")
+    with eng.begin() as conn:
+        conn.execute(text(
+            "CREATE TABLE clipboard_items ("
+            " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            " type VARCHAR(16) NOT NULL, content TEXT, preview TEXT,"
+            " file_path TEXT, hash VARCHAR(64) UNIQUE NOT NULL,"
+            " source_app VARCHAR(255), favorite INTEGER DEFAULT 0,"
+            " pinned INTEGER DEFAULT 0,"
+            " created_at DATETIME NOT NULL, updated_at DATETIME NOT NULL)"))
+        conn.execute(text(
+            "INSERT INTO clipboard_items (type, content, hash,"
+            " created_at, updated_at) VALUES ('text', 'old row', 'abc123',"
+            " datetime('now'), datetime('now'))"))
+        conn.execute(text("PRAGMA user_version = 2"))
+
+    migrate(eng)
+    with eng.connect() as conn:
+        cols = {r[1] for r in conn.execute(
+            text("PRAGMA table_info(clipboard_items)")).fetchall()}
+        assert {"language", "language_confidence", "line_count", "sensitive",
+                "sensitive_type", "expires_at"} <= cols
+        row = conn.execute(text("SELECT content FROM clipboard_items")).fetchone()
+        assert row[0] == "old row"
+        assert conn.execute(text("PRAGMA user_version")).scalar() == 3
+    eng.dispose()
+
+
+def test_delete_expired(tmp_path):
+    """临时条目过期删除；未过期保留（§9.9）。"""
+    import datetime
+    import hashlib
+
+    from database.engine import create_db_engine
+    from database.migrations import migrate
+    from services import history_service
+    from app.types import ClipboardItem
+
+    eng = create_db_engine(tmp_path / "exp.db")
+    migrate(eng)
+    expired = ClipboardItem(type="text", content="temp secret")
+    expired.hash = hashlib.sha256(b"temp secret").hexdigest()
+    future = ClipboardItem(type="text", content="still valid")
+    future.hash = hashlib.sha256(b"still valid").hexdigest()
+    history_service.save_item(eng, expired)
+    history_service.save_item(eng, future)
+    with eng.begin() as conn:
+        conn.execute(text(
+            "UPDATE clipboard_items SET expires_at = :t WHERE content = 'temp secret'"),
+            {"t": datetime.datetime.now() - datetime.timedelta(minutes=10)})
+        conn.execute(text(
+            "UPDATE clipboard_items SET expires_at = :t WHERE content = 'still valid'"),
+            {"t": datetime.datetime.now() + datetime.timedelta(minutes=30)})
+
+    assert history_service.delete_expired(eng) == []
+    with eng.connect() as conn:
+        remaining = [r[0] for r in conn.execute(
+            text("SELECT content FROM clipboard_items")).fetchall()]
+    assert remaining == ["still valid"]
+    eng.dispose()

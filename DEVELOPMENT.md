@@ -440,8 +440,9 @@ CREATE TABLE snippets (
 | 版本 | 内容 | 本文档对应 |
 |---|---|---|
 | V1 | 文本/图片/URL/文件历史、搜索、收藏、Snippet、Action | §3 全部就绪 |
+| V1.5 | **Code Mode**（代码检测/语言识别/语法高亮/代码 Actions）、**Privacy Mode**（暂停监控/应用排除/敏感检测/遮蔽/自动过期） | 新增.md §8/§9，本版本已完成 |
 | V1.5 | OCR、图片预览、拖拽、多窗口 | OCR 插件化（§6.4），拖拽/多窗口在 ui/ 层扩展 |
-| V2 | AI 插件（Summarize/Translate/Rewrite/Explain） | Actions 插件即可，无需动主程序 |
+| V2 | AI 插件（Summarize/Translate/Rewrite/Explain） | 需 AI Privacy Gateway（新增.md §9.25）后启用 |
 | V3 | 第三方插件、开放 API | §3.3 加载器支持用户插件目录，即 V3 雏形 |
 
 **设计校验原则**：任何新功能，先问「能否作为 Action / 插件增量加入？」——能，则主程序不动；不能，才允许改核心。
@@ -458,13 +459,15 @@ CREATE TABLE snippets (
 - [x] Actions 接口 + 内置 11 个 Action
 - [x] Quick Paste 弹窗闭环（⌘⇧V → 最近 10 条 → Enter 回写剪贴板）
 - [x] 搜索栏接线（防抖 150ms + FTS5 过滤，清空恢复完整历史）
-- [ ] 右键菜单（Copy / Pin / Favorite / Add To Collection / Action 子菜单）
+- [x] 右键菜单（Copy / Pin / Favorite / Add To Collection / Action 子菜单）
 - [x] 设置页 UI（主题/字体/历史数量/图片保存/图片文件名/自动删除/开机启动；快捷键展示，自定义 V1.5）
 - [x] 自动删除定时清扫（每日 + 启动 1 分钟后；置顶条目豁免；FTS 用 rebuild 重建避免外部内容表 DELETE malformed）
 - [x] 开机启动 LaunchAgent（services/autostart.py；打包版替换 .app 路径）
 - [x] Collections 收藏夹页（新建/重命名/删除/条目浏览/右键加入收藏夹/Actions）
 - [x] Snippet 片段页（CRUD + 复制渲染 {{date}}/{{time}}/{{uuid}}）
 - [x] Timeline 时间线页（今天/昨天/本周/更早按月分组，点击进详情）
+- [x] **Code Mode**：代码检测（services/code_detector.py，18 语言启发式 + 置信度）+ v3 迁移元数据 + 列表 mono 预览 + 详情 Pygments 高亮 + 7 个代码 Actions
+- [x] **Privacy Mode**：⌘⇧P 暂停监控 + 来源应用排除 + 敏感检测（warn/ignore/临时过期）+ 遮蔽显示 + ⌘Delete 手动删除
 - [ ] 一次性准备打包：make_cert.sh 生成自签名证书
 - [ ] build.sh 打通「打包 → 签名 → 验证 checklist」
 - [ ] 性能验收：启动 <1s、万条搜索 <100ms

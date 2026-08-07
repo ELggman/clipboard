@@ -171,6 +171,13 @@ QLineEdit, QPlainTextEdit {
     selection-background-color: $accent;
 }
 QPlainTextEdit { padding: 8px 10px; }
+/* 代码详情视图：行号 gutter 由 paintEvent 自绘，QSS 只清背景（padding 置 0 防冲突） */
+QPlainTextEdit#codeView {
+    background: transparent;
+    border: none;
+    border-radius: 0;
+    padding: 0px;
+}
 
 /* 右键菜单：Apple 风格（圆角浮层、选中强调色、分隔线） */
 QMenu {
@@ -228,6 +235,12 @@ QPushButton#destructiveButton:pressed { background: #D63A30; }
 /* 状态栏 */
 QStatusBar { color: $secondary; font-size: 11px; background: transparent; }
 QStatusBar::item { border: none; }
+/* 隐私模式状态指示（📋 / 🔒，§9.4） */
+QLabel#privacyStatus { color: $secondary; font-size: 11px; padding: 0 8px; }
+QLabel#privacyStatus[paused="true"] { color: $accent_soft; }
+
+/* 设置页分区标题（隐私模式等） */
+QLabel#sectionTitle { color: $secondary; font-size: 12px; font-weight: 600; }
 """)
 
 

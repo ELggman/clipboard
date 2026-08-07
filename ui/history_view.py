@@ -11,7 +11,7 @@ TODO: 右键菜单（Copy / Pin / Favorite / Add To Collection / Action 子菜�
 """
 import logging
 
-from PySide6.QtCore import QModelIndex, QRect, QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QModelIndex, QRect, QSize, Qt, Signal
 from PySide6.QtGui import (
     QContextMenuEvent,
     QFont,
@@ -38,9 +38,9 @@ logger = logging.getLogger(__name__)
 
 ROLE_ITEM = Qt.ItemDataRole.UserRole + 1  # QStandardItem 里存 ClipboardItem
 
-# 类型筛选：("", 全部) / 具体类型
+# 类型筛选：("", 全部) / 具体类型（code = 代码模式，新增.md §8）
 TYPE_FILTERS = [("", "全部"), ("text", "文本"), ("url", "URL"),
-                ("image", "图片"), ("file", "文件")]
+                ("image", "图片"), ("file", "文件"), ("code", "代码")]
 
 # ---- 基准尺寸（scale=1，即窗口宽度 380px 初始/最小档）----
 # 所有几何值 = 基准 × scale，随窗口宽度等比例放大（HistoryView.resizeEvent 驱动）
@@ -57,6 +57,10 @@ _NAME_GAP = 2               # 时间行与文件名间距
 _BOTTOM_PAD = 8             # 底部间距
 _MARGIN_X = 12              # 文本左/右留白
 _RADIUS = 8                 # 选中/hover 圆角
+# 代码条目（§8.6）：meta 行 + 预览行数（最多 6 行）+ "+N more lines" 行
+_CODE_LINE_H = 18           # 代码预览行高
+_CODE_PREVIEW_MAX = 6       # 列表最多显示的代码行数
+_CODE_TOP_GAP = 26          # meta 基线到首行代码顶部
 
 # 导出（scale=1 时的行高，测试用）
 ROW_HEIGHT = ROW_HEIGHT_BASE
@@ -107,6 +111,16 @@ class HistoryDelegate(QStyledItemDelegate):
                       + self._s(_NAME_GAP) + lines * self._s(_CAPTION_LINE_H)
                       + self._s(_BOTTOM_PAD))
             return QSize(width, height)
+        if item is not None and item.type == "code":
+            # 敏感代码条目按敏感行渲染（遮蔽单行），高度一致
+            if item.sensitive:
+                return QSize(width, self._s(ROW_HEIGHT_BASE))
+            shown, has_more, _ = self._code_preview(item)
+            height = (self._s(_CODE_TOP_GAP)
+                      + len(shown) * self._s(_CODE_LINE_H)
+                      + (self._s(_CODE_LINE_H) if has_more else 0)
+                      + self._s(_BOTTOM_PAD))
+            return QSize(width, height)
         return QSize(width, self._s(ROW_HEIGHT_BASE))
 
     # ---- 绘制 ----
@@ -121,8 +135,16 @@ class HistoryDelegate(QStyledItemDelegate):
         hovered = bool(option.state & QStyle.StateFlag.State_MouseOver)
         self._draw_background(painter, rect, option, selected, hovered)
 
-        if item is not None and item.type == "image" and self._provider is not None:
+        if item is None:
+            painter.restore()
+            return
+        # 敏感优先：即使代码条目也按遮蔽单行渲染（新增.md §10 联动 mock）
+        if item.sensitive:
+            self._draw_sensitive_row(painter, rect, option, item)
+        elif item.type == "image" and self._provider is not None:
             self._draw_image_row(painter, rect, option, item)
+        elif item.type == "code":
+            self._draw_code_row(painter, rect, option, item)
         else:
             self._draw_text_row(painter, rect, option, item)
 
@@ -212,7 +234,12 @@ class HistoryDelegate(QStyledItemDelegate):
         """基准值 × scale 取整（最小 1）。"""
         return max(1, round(value * self._scale))
 
-    def _font(self, small: bool = False) -> QFont:
+    def _font(self, small: bool = False, mono: bool = False) -> QFont:
+        if mono:
+            from ui.code_highlighter import mono_font
+
+            return mono_font(self._s(self._small_font_px if small
+                                     else self._main_font_px))
         font = QFont()
         font.setPixelSize(self._s(self._small_font_px if small else self._main_font_px))
         return font
@@ -232,6 +259,80 @@ class HistoryDelegate(QStyledItemDelegate):
             base += f" · {item.source_app}"
         marks = ("📌 " if item.pinned else "") + ("★ " if item.favorite else "")
         return f"{marks}{base}"
+
+    # ---- 代码行（§8.6）----
+
+    def _code_preview(self, item, max_lines: int = _CODE_PREVIEW_MAX):
+        """代码预览：前 N 行 + 是否截断 + 总行数。"""
+        lines = (item.content or "").splitlines()
+        total = item.line_count or len(lines)
+        shown = lines[:max_lines]
+        has_more = total > len(shown)
+        return shown, has_more, total
+
+    def _draw_code_row(self, painter, rect, option, item) -> None:
+        text_color = (option.palette.highlightedText().color() if
+                      option.state & QStyle.StateFlag.State_Selected
+                      else option.palette.text().color())
+        secondary = option.palette.placeholderText().color()
+
+        # meta：🐍 Python · 08-06 18:00 · 8 行 · 来源
+        from services.code_detector import LANGUAGE_EMOJI, LANGUAGE_NAMES
+
+        lang = item.language or "code"
+        name = LANGUAGE_NAMES.get(lang, lang)
+        meta = (f"{LANGUAGE_EMOJI.get(lang, '🧾')} {name}"
+                f"{' · ' + item.created_at if item.created_at else ''}"
+                f" · {item.line_count or len((item.content or '').splitlines())} 行"
+                f"{' · ' + item.source_app if item.source_app else ''}")
+        painter.setPen(secondary)
+        self._draw_line(painter, meta,
+                        rect.left() + self._s(_MARGIN_X), rect.top() + self._s(15),
+                        small=True, avail=rect.width() - 2 * self._s(_MARGIN_X))
+
+        # 代码预览（mono，前 6 行，超出显示 "+N more lines"）
+        shown, has_more, total = self._code_preview(item)
+        font = self._font(small=True, mono=True)
+        painter.setFont(font)
+        y = rect.top() + self._s(_CODE_TOP_GAP)
+        for line in shown:
+            elided = QFontMetrics(font).elidedText(
+                line, Qt.TextElideMode.ElideRight,
+                rect.width() - 2 * self._s(_MARGIN_X))
+            painter.setPen(text_color)
+            painter.drawText(rect.left() + self._s(_MARGIN_X), y, elided)
+            y += self._s(_CODE_LINE_H)
+        if has_more:
+            painter.setPen(secondary)
+            painter.drawText(rect.left() + self._s(_MARGIN_X), y,
+                             f"+ {total - len(shown)} more lines")
+
+    # ---- 敏感行（§9.18/§9.19）----
+
+    def _draw_sensitive_row(self, painter, rect, option, item) -> None:
+        """🔐 遮蔽预览：meta 前缀锁标，内容行显示 mask 后的文本。"""
+        text_color = (option.palette.highlightedText().color() if
+                      option.state & QStyle.StateFlag.State_Selected
+                      else option.palette.text().color())
+        secondary = option.palette.placeholderText().color()
+
+        base = (f"{item.created_at} · {item.type}"
+                if item.created_at else item.type)
+        if item.source_app:
+            base += f" · {item.source_app}"
+        marks = ("📌 " if item.pinned else "") + ("★ " if item.favorite else "")
+        painter.setPen(secondary)
+        self._draw_line(painter, f"🔐 {marks}{base}",
+                        rect.left() + self._s(_MARGIN_X), rect.top() + self._s(15),
+                        small=True, avail=rect.width() - 2 * self._s(_MARGIN_X))
+
+        from services.sensitive_detector import mask
+
+        painter.setPen(text_color)
+        self._draw_line(painter, mask(item.content or item.preview,
+                                      item.sensitive_type),
+                        rect.left() + self._s(_MARGIN_X), rect.top() + self._s(33),
+                        small=False, avail=rect.width() - 2 * self._s(_MARGIN_X))
 
     @staticmethod
     def _caption_lines(text: str, font: QFont, avail_width: int) -> int:
@@ -272,6 +373,9 @@ class HistoryView(QWidget):
         self._list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._list.setWordWrap(False)
         self._list.setContextMenuPolicy(Qt.ContextMenuPolicy.DefaultContextMenu)
+        # ⌘Delete 手动删除（§9.20）：键盘事件经 eventFilter 处理
+        self._list.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self._list.installEventFilter(self)
 
         self._model = QStandardItemModel(self._list)
         self._list.setModel(self._model)
@@ -313,6 +417,18 @@ class HistoryView(QWidget):
         super().resizeEvent(event)
         self._delegate.set_scale(event.size().width() / BASE_WIDTH)
         self._list.doItemsLayout()  # 行高随 scale 变化，重新布局
+
+    def eventFilter(self, obj, event) -> bool:
+        """⌘Delete 删除选中条目（§9.20 手动删除快捷键）。"""
+        if obj is self._list and event.type() == QEvent.Type.KeyPress:
+            if event.key() == Qt.Key.Key_Delete:
+                index = self._list.currentIndex()
+                if index.isValid():
+                    item = index.data(ROLE_ITEM)
+                    if item is not None:
+                        self._delete_item(item)
+                return True
+        return super().eventFilter(obj, event)
 
     # ---- 注入 ----
 

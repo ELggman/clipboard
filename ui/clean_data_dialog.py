@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 _CLEAN_OPTIONS = [(7, "7 天以前"), (30, "30 天以前"), (90, "90 天以前"), (0, "全部历史")]
 # 类型筛选（"", 全部）
 _TYPE_OPTIONS = [("", "全部类型"), ("text", "文本"), ("url", "URL"),
-                 ("image", "图片"), ("file", "文件")]
+                 ("image", "图片"), ("file", "文件"), ("code", "代码")]
 
 
 class CleanDataDialog(QDialog):

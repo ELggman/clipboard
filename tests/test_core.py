@@ -41,10 +41,13 @@ def test_actions_loaded():
 
     acts = load_actions()
     ids = {a.id for a in acts}
-    assert len(acts) == 11
+    assert len(acts) == 18  # 11 基础 + 7 代码 Actions（新增.md §8.9）
     assert {"json_pretty", "base64_encode", "base64_decode",
             "url_encode", "url_decode", "markdown_preview", "sort_lines",
-            "remove_duplicate_lines", "upper_case", "lower_case", "trim_space"} == ids
+            "remove_duplicate_lines", "upper_case", "lower_case", "trim_space",
+            "add_line_numbers", "remove_line_numbers", "json_minify",
+            "json_validate", "detect_language", "save_as_file",
+            "copy_without_formatting"} == ids
 
 
 def test_json_pretty_action():

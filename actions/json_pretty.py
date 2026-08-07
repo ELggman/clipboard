@@ -10,7 +10,8 @@ class JsonPrettyAction(ClipboardAction):
     icon = "json"
 
     def can_handle(self, clipboard_item) -> bool:
-        if clipboard_item.type != "text":
+        # JSON 现在分类为 type=code（language=json）；兼容 v3 前的 text
+        if clipboard_item.type not in ("text", "code"):
             return False
         try:
             json.loads(clipboard_item.content)

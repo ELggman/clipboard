@@ -36,7 +36,7 @@ def set_clipboard_item(item) -> bool:
     pb = NSPasteboard.generalPasteboard()
     pb.clearContents()
     try:
-        if item.type in ("text", "url") and item.content:
+        if item.type in ("text", "url", "code") and item.content:
             pb.setString_forType_(item.content, NSPasteboardTypeString)
         elif item.type == "image" and item.file_path:
             data = Path(item.file_path).read_bytes()

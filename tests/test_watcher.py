@@ -93,3 +93,67 @@ def test_parse_priority_url_over_text():
     item = ClipboardWatcher._parse(pb)
     assert item is not None
     assert item.type == "url"
+
+
+# ---- Code Mode 解析（新增.md §8）----
+
+def test_parse_code_python():
+    pb = _set_text("def hello(name):\n    return f\"Hi {name}\"\n\nprint(hello('x'))")
+    item = ClipboardWatcher._parse(pb)
+    assert item.type == "code"
+    assert item.language == "python"
+    assert item.line_count == 4
+    assert item.character_count > 0
+
+
+def test_parse_code_json_structured():
+    pb = _set_text('{"name": "Alice", "age": 20}')
+    item = ClipboardWatcher._parse(pb)
+    assert item.type == "code"
+    assert item.language == "json"
+    assert item.is_structured == 1
+
+
+def test_parse_code_shell_single_line():
+    """§8.14 单行命令：docker compose up -d → shell。"""
+    pb = _set_text("docker compose up -d")
+    item = ClipboardWatcher._parse(pb)
+    assert item.type == "code"
+    assert item.language == "shell"
+
+
+def test_parse_short_text_not_code():
+    pb = _set_text("hi there")
+    item = ClipboardWatcher._parse(pb)
+    assert item.type == "text"
+    assert item.language == ""
+
+
+def test_parse_text_keeps_auxiliary_language():
+    """弱证据：仍是 text，但保留语言辅助字段（§8.4.3）。"""
+    pb = _set_text("def a():\n    pass\n\ndef b():\n    pass")
+    item = ClipboardWatcher._parse(pb)
+    assert item.type == "text"
+    assert item.language == "python"
+
+
+# ---- 暂停监控（§9.3）----
+
+def test_watcher_paused_skips_emit_and_no_burst_on_resume():
+    watcher = ClipboardWatcher()
+    seen = []
+    watcher.changed.connect(seen.append)
+    _set_text("paused content")
+
+    watcher.set_paused(True)
+    watcher._last_change = 0  # 强制视为变化
+    watcher._poll()
+    assert seen == []  # 暂停：不解析不 emit
+
+    watcher.set_paused(False)
+    watcher._last_change = 0  # 恢复后新变化正常 emit
+    watcher._poll()
+    assert len(seen) == 1 and seen[0].content == "paused content"
+
+    watcher._poll()  # changeCount 未再变 → 不重复
+    assert len(seen) == 1

@@ -109,3 +109,89 @@ def test_url_roundtrip(actions):
 def test_markdown_preview_hidden(actions):
     """未实现的 Action can_handle 恒 False（右键菜单不出现）。"""
     assert actions["markdown_preview"].can_handle(_text("# title")) is False
+
+
+# ---- 代码 Actions（新增.md §8.9-8.15）----
+
+def _code(content: str, language: str = "python") -> ClipboardItem:
+    return ClipboardItem(type="code", content=content, language=language)
+
+
+def test_add_line_numbers(actions):
+    a = actions["add_line_numbers"]
+    item = _code("def hello():\n    print(\"Hi\")\n")
+    assert a.can_handle(item)
+    assert a.execute(item) == "1 | def hello():\n2 |     print(\"Hi\")\n"
+    assert not a.can_handle(_text("plain"))  # 仅 code 条目
+
+
+def test_remove_line_numbers(actions):
+    a = actions["remove_line_numbers"]
+    item = _code("1 | import os\n2 | import sys\n3 |\n4 | print(\"Hello\")\n")
+    assert a.can_handle(item)
+    assert a.execute(item) == "import os\nimport sys\n\nprint(\"Hello\")\n"
+    assert not a.can_handle(_code("no numbers here"))  # 无行号不显示
+
+
+def test_json_minify(actions):
+    a = actions["json_minify"]
+    item = _code('{\n    "name": "Alice",\n    "age": 20\n}', "json")
+    assert a.can_handle(item)
+    assert a.execute(item) == '{"name":"Alice","age":20}'
+    # 兼容 v3 前的 text 类型 JSON
+    assert a.can_handle(_text('{"a": 1}'))
+
+
+def test_json_validate(actions):
+    a = actions["json_validate"]
+    ok = a.execute(_code('{"name": "Alice"}', "json"))
+    assert ok == "✓ Valid JSON"
+    bad = a.execute(_code('{\n    "name":\n}', "json"))
+    assert bad.startswith("✗ Invalid JSON")
+
+
+def test_detect_language(actions):
+    a = actions["detect_language"]
+    item = _code("def foo():\n    return 1\n\nprint(foo())")
+    assert a.can_handle(item)
+    result = a.execute(item)
+    assert "Python" in result and "0." in result
+
+
+def test_copy_without_formatting_markdown(actions):
+    a = actions["copy_without_formatting"]
+    md = _code("# Title\n\n**bold** and [link](https://x.com)\n", "markdown")
+    out = a.execute(md)
+    assert "# Title" not in out
+    assert "Title" in out
+    assert "[link](" not in out
+    # 非 markdown 原样复制
+    py = _code("def f():\n    pass\n")
+    assert a.execute(py) == py.content
+
+
+def test_save_as_file_cancel_is_noop(actions, monkeypatch):
+    """保存为文件：取消选择不写盘、不改剪贴板。"""
+    import PySide6.QtWidgets
+
+    a = actions["save_as_file"]
+    item = _code("print(1)\n", "python")
+    assert a.can_handle(item)
+    monkeypatch.setattr(PySide6.QtWidgets.QFileDialog,
+                        "getSaveFileName",
+                        staticmethod(lambda *a, **k: ("", "")))
+    assert a.execute(item) is None  # 取消 → None（不写剪贴板）
+
+
+def test_save_as_file_writes(actions, monkeypatch, tmp_path):
+    """保存为文件：选择路径后写入内容。"""
+    import PySide6.QtWidgets
+
+    a = actions["save_as_file"]
+    item = _code("print(1)\n", "python")
+    target = tmp_path / "script.py"
+    monkeypatch.setattr(PySide6.QtWidgets.QFileDialog,
+                        "getSaveFileName",
+                        staticmethod(lambda *a, **k: (str(target), "")))
+    assert a.execute(item) is None
+    assert target.read_text() == "print(1)\n"
