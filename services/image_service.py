@@ -36,18 +36,27 @@ class ImageService:
         return path
 
     @lru_cache(maxsize=128)
-    def thumbnail(self, file_path: str):
-        """缩略图（懒加载：滚动到可视区才调用）。失败返回 None。"""
+    def _thumbnail_cached(self, file_path: str):
+        """缩略图解码（仅成功结果进缓存；失败抛异常不缓存）。"""
         from PySide6.QtGui import QImage
 
+        img = Image.open(file_path)
+        img.thumbnail(THUMB_SIZE)
+        img = img.convert("RGBA")
+        data = img.tobytes("raw", "RGBA")
+        qimg = QImage(data, img.width, img.height, img.width * 4,
+                      QImage.Format_RGBA8888)
+        return qimg.copy()  # 复制以脱离 PIL 临时 buffer
+
+    def thumbnail(self, file_path: str):
+        """缩略图（懒加载：滚动到可视区才调用）。失败返回 None 且**不缓存**。
+
+        关键：@lru_cache 会缓存 None 返回值——文件缺失时的失败会被
+        永久缓存，文件随后出现也永远返回 None（实测踩坑：历史/收藏
+        全部缩略图消失，重启才恢复）。失败路径必须走未缓存入口重试。
+        """
         try:
-            img = Image.open(file_path)
-            img.thumbnail(THUMB_SIZE)
-            img = img.convert("RGBA")
-            data = img.tobytes("raw", "RGBA")
-            qimg = QImage(data, img.width, img.height, img.width * 4,
-                          QImage.Format_RGBA8888)
-            return qimg.copy()  # 复制以脱离 PIL 临时 buffer
+            return self._thumbnail_cached(file_path)
         except Exception:
             logger.exception("缩略图生成失败: %s", file_path)
             return None

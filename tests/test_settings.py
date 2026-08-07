@@ -346,3 +346,26 @@ def test_image_service_delete_protects_user_files(tmp_path):
     svc.delete_many([str(user_file)])
     assert user_file.exists()    # 批量删除同样保护
     assert svc.is_managed(str(managed)) and not svc.is_managed(str(user_file))
+
+
+def test_thumbnail_retries_after_file_appears(tmp_path):
+    """缩略图失败不缓存：文件随后出现时重试成功（回归）。
+
+    之前 @lru_cache 缓存 None 返回值：文件缺失的失败被永久缓存，
+    文件重建后历史/收藏全部缩略图消失，重启才恢复。
+    """
+    from io import BytesIO
+
+    from PIL import Image
+
+    from services.image_service import ImageService
+
+    svc = ImageService(tmp_path / "img")
+    target = svc._dir / "later.png"
+    assert svc.thumbnail(str(target)) is None  # 文件缺失 → 失败
+
+    buf = BytesIO()
+    Image.new("RGB", (32, 32), "red").save(buf, "PNG")
+    target.write_bytes(buf.getvalue())
+    qimg = svc.thumbnail(str(target))
+    assert qimg is not None and not qimg.isNull()  # 重试成功（未毒化）
