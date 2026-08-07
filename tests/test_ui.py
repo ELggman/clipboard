@@ -1163,3 +1163,55 @@ def test_add_item_pinned_with_type_filter():
     assert view._model.rowCount() == 2  # txt + new txt
     assert view._model.index(0, 0).data(ROLE_ITEM).content == "new txt"
     view.close()
+
+
+def test_detail_popup_code_copy_selected_only():
+    """代码弹窗复制按钮：有选中复制选中部分，无选中复制全部（回归）。"""
+    from AppKit import NSPasteboard, NSPasteboardTypeString
+    from PySide6.QtGui import QTextCursor
+
+    from ui.item_detail_popup import ItemDetailPopup
+
+    popup = ItemDetailPopup()
+    item = ClipboardItem(type="code", content="def hello():\n    return 1",
+                         language="python", line_count=2, character_count=20)
+    popup.show_item(item)
+    pytest_app.processEvents()
+
+    # 选中第一行（'def hello():' 共 12 字符）→ 点复制 → 只复制选中部分
+    cur = popup._code.edit.textCursor()
+    cur.setPosition(0)
+    cur.setPosition(12, QTextCursor.MoveMode.KeepAnchor)
+    popup._code.edit.setTextCursor(cur)
+    popup._copy_btn.click()
+    pb = NSPasteboard.generalPasteboard()
+    assert pb.stringForType_(NSPasteboardTypeString) == "def hello():"
+
+    # 无选中 → 复制全部
+    cur.clearSelection()
+    popup._code.edit.setTextCursor(cur)
+    popup._copy_btn.click()
+    assert pb.stringForType_(NSPasteboardTypeString) == item.content
+    popup.close()
+
+
+def test_detail_popup_code_copy_selected_multiline():
+    """选中多行代码复制：段落分隔符还原为换行。"""
+    from AppKit import NSPasteboard, NSPasteboardTypeString
+    from PySide6.QtGui import QTextCursor
+
+    from ui.item_detail_popup import ItemDetailPopup
+
+    popup = ItemDetailPopup()
+    item = ClipboardItem(type="code", content="line one\nline two\nline three",
+                         language="python", line_count=3, character_count=24)
+    popup.show_item(item)
+    pytest_app.processEvents()
+    cur = popup._code.edit.textCursor()
+    cur.setPosition(0)
+    cur.setPosition(15, QTextCursor.MoveMode.KeepAnchor)  # 'line one\nline t'
+    popup._code.edit.setTextCursor(cur)
+    popup._copy_btn.click()
+    pb = NSPasteboard.generalPasteboard()
+    assert pb.stringForType_(NSPasteboardTypeString) == "line one\nline t"
+    popup.close()

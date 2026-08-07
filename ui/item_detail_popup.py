@@ -233,6 +233,20 @@ class ItemDetailPopup(QWidget):
     # ---- 操作 ----
 
     def _copy_all(self) -> None:
+        """复制：代码视图有选中 → 复制选中部分；否则复制全部。
+
+        用户直觉：选中了什么，点「复制」就该复制什么（与文本弹窗
+        ⌘C 选中复制语义一致）。selectedText 的段落分隔符 U+2029
+        需还原为换行。
+        """
+        if self._code.isVisible():
+            selected = self._code.edit.textCursor().selectedText()
+            if selected:
+                from services.action_service import set_clipboard_text
+
+                set_clipboard_text(selected.replace(" ", "\n"))
+                logger.info("详情弹层复制选中代码: %d 字符", len(selected))
+                return
         from services.action_service import set_clipboard_item
 
         if self._item is not None and set_clipboard_item(self._item):
