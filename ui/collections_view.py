@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QFrame,
     QHBoxLayout,
+    QLabel,
     QListView,
     QListWidget,
     QListWidgetItem,
@@ -63,9 +64,14 @@ class CollectionsView(QWidget):
     # ---- 构建 ----
 
     def _build_ui(self) -> None:
-        layout = QHBoxLayout(self)
+        layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(6)
+
+        # 当前收藏夹标题：面板收回后仍常驻显示（知道在看哪个收藏夹）
+        self._title = QLabel("")
+        self._title.setObjectName("collectionTitle")
+        layout.addWidget(self._title)
 
         # 条目区占满（收藏夹列表在浮层中；📁 触发图标在主窗口搜索行）
         self._model = QStandardItemModel(self)
@@ -113,11 +119,23 @@ class CollectionsView(QWidget):
                 self._hide_timer.start()
         return super().eventFilter(obj, event)
 
-    def show_collection_panel(self) -> None:
-        """展开收藏夹面板（主窗口 📁 图标悬停调用）。"""
+    def show_collection_panel(self, anchor_global=None) -> None:
+        """展开收藏夹面板（主窗口 📁 图标悬停调用）。
+
+        anchor_global = 📁 图标左上角全局坐标 → 面板出现在**图标附近**
+        （右缘贴图标左侧、顶部对齐图标），而非页面左上角——从图标
+        悬停后鼠标直接向左下方移动操作，符合操作习惯（实测反馈）。
+        """
         self._hide_timer.stop()
-        self._panel.move(0, 0)
-        self._panel.setFixedHeight(self.height())
+        if anchor_global is not None:
+            local = self.mapFromGlobal(anchor_global)
+            x = local.x() - self._panel.width() + 4   # 面板右缘贴图标左侧
+            y = max(0, local.y())                     # 顶部对齐图标
+            self._panel.move(max(0, x), y)
+            self._panel.setFixedHeight(max(60, self.height() - y))
+        else:
+            self._panel.move(0, 0)
+            self._panel.setFixedHeight(self.height())
         self._panel.raise_()
         self._panel.show()
 
@@ -152,12 +170,22 @@ class CollectionsView(QWidget):
             self._list.setCurrentRow(idx)
         else:
             self._model.clear()
+        self._update_title()
 
     def _current_id(self) -> int:
         row = self._list.currentRow()
         if 0 <= row < len(self._collections):
             return self._collections[row]["id"]
         return -1
+
+    def _update_title(self) -> None:
+        """常驻标题：当前收藏夹名 · 条数（面板收回后仍可见）。"""
+        row = self._list.currentRow()
+        if 0 <= row < len(self._collections):
+            c = self._collections[row]
+            self._title.setText(f"{c['name']} · {c['count']} 条")
+        else:
+            self._title.setText("")
 
     def _on_select(self, row: int) -> None:
         self._model.clear()
@@ -169,6 +197,7 @@ class CollectionsView(QWidget):
             row_item.setData(item, ROLE_ITEM)
             row_item.setEditable(False)
             self._model.appendRow(row_item)
+        self._update_title()
 
     # ---- 收藏夹操作 ----
 

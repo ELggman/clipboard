@@ -1396,3 +1396,59 @@ def test_collections_panel_hover_show_hide(tmp_path):
     view.show_collection_panel()  # 等价于面板 Enter 取消 timer
     assert view._panel.isVisible()
     view.close()
+
+
+def test_collections_panel_anchored_near_icon(tmp_path):
+    """面板锚定在 📁 图标附近（右缘贴图标左侧），而非页面左上角（回归）。"""
+    from PySide6.QtCore import QPoint
+
+    from database.engine import create_db_engine
+    from database.migrations import migrate
+    from ui.collections_view import CollectionsView
+
+    engine = create_db_engine(tmp_path / "anch.db")
+    migrate(engine)
+    view = CollectionsView()
+    view.set_context(engine)
+    view.resize(500, 400)
+    view.show()
+    pytest_app.processEvents()
+
+    # 图标在页面右上角区域：锚点全局坐标 → 面板应出现在图标左侧
+    icon_global = view.mapToGlobal(QPoint(view.width() - 40, 5))
+    view.show_collection_panel(icon_global)
+    local = view.mapFromGlobal(icon_global)
+    assert view._panel.x() == max(0, local.x() - view._panel.width() + 4)
+    assert view._panel.x() > 0  # 不再固定在左上角 0
+    assert view._panel.y() == max(0, local.y())
+    view.close()
+
+
+def test_collections_title_shows_current(tmp_path):
+    """收藏夹页常驻标题：显示当前收藏夹名 · 条数（面板收回后仍可见）。"""
+    import hashlib
+
+    from database.engine import create_db_engine
+    from database.migrations import migrate
+    from services import collection_service, history_service
+    from ui.collections_view import CollectionsView
+    from app.types import ClipboardItem
+
+    engine = create_db_engine(tmp_path / "t.db")
+    migrate(engine)
+    cid = collection_service.create_collection(engine, "论文资料")
+    item = ClipboardItem(type="text", content="论文片段")
+    item.hash = hashlib.sha256("论文片段".encode()).hexdigest()
+    history_service.save_item(engine, item)
+    collection_service.add_item(engine, cid, item)
+
+    view = CollectionsView()
+    view.set_context(engine)
+    assert "★ 收藏" in view._title.text()  # 默认选中内置收藏夹
+    idx = next(i for i, c in enumerate(view._collections)
+               if c["name"] == "论文资料")
+    view._list.setCurrentRow(idx)  # 切到目标收藏夹
+    pytest_app.processEvents()
+    assert "论文资料" in view._title.text()
+    assert "1 条" in view._title.text()
+    view.close()

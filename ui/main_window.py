@@ -4,7 +4,7 @@
 """
 import logging
 
-from PySide6.QtCore import QEvent, QTimer, Qt
+from PySide6.QtCore import QEvent, QPoint, QTimer, Qt
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -160,7 +160,9 @@ class MainWindow(QMainWindow):
     def _show_collections_panel(self) -> None:
         cv = self._pages.widget(1)
         if isinstance(cv, CollectionsView):
-            cv.show_collection_panel()
+            # 面板锚定在 📁 图标位置（右上角），贴近操作起点
+            cv.show_collection_panel(
+                self._collections_trigger.mapToGlobal(QPoint(0, 0)))
 
     def _schedule_hide_collections_panel(self) -> None:
         cv = self._pages.widget(1)

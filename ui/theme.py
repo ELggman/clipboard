@@ -314,6 +314,14 @@ QFrame#collectionPanel {
     border: 1px solid $separator;
     border-radius: 10px;
 }
+
+/* 收藏夹页当前收藏夹标题（面板收回后常驻） */
+QLabel#collectionTitle {
+    color: $secondary;
+    font-size: 13px;
+    font-weight: 600;
+    padding: 0 4px;
+}
 """)
 
 
