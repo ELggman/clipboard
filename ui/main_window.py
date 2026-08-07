@@ -96,8 +96,18 @@ class MainWindow(QMainWindow):
         self._search_timer.timeout.connect(self._apply_search)
 
     def _on_page_changed(self, row: int) -> None:
-        """页面切换：即时切换 + 淡入（响应优先，OutCubic 140ms）。"""
+        """页面切换：即时切换 + 淡入（响应优先，OutCubic 140ms）。
+
+        返回历史页时从数据库重载：清理数据弹窗等外部删除后列表保持同步
+        （收藏夹/时间线页自带 showEvent 重载，历史页数据由主窗口注入，
+        故在此按搜索状态刷新——有搜索词重跑查询，否则重载完整历史）。
+        """
         self._pages.setCurrentIndex(row)
+        if row == 0:
+            if self._search.text().strip():
+                self._apply_search()  # 有搜索词：重新执行查询（结果同样可能过期）
+            else:
+                self._reload_history()
         from ui.animations import fade_in_widget
 
         fade_in_widget(self._pages.currentWidget())

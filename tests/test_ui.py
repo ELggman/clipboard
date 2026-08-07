@@ -200,6 +200,47 @@ def test_main_window_search_filters(tmp_path):
     w.close()
 
 
+def test_main_window_reloads_history_after_external_delete(tmp_path):
+    """清理数据删除后返回历史页：列表从数据库重载（不再残留已删条目）。"""
+    from database.engine import create_db_engine
+    from database.migrations import migrate
+    from services import history_service
+    from ui.main_window import MainWindow
+
+    engine = create_db_engine(tmp_path / "r.db")
+    migrate(engine)
+    import hashlib
+
+    a = ClipboardItem(type="text", content="keep me")
+    a.hash = hashlib.sha256(b"keep me").hexdigest()
+    b = ClipboardItem(type="text", content="remove me")
+    b.hash = hashlib.sha256(b"remove me").hexdigest()
+    history_service.save_item(engine, a)
+    history_service.save_item(engine, b)
+
+    w = MainWindow()
+    w.set_search(engine)
+    w.load_history(history_service.list_recent(engine))
+    w.show()
+    pytest_app.processEvents()
+    view = w._pages.widget(0)
+    assert view._model.rowCount() == 2
+
+    # 模拟设置页清理数据弹窗的删除（历史页不知情，也不主动刷新）
+    removed = next(i for i in history_service.list_recent(engine)
+                   if i.content == "remove me")
+    history_service.delete_items(engine, [removed.id])
+
+    # 切到设置页再切回历史 → 列表应只剩 keep me
+    w._nav.setCurrentRow(4)
+    pytest_app.processEvents()
+    w._nav.setCurrentRow(0)
+    pytest_app.processEvents()
+    assert view._model.rowCount() == 1
+    assert view._model.index(0, 0).data(ROLE_ITEM).content == "keep me"
+    w.close()
+
+
 def test_context_menu_copy_action(tmp_path):
     """右键菜单：复制动作把内容写回剪贴板（触发式测试，不 exec 菜单）。"""
     from AppKit import NSPasteboard, NSPasteboardTypeString
