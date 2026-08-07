@@ -98,6 +98,14 @@ class _CodeView(QWidget):
 
     def setPlainText(self, text: str) -> None:
         self.edit.setPlainText(text)
+        # 防御：重置滚动与光标到文档顶部（复用弹窗时防残留视图状态）
+        from PySide6.QtGui import QTextCursor
+
+        self.edit.verticalScrollBar().setValue(0)
+        self.edit.horizontalScrollBar().setValue(0)
+        cursor = self.edit.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.Start)
+        self.edit.setTextCursor(cursor)
 
     def document(self):
         return self.edit.document()

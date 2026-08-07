@@ -207,11 +207,10 @@ class MainWindow(QMainWindow):
         """数据页注入引擎（收藏夹/片段/时间线，打开页面时自动刷新）。"""
         for idx in range(self._pages.count()):
             page = self._pages.widget(idx)
-            if isinstance(page, (CollectionsView, SnippetsView, TimelineView)):
-                if isinstance(page, CollectionsView):
-                    page.set_context(engine, image_service)
-                else:
-                    page.set_context(engine)
+            if isinstance(page, (CollectionsView, TimelineView)):
+                page.set_context(engine, image_service)
+            elif isinstance(page, SnippetsView):
+                page.set_context(engine)
 
     def _bind_feedback(self) -> None:
         """历史页菜单操作反馈 → 状态栏。"""

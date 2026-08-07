@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
 logger = logging.getLogger(__name__)
 
 ROLE_ITEM = Qt.ItemDataRole.UserRole + 1  # QStandardItem 里存 ClipboardItem
+ROLE_HEADER = Qt.ItemDataRole.UserRole + 2  # 时间线月份标题（无条目数据）
 
 # 类型筛选：("", 全部) / 具体类型（code = 代码模式，新增.md §8）
 TYPE_FILTERS = [("", "全部"), ("text", "文本"), ("url", "URL"),
@@ -63,6 +64,7 @@ _CODE_PREVIEW_MAX = 6       # 列表最多显示的代码行数
 # 首行代码基线 = 33（与文本行内容基线一致）——之前 26 时字形顶 ≈ meta 基线
 # 附近，内容紧贴时间·类型行（实测踩坑：看起来很靠上）
 _CODE_TOP_GAP = 33
+_HEADER_H = 26               # 时间线月份标题行高
 
 # 导出（scale=1 时的行高，测试用）
 ROW_HEIGHT = ROW_HEIGHT_BASE
@@ -102,6 +104,8 @@ class HistoryDelegate(QStyledItemDelegate):
     # ---- 尺寸 ----
 
     def sizeHint(self, option, index: QModelIndex) -> QSize:
+        if index.data(ROLE_HEADER) is not None:
+            return QSize(max(option.rect.width(), 200), self._s(_HEADER_H))
         item = index.data(ROLE_ITEM)
         width = max(option.rect.width(), 200)
         if item is not None and item.type == "image" and self._provider is not None:
@@ -128,6 +132,16 @@ class HistoryDelegate(QStyledItemDelegate):
     # ---- 绘制 ----
 
     def paint(self, painter: QPainter, option, index: QModelIndex) -> None:
+        header = index.data(ROLE_HEADER)
+        if header is not None:
+            # 月份标题：加粗次要色，无卡片底色
+            painter.save()
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            rect = QRect(option.rect).adjusted(1, 1, -1, -1)
+            self._draw_header(painter, rect, option, header)
+            painter.restore()
+            return
+
         item = index.data(ROLE_ITEM)
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
@@ -152,12 +166,24 @@ class HistoryDelegate(QStyledItemDelegate):
 
         painter.restore()
 
+    def _draw_header(self, painter, rect, option, label: str) -> None:
+        """时间线月份标题：加粗次要色文字，不画卡片底色。"""
+        painter.setPen(option.palette.placeholderText().color())
+        font = self._font(small=True)
+        font.setBold(True)
+        painter.setFont(font)
+        painter.drawText(rect.left() + self._s(_MARGIN_X),
+                         rect.top() + self._s(_HEADER_H - 8), label)
+
     def _draw_background(self, painter, rect, option, selected, hovered) -> None:
         path = QPainterPath()
         path.addRoundedRect(rect, self._s(_RADIUS), self._s(_RADIUS))
         if selected:
             painter.fillPath(path, option.palette.highlight())
         elif hovered:
+            painter.fillPath(path, option.palette.midlight())
+        else:
+            # 常态浅色卡片底色：白底上与间隔配合，条目区分度更高
             painter.fillPath(path, option.palette.alternateBase())
 
     def _draw_text_row(self, painter, rect, option, item) -> None:

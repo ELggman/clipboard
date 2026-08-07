@@ -13,7 +13,7 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog, QPushButton, QStyleOptionViewItem
 
 from app.types import ClipboardItem
-from ui.history_view import ROLE_ITEM, ROW_HEIGHT, THUMB_ROW_HEIGHT, HistoryView
+from ui.history_view import ROLE_HEADER, ROLE_ITEM, ROW_HEIGHT, THUMB_ROW_HEIGHT, HistoryView
 
 pytest_app = QApplication.instance() or QApplication([])
 
@@ -477,20 +477,31 @@ def test_timeline_view_grouped(tmp_path):
     assert [view._tabs.item(i).text() for i in range(view._tabs.count())] \
         == ["今天", "昨天", "本周", "更早"]
 
+    def rows():
+        """模型行内容（条目 content 或月份标题）。"""
+        out = []
+        for r in range(view._model.rowCount()):
+            idx = view._model.index(r, 0)
+            item = idx.data(ROLE_ITEM)
+            header = idx.data(ROLE_HEADER)
+            out.append(item.content if item is not None
+                       else f"HEADER:{header}")
+        return out
+
     # 默认「今天」：只显示今天条目
-    texts = [view._list.item(i).text() for i in range(view._list.count())]
+    texts = rows()
     assert any("today item" in t for t in texts)
     assert not any("yesterday item" in t for t in texts)
 
     # 切「昨天」
     view._tabs.setCurrentRow(1)
-    texts = [view._list.item(i).text() for i in range(view._list.count())]
+    texts = rows()
     assert any("yesterday item" in t for t in texts)
 
     # 切「更早」：月份标题 + 旧条目
     view._tabs.setCurrentRow(3)
-    texts = [view._list.item(i).text() for i in range(view._list.count())]
-    assert any("月" in t for t in texts)          # 月份分组标题
+    texts = rows()
+    assert any(t.startswith("HEADER:") and "月" in t for t in texts)  # 月份标题
     assert any("old item" in t for t in texts)
     assert not any("today item" in t for t in texts)
     view.close()

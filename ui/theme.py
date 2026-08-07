@@ -172,12 +172,15 @@ QLineEdit, QPlainTextEdit {
 }
 QPlainTextEdit { padding: 8px 10px; }
 /* 代码详情视图：行号是独立 gutter 组件（item_detail_popup._CodeView），
-   与文本区并排，不受 QSS padding 影响（setViewportMargins 会被 QSS
-   padding 覆盖，实测文本压到行号区下） */
+   与文本区并排。padding 必须为 0：通用 QPlainTextEdit 规则的 8px 顶部
+   内边距会把文本压下半行高，与 gutter 的 contentOffset 行号错位。
+   背景必须不透明（$window = 弹窗底色）：macOS 上透明 QPlainTextEdit
+   viewport 的首行合成渲染异常（实测：代码第一行显示不全/被裁剪） */
 QPlainTextEdit#codeView {
-    background: transparent;
+    background: $window;
     border: none;
     border-radius: 0;
+    padding: 0px;
 }
 
 /* 右键菜单：Apple 风格（圆角浮层、选中强调色、分隔线） */

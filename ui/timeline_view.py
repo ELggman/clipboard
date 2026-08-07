@@ -2,12 +2,16 @@
 
 顶部横向分段选择器（复用顶部导航样式），选择后只显示该时间段；
 「更早」内按月分组（带月份标题）。点击条目 → 详情弹层。
+
+条目复用 HistoryDelegate 渲染（与历史/收藏夹一致：两行布局、卡片
+底色、间隔、代码/敏感/缩略图）——之前用裸 QListWidget 文本行，
+内容紧紧挨着显示（实测踩坑）。
 """
 import logging
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QFont
+from PySide6.QtCore import QModelIndex, Qt, Signal
+from PySide6.QtGui import QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
     QListView,
     QListWidget,
@@ -17,10 +21,14 @@ from PySide6.QtWidgets import (
 )
 
 from services import history_service
+from ui.history_view import (
+    BASE_WIDTH,
+    ROLE_HEADER,
+    ROLE_ITEM,
+    HistoryDelegate,
+)
 
 logger = logging.getLogger(__name__)
-
-ROLE_ITEM = Qt.ItemDataRole.UserRole + 1  # 条目 item 存 ClipboardItem
 
 # 分段选择：label → 分组匹配（None 表示「更早」= 所有月份桶）
 _BUCKETS = [("今天", "今天"), ("昨天", "昨天"), ("本周", "本周"), ("更早", None)]
@@ -52,23 +60,40 @@ class TimelineView(QWidget):
         self._tabs.currentRowChanged.connect(self._on_bucket_selected)
         layout.addWidget(self._tabs)
 
-        self._list = QListWidget()
+        # 条目列表：QListView + HistoryDelegate（与历史页一致的渲染）
+        self._model = QStandardItemModel(self)
+        self._list = QListView()
         self._list.setObjectName("historyList")
-        self._list.setUniformItemSizes(False)
-        self._list.itemClicked.connect(self._on_item_clicked)
+        self._list.setMouseTracking(True)
+        self._list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._list.setSpacing(4)  # 条目间隔（与历史页一致）
+        self._list.setModel(self._model)
+        self._delegate = HistoryDelegate(self._list)
+        self._list.setItemDelegate(self._delegate)
+        self._list.clicked.connect(self._on_item_clicked)
         layout.addWidget(self._list, 1)
 
         self._tabs.setCurrentRow(0)
 
-    def set_context(self, engine) -> None:
+    def set_context(self, engine, image_service=None) -> None:
         """注入数据库引擎（bootstrap 装配），打开页面时自动刷新。"""
         self._engine = engine
+        if image_service is not None:
+            self._delegate.set_image_service(image_service)
         self.reload()
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
         if self._engine is not None:
             self.reload()
+
+    def resizeEvent(self, event) -> None:
+        """窗口放大 → 内容等比例放大（与历史页一致）。"""
+        super().resizeEvent(event)
+        scale = event.size().width() / BASE_WIDTH
+        self._delegate.set_scale(scale)
+        self._list.setSpacing(max(2, round(4 * scale)))
+        self._list.doItemsLayout()
 
     def reload(self) -> None:
         """重载分组数据，保持当前时间段选择。"""
@@ -80,7 +105,7 @@ class TimelineView(QWidget):
     # ---- 渲染 ----
 
     def _on_bucket_selected(self, row: int) -> None:
-        self._list.clear()
+        self._model.clear()
         if not (0 <= row < len(_BUCKETS)):
             return
         _, match = _BUCKETS[row]
@@ -88,32 +113,30 @@ class TimelineView(QWidget):
             # 更早：所有月份桶，带月份标题
             for label, items in self._groups:
                 if "月" in label:
-                    self._list.addItem(self._make_header(label))
+                    self._model.appendRow(self._make_header(label))
                     for item in items:
-                        self._list.addItem(self._make_row(item))
+                        self._model.appendRow(self._make_row(item))
         else:
             for label, items in self._groups:
                 if label == match:
                     for item in items:
-                        self._list.addItem(self._make_row(item))
+                        self._model.appendRow(self._make_row(item))
 
     @staticmethod
-    def _make_header(label: str) -> QListWidgetItem:
-        header = QListWidgetItem(label)
-        header.setFlags(Qt.ItemFlag.NoItemFlags)  # 不可选中不可交互
-        font = QFont()
-        font.setBold(True)
-        header.setFont(font)
+    def _make_header(label: str) -> QStandardItem:
+        header = QStandardItem()
+        header.setData(label, ROLE_HEADER)
+        header.setEditable(False)
         return header
 
     @staticmethod
-    def _make_row(item) -> QListWidgetItem:
-        row = QListWidgetItem(
-            f"{item.created_at} · {item.type}\n{item.display_text()}")
-        row.setData(ROLE_ITEM, item)
+    def _make_row(item) -> QStandardItem:
+        row = QStandardItem()
+        row.setData(item, ROLE_ITEM)
+        row.setEditable(False)
         return row
 
-    def _on_item_clicked(self, item: QListWidgetItem) -> None:
-        entry = item.data(ROLE_ITEM)
-        if entry is not None:
-            self.item_activated.emit(entry)
+    def _on_item_clicked(self, index: QModelIndex) -> None:
+        item = index.data(ROLE_ITEM)
+        if item is not None:
+            self.item_activated.emit(item)
