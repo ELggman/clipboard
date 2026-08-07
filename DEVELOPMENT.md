@@ -2,13 +2,15 @@
 
 > 基于《Clipboard Workspace.md》需求文档编写。本文档是开发与打包的长期参考，随项目演进持续更新。
 >
-> 最后更新：2026-08-06
+> 最后更新：2026-08-07（Code Mode / Privacy Mode 落地，新增 §3.6/§3.7/§7.2 v3）
 
 ---
 
 ## 1. 项目概述
 
 macOS 本地剪贴板工作台：管理复制内容、实时搜索、快速粘贴、分类收藏、代码片段、快捷 Action，并预留 AI / OCR / 插件扩展能力。
+
+V1.5 已落地 **Code Mode**（自动识别代码/语言、语法高亮、代码 Actions）与 **Privacy Mode**（暂停监控、来源应用排除、敏感内容检测与遮蔽、自动过期），核心检测 100% 本地（§3.6/§3.7）。
 
 **设计原则**（不可妥协）：
 
@@ -30,6 +32,7 @@ macOS 本地剪贴板工作台：管理复制内容、实时搜索、快速粘�
 | 数据库 | SQLite + WAL | SQLAlchemy 2.0 ORM |
 | 配置 | YAML | PyYAML |
 | 图片 | Pillow | 缩略图、预览 |
+| 语法高亮 | Pygments（纯 Python 本地） | Code Mode 详情页 8 类 token 高亮，懒导入 |
 | 系统桥接 | pyobjc-framework-Quartz | 剪贴板监听、全局热键（CGEventTap） |
 | OCR（V1.5） | PaddleOCR | 见 §7.3 打包注意事项 |
 | 打包 | PyInstaller | 必须签名，见 §6 |
@@ -90,20 +93,26 @@ clipboard-workspace/
 │   ├── models.py            # SQLAlchemy ORM 模型
 │   └── migrations.py        # schema 演进（轻量：PRAGMA user_version）
 ├── services/
-│   ├── clipboard_watcher.py # 剪贴板监听（NSPasteboard changeCount 轮询）
-│   ├── hotkey_manager.py    # 全局热键（CGEventTap）
-│   ├── search_service.py    # 搜索（FTS5）
+│   ├── clipboard_watcher.py # 剪贴板监听（NSPasteboard changeCount 轮询；含暂停）
+│   ├── code_detector.py     # Code Mode：18 语言启发式检测（纯函数，<20ms）
+│   ├── sensitive_detector.py# Privacy Mode：5 类敏感正则 + 遮蔽（纯函数）
+│   ├── hotkey_manager.py    # 全局热键（CGEventTap，多绑定 ⌘⇧V / ⌘⇧P）
+│   ├── search_service.py    # 搜索（FTS5 + CJK LIKE 兜底）
 │   ├── snippet_service.py   # 变量替换 {{date}} {{time}} {{uuid}}
 │   ├── action_service.py    # Action 注册与执行（复用 app/actions 接口）
-│   └── image_service.py     # 图片落盘、缩略图缓存、懒加载
+│   └── image_service.py     # 图片落盘、缩略图缓存（失败不缓存）、删除保护
 ├── ui/
-│   ├── main_window.py       # 主窗口（顶部导航 + 搜索栏 + 内容区 + 底部状态栏）
+│   ├── main_window.py       # 主窗口（顶部导航 + 搜索栏 + 内容区 + 底部状态栏 + 隐私指示）
 │   ├── quick_paste_popup.py # ⌘⇧V 弹出层
-│   ├── history_view.py
+│   ├── item_detail_popup.py # 详情弹层（文本/图片/代码高亮/敏感 Reveal）
+│   ├── code_highlighter.py  # Pygments → QSyntaxHighlighter（8 类 token，懒加载）
+│   ├── history_view.py      # 历史列表（HistoryDelegate：文本/图片/代码/敏感/标题行）
 │   ├── collections_view.py
 │   ├── snippets_view.py
-│   ├── timeline_view.py
-│   ├── settings_view.py
+│   ├── timeline_view.py     # 时间线（复用 HistoryDelegate 渲染）
+│   ├── settings_view.py     # 设置（含隐私区：策略/忽略应用/暂停监控）
+│   ├── clean_data_dialog.py # 清理数据弹窗（时间+类型筛选删除）
+│   ├── app_picker_dialog.py # 已安装应用选择器（忽略列表）
 │   └── theme.py             # 浅色/深色/跟随系统（QPalette + Stylesheet）
 ├── resources/               # 图标、qss
 ├── config/
@@ -205,6 +214,10 @@ def callback(proxy, event, refcon):
 - 录制模式（Settings 里改快捷键）回调返回 None 消费事件
 - 热键触发弹窗时，若应用是 accessory（LSUIElement），需先处理激活策略，否则窗口不渲染（见 §4.3）
 
+**多绑定（V1.5）**：`HotkeyManager` 持 `_bindings: [(vk, mask, Signal)]`，一个 CGEventTap 遍历匹配。
+`activated`（⌘⇧V=9，Quick Paste）+ `privacy_toggle`（⌘⇧P=35，隐私暂停，见 §3.7）。
+vk 码与键盘布局无关（物理键）。
+
 ### 3.3 Actions 插件系统（全项目最值得投入的设计）
 
 需求文档明确：Actions 不写死，新功能 = 新增一个插件文件。**V1 就按此设计，后续 AI / OCR / 格式化都是插件的增量。**
@@ -243,7 +256,53 @@ def load_actions(extra_dirs: list[Path] = ()) -> list[ClipboardAction]:
 - 图片不入库：落盘 `ApplicationData/Images/<hash>.png`，DB 只存 `file_path`
 - 缩略图：生成 <256px 缓存到内存 LRU（QImage），列表展示用
 - 懒加载：滚动到可视区域才生成/读取缩略图（`setItemPrototype` + 手动触发）
-- 删除记录：同步删文件（数据库事务外，防删失败留下孤儿文件——记录日志即可）
+- **失败不缓存（关键）**：`@lru_cache` 会缓存 None 返回值——文件缺失的失败被永久缓存，文件重建后永远返回 None（实测：历史/收藏全部缩略图消失，重启才恢复）。解码走 `_thumbnail_cached`（lru_cache 只缓存成功），失败抛异常走未缓存入口重试
+- **删除保护（关键）**：`delete()` 只允许删除 `images/` 目录内文件（`is_managed` 守卫）。
+  FILE 条目的 `file_path` 指向用户**原始文档**，无条件 unlink 会把用户文件删掉（实测数据丢失）；删除前再查 `collection_service.is_file_path_referenced`——被收藏快照引用的图片保留（否则收藏粘贴失效）
+
+### 3.6 Code Mode（代码模式，新增.md §8）
+
+**定位**：内容状态而非开关——剪贴板文本到达时自动检测，置信度 ≥0.80 才标 `type="code"`；低于阈值保留 `language` 作辅助字段。100% 本地，检测 <20ms。
+
+**检测器（`services/code_detector.py`，纯函数零 Qt/DB 依赖）**：
+
+- 18 语言启发式打分（python/javascript/typescript/java/c/cpp/csharp/go/rust/swift/kotlin/sql/shell/html/css/json/yaml/markdown），每语言关键字集 + 结构信号
+- `detect(content) -> CodeResult(language, confidence, is_structured) | None`；`CODE_THRESHOLD = 0.80`
+- 结构化优先：JSON 解析成功即 1.0（is_structured=true）；YAML 解析前须过键值结构占比门槛（PyYAML 能把 Python 代码解析成 dict，实测踩坑）
+- 性能：<2 行快速退出（单行另查 shell/rust/sql/yaml 强信号）、分析截断 4096 字符
+- **误判防护（实测踩坑）**：`#include` 等预处理器不计为 shell 注释；`<int>` 泛型不计为重定向（`(?<![<\w])>` 限定）；python 缩进加分要求强信号 ≥2（单行 import+缩进曾把 Swift 结构体判成 Python）
+
+**接入点**：`ClipboardWatcher._parse` 文本分支——url 判断后跑 `detect`，命中则携带 language/confidence/line_count/character_count/is_structured 落库（v3 列，见 §7.2）。
+
+**UI**：
+
+- 列表：`_draw_code_row`——语言 emoji 徽标（🐍 Python）+ mono 预览 ≤6 行 + `+N more lines` + 行数；meta 行基线 33 与文本行一致
+- 详情弹窗：`_CodeView`（独立行号 gutter 组件 + 只读 mono 编辑区）+ `CodeHighlighter`（Pygments 懒导入，8 类 token 映射 QTextCharFormat，颜色按深浅主题取 GitHub 系配色）
+- 复制按钮：有选中复制选中部分（selectedText 的 U+2029 还原为换行），无选中复制全部
+- 代码 Actions：添加/移除行号、JSON 压缩/校验、检测语言、保存为文件（扩展名映射表）、复制纯文本（markdown 剥离）；`json_pretty` 兼容 code 类型
+
+**坑**：Pygments 2.x 的 token 是 `_TokenType` **实例**，层级在 `parent` 链（`type(token).__mro__` 是元类链，永远匹配不上，实测零高亮）；`setViewportMargins` 会被 QSS padding 在渲染层覆盖（文本压到行号区）→ 行号用独立组件；macOS 透明 QPlainTextEdit viewport 首行合成异常 → 背景不透明。
+
+### 3.7 Privacy Mode（隐私模式，新增.md §9）
+
+**管线（`bootstrap.apply_privacy_policy`，on_clipboard_changed 前置）**：
+
+```
+剪贴板变化 → 暂停? → 来源应用 ∈ 忽略列表? → 敏感检测(text/code) → 落库
+                        ↓                ↓                    ↓
+                   跳过(日志)       跳过(日志)      warn: sensitive=1 保存
+                                                 ignore: 跳过
+                                                 save_temporarily: expires_at
+```
+
+- **暂停监控**：⌘⇧P 切换（watcher `paused`——poll 仍记录 changeCount，恢复不爆发补抓），状态栏永久控件 📋/🔒
+- **应用排除**：`privacy.ignored_apps` 配置 + 已安装应用选择器（扫描 /Applications、~/Applications、/System/Applications 的 .app 读 Info.plist 显示名 + 运行中常规应用，搜索过滤）
+- **敏感检测（`services/sensitive_detector.py`，纯函数）**：api_key/token/jwt/私钥/password 五类正则；**URL 一律跳过**（微信分享链接的 token= 查询参数是常态，误判噪声大于收益）
+- **遮蔽**：warn 策略下 DB 保留原文、显示层 mask（`sk-••••••`、私钥整体隐藏、手动标记整段遮蔽）；详情弹窗「显示」Reveal 切换
+- **手动标记**：右键菜单「标记为敏感/取消敏感标记」（`history_service.set_sensitive`，类型 manual）
+- **自动过期**：save_temporarily 写 `expires_at`，`delete_expired` 清扫（启动 60s + 每 24h，与 auto_delete 同 timer）；置顶条目豁免自动删除（§9.22，含 save_item 内联 trim）
+- **日志规范（§9.23）**：一律不含剪贴板原文——`reason=application_exclusion` / `type=api_key action=warn` 结构，搜索日志不记查询词
+- **删除保护**：见 §3.5——删除历史只清理受管图片，绝不碰用户文档
 
 ---
 
@@ -361,8 +420,8 @@ def ensure_accessibility() -> bool:
 ```sql
 CREATE TABLE clipboard_items (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    type        TEXT NOT NULL,          -- text / url / image / file
-    content     TEXT,                   -- 文本内容（url 存 URL；image/file 存路径）
+    type        TEXT NOT NULL,          -- text / url / image / file / code
+    content     TEXT,                   -- 文本内容（url 存 URL；image/file 存路径；code 存源码）
     preview     TEXT,                   -- 列表预览文案
     file_path   TEXT,                   -- image/file 的存储路径
     hash        TEXT UNIQUE NOT NULL,   -- 去重
@@ -370,10 +429,20 @@ CREATE TABLE clipboard_items (
     favorite    INTEGER DEFAULT 0,
     pinned      INTEGER DEFAULT 0,
     created_at  DATETIME NOT NULL,
-    updated_at  DATETIME NOT NULL
+    updated_at  DATETIME NOT NULL,
+    -- v3（Code Mode / Privacy Mode，2026-08-07）
+    language            VARCHAR(32),    -- 检测语言（code 必有；text 可留辅助字段）
+    language_confidence REAL,           -- 0.0-1.0
+    line_count          INTEGER DEFAULT 0,
+    character_count     INTEGER DEFAULT 0,
+    is_structured       INTEGER DEFAULT 0,  -- json/yaml/sql
+    sensitive           INTEGER DEFAULT 0,  -- 敏感标记（warn/manual）
+    sensitive_type      VARCHAR(32),        -- api_key/token/jwt/private_key/password/manual
+    expires_at          DATETIME            -- 临时条目到期时间（save_temporarily）
 );
 CREATE INDEX ix_items_created ON clipboard_items (created_at DESC);
 CREATE INDEX ix_items_type    ON clipboard_items (type);
+CREATE INDEX ix_items_expires ON clipboard_items (expires_at);
 CREATE VIRTUAL TABLE items_fts USING fts5(content, content='clipboard_items', content_rowid='id');
 
 CREATE TABLE collections (
@@ -383,10 +452,17 @@ CREATE TABLE collections (
     created_at DATETIME NOT NULL
 );
 
+-- v2 起为内容快照（与历史解耦）：删除历史不影响收藏
 CREATE TABLE collection_items (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
     collection_id INTEGER REFERENCES collections(id) ON DELETE CASCADE,
-    clipboard_id  INTEGER REFERENCES clipboard_items(id) ON DELETE CASCADE,
-    PRIMARY KEY (collection_id, clipboard_id)
+    clipboard_id  INTEGER,              -- 来源引用（无 FK，可能悬空）
+    type          TEXT NOT NULL DEFAULT 'text',
+    content       TEXT,                 -- 内容冗余快照
+    preview       TEXT,
+    file_path     TEXT,                 -- 图片快照路径（被引用时删除历史保护该文件）
+    created_at    DATETIME NOT NULL,
+    UNIQUE (collection_id, clipboard_id)
 );
 
 CREATE TABLE snippets (
@@ -398,9 +474,11 @@ CREATE TABLE snippets (
 );
 ```
 
-- FTS5 同步：应用层在插入/删除后同步更新 items_fts（10k 量级足够，不引触发器）
-- 自动删除策略（7/30/90 天）：后台 `QTimer` 每日扫描一次，删除时同步删图片文件
-- 历史数量上限（100/500/1000/无限）：插入前裁剪最旧记录
+- FTS5 同步：应用层在插入/删除后同步更新 items_fts（10k 量级足够，不引触发器）；code 内容正常全文检索
+- 自动删除策略（1/7/30/90/365 天/永不）：后台 `QTimer` 每日扫描一次，删除时同步删**受管**图片文件（置顶豁免，§9.22）
+- 历史数量上限（100/500/1000/无限）：插入前裁剪最旧记录（**置顶优先豁免**，与 list_recent 排序一致）
+- 迁移：`PRAGMA user_version`（当前 = 3）；v2 快照化、v3 加元数据列均用 `PRAGMA table_info` 防重 + ALTER TABLE（新列全部 nullable 或带 DEFAULT，SQLite 限制）
+- 文件大小上限：`history.max_file_size_mb`（默认 50MB，0=不限制），on_clipboard_changed 对 FILE 类型 stat 超限跳过
 
 ### 7.3 Snippet 变量
 
@@ -415,8 +493,9 @@ CREATE TABLE snippets (
 3. **Action 插件**：只依赖 `ClipboardAction` 接口，主程序不 import 具体实现（保证「加 Action 不改主程序」）
 4. **代码风格**：类型注解 + docstring；模块内私有函数 `_` 前缀
 5. **配置**：`config/defaults.yaml` 打包内置，用户配置写 `config/settings.yaml`，缺失字段回退默认值（`defaults` 合并）
-6. **测试**：核心服务（去重、搜索、变量渲染、Action 加载器）写 pytest；UI 层人工验收清单
-7. **git**：目录非 git 仓库——建议 `git init` 后提交初始版本，`packaging/` 与 `logs/`、`images/` 进 `.gitignore`
+6. **测试**：核心服务（去重、搜索、变量渲染、Action 加载器、检测器）写 pytest；UI 层人工验收清单
+7. **隐私日志（§9.23，不可妥协）**：日志一律不含剪贴板原文。剪贴板内容只记 `type` + `hash[:8]`；跳过/敏感事件用结构化字段（`reason=application_exclusion`、`type=api_key action=warn`）；搜索日志不记查询词
+8. **git**：目录非 git 仓库——建议 `git init` 后提交初始版本，`packaging/` 与 `logs/`、`images/` 进 `.gitignore`
 
 ---
 
@@ -432,6 +511,16 @@ CREATE TABLE snippets (
 | `security import` MAC verification failed | openssl 3.x PBES2 不兼容 | `openssl pkcs12 -export -legacy` |
 | Actions 运行时加载失败 | PyInstaller 静态分析收集不到 | spec `collect_submodules` / 外部插件目录 |
 | 构建 `rm -rf dist` 失败 | 旧实例占用 | build.sh 先 pkill |
+| 清理数据把用户原文档删了 | FILE 条目 file_path 指向用户文档，删除无条件 unlink | `is_managed` 守卫只删 images/ 内文件（§3.5） |
+| 收藏夹图片粘贴失效 | 删除历史清理了被收藏引用的图片文件 | 删除前查 `is_file_path_referenced`（§3.5） |
+| 历史/收藏全部无缩略图，重启恢复 | `@lru_cache` 缓存了失败 None（文件缺失毒化） | 失败抛异常不缓存，`_thumbnail_cached` 只缓存成功（§3.5） |
+| 代码详情无高亮 | Pygments 2.x token 是 `_TokenType` 实例，`type(token).__mro__` 取元类链 | 遍历 `token.parent` 链匹配（§3.6） |
+| 代码文本压到行号区 | QSS padding 渲染层覆盖 `setViewportMargins` | 行号改独立 gutter 组件（§3.6） |
+| 代码首行显示不全 | macOS 透明 QPlainTextEdit viewport 合成异常 | 背景不透明 `$window`（§3.6） |
+| C++ 判成 shell | `#include` 计为 shell 注释、`<int>` 计为重定向 | 预处理器排除 + `(?<![<\w])>` 限定（§3.6） |
+| Swift 判成 Python | import+缩进加分过宽 | 缩进加分要求强信号 ≥2（§3.6） |
+| 微信 URL 判成敏感 | 分享链接 token= 查询参数命中 token 正则 | URL 类型跳过敏感检测（§3.7） |
+| 复制新文本把置顶挤下去 | add_item 固定插行 0 | 插到置顶组之后（pinned DESC 一致） |
 
 ---
 
@@ -440,6 +529,7 @@ CREATE TABLE snippets (
 | 版本 | 内容 | 本文档对应 |
 |---|---|---|
 | V1 | 文本/图片/URL/文件历史、搜索、收藏、Snippet、Action | §3 全部就绪 |
+| V1.5 | 代码/图片/敏感条目渲染、列表卡片底色、详情弹窗、清理数据弹窗 | §3.5/§3.6 就绪 |
 | V1.5 | **Code Mode**（代码检测/语言识别/语法高亮/代码 Actions）、**Privacy Mode**（暂停监控/应用排除/敏感检测/遮蔽/自动过期） | 新增.md §8/§9，本版本已完成 |
 | V1.5 | OCR、图片预览、拖拽、多窗口 | OCR 插件化（§6.4），拖拽/多窗口在 ui/ 层扩展 |
 | V2 | AI 插件（Summarize/Translate/Rewrite/Explain） | 需 AI Privacy Gateway（新增.md §9.25）后启用 |
