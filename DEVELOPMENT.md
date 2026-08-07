@@ -2,7 +2,7 @@
 
 > 基于《Clipboard Workspace.md》需求文档编写。本文档是开发与打包的长期参考，随项目演进持续更新。
 >
-> 最后更新：2026-08-07（Session 会话机制落地，新增 §3.8/§7.2 v4）
+> 最后更新：2026-08-07（会话去重范围与删除策略可配置，v5）
 
 ---
 
@@ -313,7 +313,18 @@ def load_actions(extra_dirs: list[Path] = ()) -> list[ClipboardAction]:
 **服务（`services/session_service.py`）**：
 
 - `ensure_default`（幂等，启动调用）/ `list_sessions`（含 count）/ `create` / `rename` / `delete`
-- `delete_session`：**内容移回普通会话**（`UPDATE session_id=1`）——会话是临时分组，内容不丢；默认会话禁删禁改名
+- `delete_session(sid, policy)`：默认会话禁删禁改名。
+  **policy 可配置（`session.delete_policy`）**：
+  - `move`（默认）：内容移回普通并**合并去重**（普通已有同 hash 跳过，
+    不产生跨会话重复）——先取数据再删再插（同表 INSERT SELECT 有 id
+    冲突与孤儿 session_id 两个坑，实测）
+  - `delete`：内容直接删除，图片路径返回调用方按引用保护清理
+- **去重范围可配置（`history.dedupe_scope`）**：`all`（默认，全局去重，
+  同内容任意会话命中即去重）/ `session`（仅本会话去重，跨会话同内容
+  各存一份）。DB 唯一键 v5 起为 `(hash, session_id)`（SQLite 重建表），
+  scope=all 时由 save_item 查重逻辑维持全局语义
+- 图片清理保护：删除历史时 `is_path_still_referenced`（查其他会话行 +
+  收藏快照）——按会话去重后同一图片文件被多会话引用，无引用才删
 - 激活持久化：`config/settings.yaml` 的 `session.active_id`，切换即写回，**重启恢复上次激活的会话**（次日继续任务的核心场景）
 
 **查询过滤**：`history_service.list_recent / search_items / list_grouped / list_older_than` 全部加 `session_id: int | None = None`（None=全部，旧调用兼容）；`search_service.search` 三条路径（FTS5/LIKE/regex）同样支持。
@@ -512,7 +523,7 @@ CREATE INDEX ix_items_session ON clipboard_items (session_id);
 - FTS5 同步：应用层在插入/删除后同步更新 items_fts（10k 量级足够，不引触发器）；code 内容正常全文检索
 - 自动删除策略（1/7/30/90/365 天/永不）：后台 `QTimer` 每日扫描一次，删除时同步删**受管**图片文件（置顶豁免，§9.22）
 - 历史数量上限（100/500/1000/无限）：插入前裁剪最旧记录（**置顶优先豁免**，与 list_recent 排序一致）
-- 迁移：`PRAGMA user_version`（当前 = 4）；v2 快照化、v3 加元数据列、v4 会话均用 `PRAGMA table_info` 防重 + ALTER TABLE（新列全部 nullable 或带 DEFAULT，SQLite 限制）
+- 迁移：`PRAGMA user_version`（当前 = 5）；v2 快照化、v3 加元数据列、v4 会话用 `PRAGMA table_info` 防重 + ALTER TABLE；**v5 唯一约束 hash → (hash, session_id) 需重建表**（SQLite 无法删约束），保留 id 与全部列 + FTS rebuild（新库 items_fts 未建时跳过）
 - 文件大小上限：`history.max_file_size_mb`（默认 50MB，0=不限制），on_clipboard_changed 对 FILE 类型 stat 超限跳过
 - 会话：`sessions` 表 + `clipboard_items.session_id`（§3.8）；默认会话幂等创建
 
@@ -559,6 +570,8 @@ CREATE INDEX ix_items_session ON clipboard_items (session_id);
 | 复制新文本把置顶挤下去 | add_item 固定插行 0 | 插到置顶组之后（pinned DESC 一致） |
 | 会话下拉为空 | 只注入 context 未填充下拉 | bootstrap 装配时显式 `reload_sessions(active_id)`（§3.8） |
 | 全局搜索看不到会话来源 | 条目未带 session 名 | `_to_item` LEFT JOIN sessions 填 `session_name`，delegate `_session_tag` 标注（§3.8） |
+| 删除会话移回后内容丢失/成孤儿 | INSERT SELECT 同表 id 冲突、session_id 带出原值 | 先取数据再删再插 + 覆盖 session_id=1（§3.8） |
+| 新会话复制旧图片被去重吞掉 | 唯一约束 hash 全局去重 | v5 改 (hash, session_id) 联合 + `dedupe_scope` 可配置（§3.8） |
 
 ---
 
