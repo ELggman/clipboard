@@ -463,6 +463,7 @@ class HistoryView(QWidget):
         # 会话（v4）：下拉切换 + 管理菜单；bootstrap 注入
         self._session_service = None
         self._on_active_changed = None   # 切换会话 → 持久化激活（bootstrap 闭包）
+        self._delete_policy = "move"     # 删除会话策略（move/delete，设置页可配）
         self._view_session_id: int | None = 1  # 当前视图会话（None=全局搜索）
 
         layout = QVBoxLayout(self)
@@ -555,6 +556,10 @@ class HistoryView(QWidget):
         self._engine = engine
         self._session_service = session_service
         self._on_active_changed = on_active_changed
+
+    def set_delete_policy(self, policy: str) -> None:
+        """删除会话策略：move=内容移回普通（合并去重）/ delete=直接删除。"""
+        self._delete_policy = policy
 
     def reload_sessions(self, active_id: int) -> None:
         """填充会话下拉（显示名 · 条数），并激活 active_id 刷新视图。"""
@@ -664,18 +669,35 @@ class HistoryView(QWidget):
     def _delete_session(self, session_id: int) -> None:
         if self._session_service is None:
             return
+        from services import history_service
         from ui.dialogs import ConfirmDialog
 
-        dialog = ConfirmDialog(
-            "删除会话",
-            "删除会话后，其中的内容将全部移回「普通」会话（不丢数据）。确定删除？",
-            confirm_text="删除")
+        if self._delete_policy == "delete":
+            message = ("删除会话后，其中的内容将**一并删除**（图片文件同步"
+                       "清理，仍被其他会话/收藏引用的保留）。确定删除？")
+            ok_label = "删除会话及其内容"
+        else:
+            message = ("删除会话后，其中的内容将全部移回「普通」会话"
+                       "（与普通已有相同内容自动合并去重，不丢数据）。确定删除？")
+            ok_label = "删除"
+        dialog = ConfirmDialog("删除会话", message, confirm_text=ok_label)
         if dialog.exec() == ConfirmDialog.DialogCode.Accepted:
-            if self._session_service.delete_session(self._engine, session_id):
+            ok, files = self._session_service.delete_session(
+                self._engine, session_id, self._delete_policy)
+            if ok:
+                if self._delete_policy == "delete" and files:
+                    provider = self._delegate._provider
+                    for path in files:
+                        if (provider is not None
+                                and not history_service.is_path_still_referenced(
+                                    self._engine, path)):
+                            provider.delete(path)
                 self.reload_sessions(1)  # 回到普通会话
                 if self._on_active_changed is not None:
                     self._on_active_changed(1)
-                self.feedback.emit("会话已删除，内容已移回「普通」")
+                self.feedback.emit(
+                    "会话已删除" + ("，内容已移回「普通」"
+                                  if self._delete_policy == "move" else ""))
 
     # ---- 点击 ----
 
@@ -831,12 +853,10 @@ class HistoryView(QWidget):
         files = history_service.delete_item(self._engine, item.id)
         provider = self._delegate._provider  # ImageService：清理图片文件
         if provider is not None:
-            from services import collection_service
-
             for path in files:
-                # 被收藏夹快照引用的图片保留（否则收藏粘贴失效）
-                if not collection_service.is_file_path_referenced(self._engine,
-                                                                  path):
+                # 仍被引用（其他会话行/收藏快照）的图片保留
+                if not history_service.is_path_still_referenced(self._engine,
+                                                                path):
                     provider.delete(path)
         self.feedback.emit("已删除")
         if self._refresh_cb:

@@ -286,6 +286,12 @@ class MainWindow(QMainWindow):
         if isinstance(page, HistoryView):
             page.refresh_session_counts()
 
+    def set_delete_policy(self, policy: str) -> None:
+        """删除会话策略（移回普通/直接删除），设置页改动即时同步。"""
+        page = self._pages.widget(0)
+        if isinstance(page, HistoryView):
+            page.set_delete_policy(policy)
+
     def set_menu_context(self, engine, action_service) -> None:
         """注入右键菜单依赖（透传历史列表）。"""
         page = self._pages.widget(0)

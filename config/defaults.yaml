@@ -13,6 +13,7 @@ history:
   poll_interval: 0.2       # 剪贴板轮询间隔（秒）
   show_image_filename: true  # 图片条目是否显示文件名（False 显示「时间 · image」）
   max_file_size_mb: 50     # 复制文档大小上限（MB，0 = 不限制）
+  dedupe_scope: all        # 去重范围：all(全部会话，同内容全局去重) / session(仅本会话去重)
 
 # Privacy Mode（§9）：敏感内容处理策略与来源应用排除
 privacy:
@@ -23,6 +24,7 @@ privacy:
 # 会话（v4）：任务型内容分组。激活会话 = 新复制内容保存目标，重启恢复
 session:
   active_id: 1             # 1 = 「普通」默认会话
+  delete_policy: move      # 删除会话时：move(内容移回普通，合并去重) / delete(直接删除)
 
 hotkey:
   enabled: true

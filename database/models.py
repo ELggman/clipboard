@@ -15,13 +15,15 @@ from .engine import Base
 
 class ClipboardItem(Base):
     __tablename__ = "clipboard_items"
+    __table_args__ = (UniqueConstraint("hash", "session_id"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     type: Mapped[str] = mapped_column(String(16), nullable=False)  # text/url/image/file/code
     content: Mapped[str | None] = mapped_column(Text)              # 文本；url 存 URL
     preview: Mapped[str | None] = mapped_column(Text)              # 列表预览文案
     file_path: Mapped[str | None] = mapped_column(Text)            # image/file 存储路径
-    hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)  # 去重键
+    # v5：去重键从 hash 唯一改为 (hash, session_id) 联合唯一（去重范围可配置）
+    hash: Mapped[str] = mapped_column(String(64), nullable=False)
     source_app: Mapped[str | None] = mapped_column(String(255))
     favorite: Mapped[int] = mapped_column(Integer, default=0)
     pinned: Mapped[int] = mapped_column(Integer, default=0)

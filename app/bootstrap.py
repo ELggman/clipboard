@@ -111,6 +111,7 @@ def start_workspace(app: QApplication) -> None:
     window.set_active_session(active_id)
     window.set_session_context(engine, session_service,
                                on_active_changed=set_active_session)
+    window.set_delete_policy(config["session"].get("delete_policy", "move"))
     window.reload_sessions(active_id)  # 填充会话下拉 + 加载激活会话视图
     window.set_item_activated_handler(  # 各列表页单击 → 详情弹层（可选中部分复制）
         lambda item: detail_popup.show_item(item, image_service))
@@ -178,6 +179,15 @@ def start_workspace(app: QApplication) -> None:
                 # 文档大小上限即时生效（on_clipboard_changed 读内存 config）
                 config["history"]["max_file_size_mb"] = int(
                     overrides["history"]["max_file_size_mb"])
+            elif key == "dedupe_scope":
+                # 去重范围即时生效（save_item 读内存 config）
+                config["history"]["dedupe_scope"] = \
+                    overrides["history"]["dedupe_scope"]
+            elif key == "session_delete_policy":
+                # 删除会话策略即时生效（历史页读内存 config）
+                config["session"]["delete_policy"] = \
+                    overrides["session"]["delete_policy"]
+                window.set_delete_policy(overrides["session"]["delete_policy"])
             # save_images / auto_delete 下次插入或清扫时生效
         return _apply
 
@@ -186,7 +196,9 @@ def start_workspace(app: QApplication) -> None:
         {k: apply_setting(k) for k in ("theme", "font", "show_filename",
                                        "autostart", "max_items",
                                        "privacy_policy", "privacy_temp",
-                                       "privacy_ignored", "max_file_size")},
+                                       "privacy_ignored", "max_file_size",
+                                       "dedupe_scope",
+                                       "session_delete_policy")},
         engine=engine,
         privacy_state=privacy_state,
     )
@@ -202,10 +214,8 @@ def start_workspace(app: QApplication) -> None:
             removed_files += history_service.delete_older_than(engine, days)
         removed_files += history_service.delete_expired(engine)
         for path in removed_files:
-            # 被收藏夹快照引用的图片保留（否则收藏粘贴失效）
-            from services import collection_service
-
-            if not collection_service.is_file_path_referenced(engine, path):
+            # 仍被引用（其他会话行/收藏快照）的图片保留
+            if not history_service.is_path_still_referenced(engine, path):
                 image_service.delete(path)
         if removed_files:
             window._reload_history()
@@ -246,7 +256,8 @@ def start_workspace(app: QApplication) -> None:
                 logger.exception("图片保存失败，放弃本条")
                 return
         is_new = history_service.save_item(
-            engine, item, max_items=int(config["history"]["max_items"])
+            engine, item, max_items=int(config["history"]["max_items"]),
+            dedupe_scope=config["history"].get("dedupe_scope", "all"),
         )
         window.refresh_history(item, is_new)
         if is_new:

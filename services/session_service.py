@@ -79,19 +79,62 @@ def rename_session(engine: Engine, session_id: int, name: str) -> bool:
     return True
 
 
-def delete_session(engine: Engine, session_id: int) -> bool:
-    """删除会话：内容**移回普通会话**（id=1），默认会话拒绝。"""
+def delete_session(engine: Engine, session_id: int,
+                   policy: str = "move") -> tuple[bool, int, list[str]]:
+    """删除会话。返回 (是否成功, 受影响条数, 待清理图片路径)。
+
+    policy：
+    - "move"（默认）：内容**移回普通会话**并**合并去重**——普通会话
+      已有同 hash 的内容跳过（用户决策：不产生跨会话重复）
+    - "delete"：内容直接删除（图片文件由调用方按引用保护清理）
+    默认会话拒绝删除。
+    """
     if session_id == DEFAULT_SESSION_ID:
         logger.warning("默认会话不可删除")
-        return False
+        return False, 0, []
+
+    cols = [
+        "id", "type", "content", "preview", "file_path", "hash", "source_app",
+        "favorite", "pinned", "created_at", "updated_at", "session_id",
+        "language", "language_confidence", "line_count", "character_count",
+        "is_structured", "sensitive", "sensitive_type", "expires_at",
+    ]
     with engine.begin() as conn:
-        moved = conn.execute(
-            text("UPDATE clipboard_items SET session_id = :default_sid"
-                 " WHERE session_id = :sid"),
-            {"default_sid": DEFAULT_SESSION_ID, "sid": session_id},
-        ).rowcount
+        if policy == "delete":
+            # 内容直接删除：图片路径交调用方按引用保护清理
+            files = [r[0] for r in conn.execute(
+                text("SELECT file_path FROM clipboard_items"
+                     " WHERE session_id = :sid AND file_path IS NOT NULL"),
+                {"sid": session_id}).fetchall()]
+            conn.execute(
+                text("DELETE FROM clipboard_items WHERE session_id = :sid"),
+                {"sid": session_id})
+        else:  # move + 合并去重：普通已有同 hash 的跳过
+            # 行只是移动（仍在普通会话），文件仍被引用 → 无待清理路径。
+            # 先取数据再删再插（同事务）：INSERT SELECT 同一张表时源行
+            # 仍在 → id 唯一约束冲突（实测踩坑）
+            files = []
+            rows = conn.execute(text(
+                "SELECT " + ", ".join(cols) + " FROM clipboard_items"
+                " WHERE session_id = :sid AND hash NOT IN"
+                " (SELECT hash FROM clipboard_items"
+                "  WHERE session_id = :default_sid)"),
+                {"sid": session_id, "default_sid": DEFAULT_SESSION_ID}
+            ).fetchall()
+            conn.execute(text(
+                "DELETE FROM clipboard_items WHERE session_id = :sid"),
+                {"sid": session_id})
+            if rows:
+                placeholders = ", ".join(":" + c for c in cols)
+                conn.execute(
+                    text("INSERT INTO clipboard_items ("
+                         + ", ".join(cols) + ") VALUES (" + placeholders + ")"),
+                    # 移入普通：session_id 覆盖为 1（SELECT 带出原值会成孤儿）
+                    [{**dict(zip(cols, row)),
+                      "session_id": DEFAULT_SESSION_ID} for row in rows],
+                )
+        conn.execute(text("INSERT INTO items_fts(items_fts) VALUES('rebuild')"))
         conn.execute(text("DELETE FROM sessions WHERE id = :sid"),
                      {"sid": session_id})
-    logger.info("会话已删除: id=%s（%d 条内容移回「普通」）",
-                session_id, moved)
-    return True
+    logger.info("会话已删除: id=%s（policy=%s）", session_id, policy)
+    return True, files

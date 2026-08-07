@@ -88,6 +88,26 @@ def search_items(engine: Engine, query: str, limit: int = 200,
     return [_to_item(r, names.get(r.session_id, "")) for r in ordered]
 
 
+def is_path_still_referenced(engine: Engine, file_path: str) -> bool:
+    """图片路径删除后是否仍被引用：其他会话的历史行或收藏快照。
+
+    按会话去重后同一图片文件可能被多个会话的行引用——删除任一行时
+    只有无任何引用才清理文件（否则其他会话的缩略图/粘贴失效）。
+    """
+    if not file_path:
+        return False
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT 1 FROM clipboard_items WHERE file_path = :p LIMIT 1"),
+            {"p": file_path},
+        ).fetchone()
+        if row is not None:
+            return True
+    from services.collection_service import is_file_path_referenced
+
+    return is_file_path_referenced(engine, file_path)
+
+
 def _session_names(engine: Engine) -> dict[int, str]:
     """会话 id → 名称（全局搜索结果展示来源用）。"""
     from database.models import Session
@@ -375,10 +395,14 @@ def set_favorite(engine: Engine, item_id: int, favorite: bool) -> bool:
     return True
 
 
-def save_item(engine: Engine, item: ClipboardItem, max_items: int = 500) -> bool:
+def save_item(engine: Engine, item: ClipboardItem, max_items: int = 500,
+              dedupe_scope: str = "all") -> bool:
     """去重落库 + FTS 索引。返回 True=新增；False=重复（仅刷新 updated_at）。
 
     重复判定用 hash（sha256）；图片重复时会复用已落盘的图片文件。
+    dedupe_scope：all=全部会话去重（同内容任意会话命中即去重，默认）；
+    session=仅本会话去重（跨会话同内容可各存一份，DB 唯一键
+    (hash, session_id) 允许）。
     副作用：回填 item.created_at / item.preview —— 实时 UI 刷新依赖这两个
     展示字段（否则当前进程内列表不显示时间/文件名，重启恢复才有）。
     """
@@ -386,9 +410,17 @@ def save_item(engine: Engine, item: ClipboardItem, max_items: int = 500) -> bool
     item.created_at = now.strftime("%m-%d %H:%M")
     item.preview = compute_preview(item)
     with engine.begin() as conn:
-        row = conn.execute(
-            text("SELECT id FROM clipboard_items WHERE hash = :h"), {"h": item.hash}
-        ).fetchone()
+        if dedupe_scope == "session":
+            row = conn.execute(
+                text("SELECT id FROM clipboard_items"
+                     " WHERE hash = :h AND session_id = :sid"),
+                {"h": item.hash, "sid": item.session_id or 1},
+            ).fetchone()
+        else:
+            row = conn.execute(
+                text("SELECT id FROM clipboard_items WHERE hash = :h"),
+                {"h": item.hash},
+            ).fetchone()
         if row:
             conn.execute(
                 text("UPDATE clipboard_items SET updated_at = :now WHERE id = :id"),

@@ -12,7 +12,7 @@ from .models import Base
 
 logger = logging.getLogger(__name__)
 
-_SCHEMA_VERSION = 4
+_SCHEMA_VERSION = 5
 
 # 幂等扩展 DDL（FTS5 全文索引 + 常用索引）
 _EXTRA_DDL = [
@@ -37,6 +37,8 @@ def migrate(engine: Engine) -> None:
         _upgrade_v3_code_privacy(engine)
     if current < 4:
         _upgrade_v4_sessions(engine)
+    if current < 5:
+        _upgrade_v5_dedupe_scope(engine)
 
     with engine.begin() as conn:
         for ddl in _EXTRA_DDL:
@@ -143,3 +145,65 @@ def _upgrade_v4_sessions(engine: Engine) -> None:
             "CREATE INDEX IF NOT EXISTS ix_items_session"
             " ON clipboard_items (session_id)"))
     logger.info("v4 迁移：会话机制已建立（默认「普通」id=1）")
+
+
+def _upgrade_v5_dedupe_scope(engine: Engine) -> None:
+    """v4 → v5：去重范围可配置——唯一约束 hash → (hash, session_id)。
+
+    SQLite 无法删除/修改唯一约束（ALTER TABLE 限制）→ 重建表：
+    - 保留全部列与 id（collection_items.clipboard_id 悬空引用仍有效）
+    - 唯一键改为 UNIQUE(hash, session_id)：同一内容可在不同会话各存一份
+      （scope=session 去重的前提）；scope=all 时由 save_item 查重逻辑
+      维持全局去重语义（DB 约束放宽不影响）
+    - 重建 items_fts 索引（外部内容表 rowid 对应 id 不变）
+    """
+    cols = [
+        "id", "type", "content", "preview", "file_path", "hash", "source_app",
+        "favorite", "pinned", "created_at", "updated_at", "session_id",
+        "language", "language_confidence", "line_count", "character_count",
+        "is_structured", "sensitive", "sensitive_type", "expires_at",
+    ]
+    with engine.begin() as conn:
+        existing = {r[1] for r in conn.execute(
+            text("PRAGMA table_info(clipboard_items)")).fetchall()}
+        if "session_id" not in existing:
+            # 理论不可达（v4 已加），防御
+            return
+        conn.execute(text(
+            "ALTER TABLE clipboard_items RENAME TO clipboard_items_v4"))
+        conn.execute(text(
+            "CREATE TABLE clipboard_items ("
+            " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            " type VARCHAR(16) NOT NULL, content TEXT, preview TEXT,"
+            " file_path TEXT, hash VARCHAR(64) NOT NULL,"
+            " source_app VARCHAR(255), favorite INTEGER DEFAULT 0,"
+            " pinned INTEGER DEFAULT 0,"
+            " created_at DATETIME NOT NULL, updated_at DATETIME NOT NULL,"
+            " session_id INTEGER NOT NULL DEFAULT 1,"
+            " language VARCHAR(32), language_confidence REAL,"
+            " line_count INTEGER DEFAULT 0, character_count INTEGER DEFAULT 0,"
+            " is_structured INTEGER DEFAULT 0, sensitive INTEGER DEFAULT 0,"
+            " sensitive_type VARCHAR(32), expires_at DATETIME,"
+            " UNIQUE (hash, session_id))"))
+        conn.execute(text(
+            "INSERT INTO clipboard_items (" + ", ".join(cols) + ")"
+            " SELECT " + ", ".join(cols) + " FROM clipboard_items_v4"))
+        conn.execute(text("DROP TABLE clipboard_items_v4"))
+        for ddl in (
+            "CREATE INDEX IF NOT EXISTS ix_items_created"
+            " ON clipboard_items (created_at DESC)",
+            "CREATE INDEX IF NOT EXISTS ix_items_type ON clipboard_items (type)",
+            "CREATE INDEX IF NOT EXISTS ix_items_expires"
+            " ON clipboard_items (expires_at)",
+            "CREATE INDEX IF NOT EXISTS ix_items_session"
+            " ON clipboard_items (session_id)",
+        ):
+            conn.execute(text(ddl))
+        # items_fts 由 _EXTRA_DDL 在迁移后创建：旧库存在才 rebuild，
+        # 新库（迁移链从头跑）此时尚无 FTS 表，跳过由 create 空表
+        tables = {r[0] for r in conn.execute(text(
+            "SELECT name FROM sqlite_master WHERE type='table'")).fetchall()}
+        if "items_fts" in tables:
+            conn.execute(text(
+                "INSERT INTO items_fts(items_fts) VALUES('rebuild')"))
+    logger.info("v5 迁移：唯一约束改为 (hash, session_id)（去重范围可配置）")

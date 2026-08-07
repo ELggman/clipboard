@@ -34,6 +34,10 @@ _AUTO_DELETE_OPTIONS = [(1, "1 天"), (7, "7 天"), (30, "30 天"),
 # 复制文档大小上限（MB；0 = 不限制）
 _FILE_SIZE_OPTIONS = [(10, "10 MB"), (20, "20 MB"), (50, "50 MB"), (200, "200 MB"),
                       (1024, "1 GB"), (0, "不限制")]
+# 去重范围（v5）：跨会话 / 仅本会话
+_DEDUPE_OPTIONS = [("all", "全部会话"), ("session", "仅本会话")]
+# 删除会话策略（v5）：内容移回普通（合并去重）/ 直接删除
+_DELETE_POLICY_OPTIONS = [("move", "移回普通会话"), ("delete", "直接删除")]
 # 敏感内容策略（§9.17）：warn 默认
 _POLICY_OPTIONS = [("warn", "提醒（保存并遮蔽显示）"),
                    ("ignore", "忽略（不保存）"),
@@ -110,6 +114,11 @@ class SettingsView(QWidget):
             self._file_size.addItem(label, value)
         layout.addRow("文件大小上限", self._file_size)
 
+        self._dedupe_scope = QComboBox()
+        for value, label in _DEDUPE_OPTIONS:
+            self._dedupe_scope.addItem(label, value)
+        layout.addRow("去重范围", self._dedupe_scope)
+
         self._save_images = QCheckBox("保存复制图片到本地")
         layout.addRow("图片保存", self._save_images)
 
@@ -164,6 +173,11 @@ class SettingsView(QWidget):
         ignored_box.addLayout(ignored_btns)
         layout.addRow("忽略的应用", ignored_box)
 
+        self._delete_policy = QComboBox()
+        for value, label in _DELETE_POLICY_OPTIONS:
+            self._delete_policy.addItem(label, value)
+        layout.addRow("删除会话时", self._delete_policy)
+
         # 暂停/恢复监控（运行时状态，不持久化）
         self._pause_btn = QPushButton("暂停监控")
         self._pause_btn.setObjectName("secondaryButton")
@@ -181,6 +195,8 @@ class SettingsView(QWidget):
         self._policy.currentIndexChanged.connect(lambda _: self._on_change("privacy_policy"))
         self._temp_minutes.currentIndexChanged.connect(lambda _: self._on_change("privacy_temp"))
         self._file_size.currentIndexChanged.connect(lambda _: self._on_change("max_file_size"))
+        self._dedupe_scope.currentIndexChanged.connect(lambda _: self._on_change("dedupe_scope"))
+        self._delete_policy.currentIndexChanged.connect(lambda _: self._on_change("session_delete_policy"))
 
     # ---- 清理数据 ----
 
@@ -206,6 +222,10 @@ class SettingsView(QWidget):
         self._set_combo_value(self._auto_delete, hist_cfg.get("auto_delete_days", 30))
         self._set_combo_value(self._file_size,
                               hist_cfg.get("max_file_size_mb", 50))
+        self._set_combo_value(self._dedupe_scope,
+                              hist_cfg.get("dedupe_scope", "all"))
+        self._set_combo_value(self._delete_policy,
+                              cfg.get("session", {}).get("delete_policy", "move"))
         self._save_images.setChecked(bool(hist_cfg.get("save_images", True)))
         self._show_filename.setChecked(bool(hist_cfg.get("show_image_filename", True)))
         self._autostart.setChecked(bool(app_cfg.get("launch_at_login", False)))
@@ -228,6 +248,7 @@ class SettingsView(QWidget):
                 "max_items": self._max_items.currentData(),
                 "auto_delete_days": self._auto_delete.currentData(),
                 "max_file_size_mb": self._file_size.currentData(),
+                "dedupe_scope": self._dedupe_scope.currentData(),
                 "save_images": self._save_images.isChecked(),
                 "show_image_filename": self._show_filename.isChecked(),
             },
@@ -235,6 +256,9 @@ class SettingsView(QWidget):
                 "policy": self._policy.currentData(),
                 "temp_minutes": self._temp_minutes.currentData(),
                 "ignored_apps": self._ignored_apps(),
+            },
+            "session": {
+                "delete_policy": self._delete_policy.currentData(),
             },
         }
 
@@ -291,6 +315,7 @@ class SettingsView(QWidget):
 
     def _block_signals(self, blocked: bool) -> None:
         for w in (self._theme, self._font, self._max_items, self._auto_delete,
-                  self._file_size, self._save_images, self._show_filename,
+                  self._file_size, self._dedupe_scope, self._delete_policy,
+                  self._save_images, self._show_filename,
                   self._autostart, self._policy, self._temp_minutes):
             w.blockSignals(blocked)
