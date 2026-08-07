@@ -61,10 +61,14 @@ def test_fts_index_synced(engine):
     assert SearchService(engine).search("mysql") == [rid]
 
 
-def test_max_items_trim(engine):
+def test_max_items_trim_per_session(engine):
+    """上限按**会话独立**裁剪：新会话内容不挤掉其他会话的旧内容。"""
+    from services import session_service
+
+    sid = session_service.create_session(engine, "任务")
     for i in range(5):
-        history_service.save_item(engine, _item(f"item {i}"))
-    # 上限 3：最旧两条被裁剪（created_at 同毫秒时按 id 判定新旧）
+        history_service.save_item(engine, _item(f"item {i}"))  # 普通会话
+    # 上限 3：普通会话最旧两条被裁剪（created_at 同毫秒时按 id 判定新旧）
     history_service.save_item(engine, _item("item 5"), max_items=3)
     with engine.connect() as conn:
         rows = conn.execute(
@@ -77,6 +81,28 @@ def test_max_items_trim(engine):
 
     assert SearchService(engine).search("item 0") == []
     assert SearchService(engine).search("item 5") != []
+
+
+def test_max_items_trim_does_not_touch_other_sessions(engine):
+    """每会话上限：任务会话大量内容不裁剪普通会话的旧内容（回归）。"""
+    import hashlib
+
+    from app.types import ClipboardItem
+    from services import session_service
+
+    sid = session_service.create_session(engine, "新任务")
+    for i in range(3):
+        history_service.save_item(engine, _item(f"default {i}"))  # 普通会话
+    for i in range(8):
+        item = ClipboardItem(type="text", content=f"task {i}", session_id=sid)
+        item.hash = hashlib.sha256(f"task {i}".encode()).hexdigest()
+        # 每会话上限 5：任务会话裁到 5，普通会话 3 条原样保留
+        history_service.save_item(engine, item, max_items=5)
+
+    default = history_service.list_recent(engine, session_id=1)
+    task = history_service.list_recent(engine, session_id=sid)
+    assert len(default) == 3  # 普通会话未被裁剪
+    assert len(task) == 5     # 任务会话独立裁剪到 5
 
 
 def test_list_recent_newest_first(engine):

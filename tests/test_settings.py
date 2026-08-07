@@ -114,23 +114,34 @@ def test_delete_older_than_returns_image_paths(engine_factory, tmp_path):
 
 
 def test_trim_history(engine_factory):
-    from services import history_service
+    """设置页立即裁剪：**每个会话独立**裁剪到上限（v5 语义）。"""
+    import hashlib
+
+    from app.types import ClipboardItem
+    from services import history_service, session_service
     from sqlalchemy import text
 
     engine = engine_factory()
-    with engine.begin() as conn:
-        for i in range(5):
-            conn.execute(
-                text("INSERT INTO clipboard_items (type, content, preview, hash,"
-                     " favorite, pinned, created_at, updated_at) VALUES"
-                     " ('text', :c, :c, :h, 0, 0, datetime('now'), datetime('now'))"),
-                {"c": f"item {i}", "h": f"h{i}"},
-            )
+    session_service.ensure_default(engine)
+    sid = session_service.create_session(engine, "任务")
+    for i in range(5):
+        conn_item = ClipboardItem(type="text", content=f"item {i}",
+                                  session_id=1)
+        conn_item.hash = hashlib.sha256(f"item {i}".encode()).hexdigest()
+        history_service.save_item(engine, conn_item)
+    for i in range(5):
+        conn_item = ClipboardItem(type="text", content=f"task {i}",
+                                  session_id=sid)
+        conn_item.hash = hashlib.sha256(f"task {i}".encode()).hexdigest()
+        history_service.save_item(engine, conn_item)
+
     deleted = history_service.trim_history(engine, 3)
-    assert deleted == 2
+    assert deleted == 4  # 两个会话各裁 2 条
     with engine.connect() as conn:
         count = conn.execute(text("SELECT COUNT(*) FROM clipboard_items")).scalar()
-    assert count == 3
+    assert count == 6  # 每会话各留 3 条
+    assert len(history_service.list_recent(engine, session_id=1)) == 3
+    assert len(history_service.list_recent(engine, session_id=sid)) == 3
 
 
 # ---- 开机启动 ----

@@ -102,7 +102,7 @@ class SettingsView(QWidget):
         self._max_items = QComboBox()
         for value, label in _MAX_ITEMS_OPTIONS:
             self._max_items.addItem(label, value)
-        layout.addRow("历史数量上限", self._max_items)
+        layout.addRow("每会话历史数量上限", self._max_items)
 
         self._auto_delete = QComboBox()
         for value, label in _AUTO_DELETE_OPTIONS:
@@ -118,6 +118,11 @@ class SettingsView(QWidget):
         for value, label in _DEDUPE_OPTIONS:
             self._dedupe_scope.addItem(label, value)
         layout.addRow("去重范围", self._dedupe_scope)
+
+        self._delete_policy = QComboBox()
+        for value, label in _DELETE_POLICY_OPTIONS:
+            self._delete_policy.addItem(label, value)
+        layout.addRow("删除会话时", self._delete_policy)
 
         self._save_images = QCheckBox("保存复制图片到本地")
         layout.addRow("图片保存", self._save_images)
@@ -173,10 +178,7 @@ class SettingsView(QWidget):
         ignored_box.addLayout(ignored_btns)
         layout.addRow("忽略的应用", ignored_box)
 
-        self._delete_policy = QComboBox()
-        for value, label in _DELETE_POLICY_OPTIONS:
-            self._delete_policy.addItem(label, value)
-        layout.addRow("删除会话时", self._delete_policy)
+        
 
         # 暂停/恢复监控（运行时状态，不持久化）
         self._pause_btn = QPushButton("暂停监控")

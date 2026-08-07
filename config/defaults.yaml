@@ -7,7 +7,7 @@ app:
   launch_at_login: false   # 开机启动（写入 LaunchAgent）
 
 history:
-  max_items: 500           # 100 / 500 / 1000 / -1(无限)
+  max_items: 500           # 每会话历史数量上限（100 / 500 / 1000 / -1 无限）
   save_images: true
   auto_delete_days: 30     # 1 / 7 / 30 / 90 / 365 / -1(永不)
   poll_interval: 0.2       # 剪贴板轮询间隔（秒）

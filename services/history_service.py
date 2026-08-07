@@ -221,20 +221,31 @@ def delete_expired(engine: Engine) -> list[str]:
 
 
 def trim_history(engine: Engine, max_items: int) -> int:
-    """立即按数量上限裁剪（设置页改上限即时生效）。返回删除条数。"""
+    """立即按数量上限裁剪（设置页改上限即时生效），**每个会话独立裁剪**。
+
+    返回删除条数。
+    """
     if max_items <= 0:
         return 0
+    total = 0
     with engine.begin() as conn:
-        overflow = conn.execute(
-            text("SELECT id FROM clipboard_items"
-                 " ORDER BY pinned DESC, created_at DESC, id DESC LIMIT -1 OFFSET :m"),
-            {"m": max_items},
-        ).fetchall()
-        ids = [row[0] for row in overflow]
-        _delete_rows_and_rebuild(conn, ids)
-    if ids:
-        logger.info("历史数量裁剪 %d 条（上限 %d）", len(ids), max_items)
-    return len(ids)
+        sids = [r[0] for r in conn.execute(
+            text("SELECT DISTINCT session_id FROM clipboard_items")).fetchall()]
+        for sid in sids:
+            overflow = conn.execute(
+                text("SELECT id FROM clipboard_items"
+                     " WHERE session_id = :sid"
+                     " ORDER BY pinned DESC, created_at DESC, id DESC"
+                     " LIMIT -1 OFFSET :m"),
+                {"sid": sid, "m": max_items},
+            ).fetchall()
+            ids = [row[0] for row in overflow]
+            if ids:
+                _delete_rows_and_rebuild(conn, ids)
+                total += len(ids)
+    if total:
+        logger.info("历史数量裁剪 %d 条（每会话上限 %d）", total, max_items)
+    return total
 
 
 def list_favorites(engine: Engine, limit: int = 500) -> list[ClipboardItem]:
@@ -470,15 +481,17 @@ def save_item(engine: Engine, item: ClipboardItem, max_items: int = 500,
             {"id": item_id, "content": item.content},
         )
 
-        # 数量上限裁剪：删除第 max_items 新之后的所有旧记录（同步删 FTS 索引）
+        # 数量上限裁剪：**按会话独立裁剪**（每会话最多 max_items 条，
+        # 互不裁剪——任务会话的大量内容不会挤掉其他会话的旧内容）
         # 置顶优先豁免（§9.22：pinned 不参与自动删除，与 trim_history 一致）
         # LIMIT -1 = 不限行数，从 OFFSET :m 位置取到末尾
         if max_items > 0:
             overflow = conn.execute(
                 text("SELECT id FROM clipboard_items"
+                     " WHERE session_id = :sid"
                      " ORDER BY pinned DESC, created_at DESC, id DESC"
                      " LIMIT -1 OFFSET :m"),
-                {"m": max_items},
+                {"m": max_items, "sid": item.session_id or 1},
             ).fetchall()
             for (old_id,) in overflow:
                 conn.execute(
