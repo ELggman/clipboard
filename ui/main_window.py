@@ -73,9 +73,9 @@ class MainWindow(QMainWindow):
         self._nav.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         layout.addWidget(self._nav)
 
-        # 内容区（顶部 margins 0：导航栏与内容贴合，不留空白带）
+        # 内容区（顶部 margins 5：导航栏与内容贴合，不留空白带）
         right = QVBoxLayout()
-        right.setContentsMargins(10, 0, 10, 0)
+        right.setContentsMargins(10, 5, 10, 0)
         right.setSpacing(0)
         # 搜索行：仅历史页显示（搜索框 + 搜索范围按钮）
         self._search_row = QHBoxLayout()
@@ -89,9 +89,9 @@ class MainWindow(QMainWindow):
         self._search_row.addWidget(self._search, 1)
         # 「会话：」标注（带背景——无背景控件渲染空白）+ 窄范围按钮
         self._search_scope_tag = QLabel("搜索范围：")
-        self._search_scope_tag.setStyleSheet(
-            "QLabel { background: #E9E9EB; border-radius: 8px;"
-            " padding: 0 6px; color: #6E6E73; font-size: 13px; }")
+        # self._search_scope_tag.setStyleSheet(
+        #     "QLabel { background: #E9E9EB; border-radius: 8px;"
+        #     " padding: 0 6px; color: #6E6E73; font-size: 13px; }")
         self._search_scope_tag.setFixedHeight(30)
         self._search_row.addWidget(self._search_scope_tag)
         self._search_scope_btn = QPushButton("全部会话")

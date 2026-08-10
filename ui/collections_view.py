@@ -9,7 +9,7 @@
 import logging
 
 from PySide6.QtCore import QEvent, QModelIndex, QPoint, QRect, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QPainter, QStandardItem, QStandardItemModel
+from PySide6.QtGui import QCursor, QPainter, QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
     QDialog,
     QFrame,
@@ -24,20 +24,25 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget)
 
-class _IconLabel(QWidget):
-    """自绘图标标签：QPainter 绘制 emoji 文字。
+class _IconLabel(QLabel):
+    """自绘图标标签：QPainter 绘制 emoji 文字，背景/圆角/hover 交给 QSS。
 
-    QPushButton/QToolButton 的 icon、QLabel 的 pixmap/文字在深层窗口
-    上下文的布局内均渲染空白（Qt 6.9 macOS 实测）——自绘与列表
-    delegate 同一 QPainter 路径，渲染可靠（完整视图验证 608 像素）。
+    QPushButton 的 emoji 文本在 macOS 渲染空白（Qt 6.9 实测，页面内也
+    一样）——自绘与列表 delegate 同一 QPainter 路径，渲染可靠（delegate
+    的 📌 ★ 等 emoji 在行内正常显示）。继承 QLabel 让
+    `QLabel#collectionTrigger` QSS（背景/圆角/hover）照常生效，
+    paintEvent 先画 QSS 背景（super 调用，本类不设 QLabel 文本），
+    再用 QPainter 画 emoji 文字。
     """
 
     def __init__(self, text: str, parent: QWidget | None = None):
         super().__init__(parent)
         self._text = text
-        self.setFixedSize(30, 28)
+        # 固定尺寸（QLabel 空文本自动宽度会算成 0+padding，实测）
+        self.setFixedSize(66, 28)
 
     def paintEvent(self, event) -> None:
+        super().paintEvent(event)  # QSS 背景/圆角/hover 状态
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self._text)
@@ -92,6 +97,7 @@ class CollectionsView(QWidget):
         self._hide_timer.setSingleShot(True)
         self._hide_timer.setInterval(_PANEL_HIDE_MS)
         self._hide_timer.timeout.connect(self._panel.hide)
+        self._menu_open = False  # 右键菜单模态期间屏蔽面板收回（实测收回 bug）
 
     def set_context(self, engine, image_service=None) -> None:
         self._engine = engine
@@ -109,7 +115,7 @@ class CollectionsView(QWidget):
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setContentsMargins(10, 10, 10, 0)
         layout.setSpacing(6)
 
         # 当前收藏夹标题：面板收回后仍常驻显示（知道在看哪个收藏夹）
@@ -117,13 +123,13 @@ class CollectionsView(QWidget):
         self._title.setObjectName("collectionTitle")
         layout.addWidget(self._title)
 
-        # 搜索行：📁 触发 + 搜索框（**页面内**——centralWidget 层控件
-        # 渲染空白（Qt 6.9 macOS 实测），页面内 QPushButton 文字可靠）
+        # 搜索行：📁 触发 + 搜索框（📁 emoji 用自绘 _IconLabel——QPushButton
+        # 的 emoji 文本在 macOS 渲染空白，Qt 6.9 实测；自绘与列表 delegate
+        # 同一 QPainter 路径可靠；背景/圆角由 QLabel#collectionTrigger QSS 提供）
         search_row = QHBoxLayout()
         search_row.setSpacing(6)
-        self._collections_trigger = QPushButton("📁 收藏")
+        self._collections_trigger = _IconLabel("📁 收藏")
         self._collections_trigger.setObjectName("collectionTrigger")
-        self._collections_trigger.setFixedHeight(28)
         self._collections_trigger.setToolTip("收藏夹（悬停展开）")
         self._collections_trigger.installEventFilter(self)
         search_row.addWidget(self._collections_trigger)
@@ -132,7 +138,9 @@ class CollectionsView(QWidget):
         self._search.setFixedHeight(28)
         self._search.setPlaceholderText("搜索收藏内容…")
         self._search.setClearButtonEnabled(True)
-        self._search.textChanged.connect(self._apply_filter)
+        # ⚠️ 必须先把 text 存进 _search_text 再过滤——_apply_filter 读的是
+        # _search_text，直接连 _apply_filter 时它永远为空（实测搜索无效）
+        self._search.textChanged.connect(self._on_search_text)
         search_row.addWidget(self._search, 1)
         layout.addLayout(search_row)
         self._search_text = ""
@@ -149,6 +157,12 @@ class CollectionsView(QWidget):
         self._items.setItemDelegate(self._delegate)
         self._items.clicked.connect(self._on_item_clicked)
         layout.addWidget(self._items, 1)
+        # 空态提示：覆盖在列表 viewport 上（搜索无匹配 / 收藏夹为空）
+        self._empty_hint = QLabel("", self._items.viewport())
+        self._empty_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._empty_hint.setStyleSheet(
+            "color: #9A9AA0; font-size: 13px; background: transparent;")
+        self._empty_hint.hide()
 
         # 浮层面板：覆盖在条目区上方（收藏夹列表 + 新建按钮）
         self._panel = QFrame(self)
@@ -175,19 +189,28 @@ class CollectionsView(QWidget):
     # ---- 悬浮面板显隐（主窗口 📁 图标驱动）----
 
     def eventFilter(self, obj, event) -> bool:
-        """📁 触发：悬停展开面板；面板自身 hover 取消收回。"""
+        """📁 触发：悬停展开面板；面板自身 hover 取消收回。
+
+        ⚠️ 只消费 Enter/Leave——其余事件（尤其 Paint）必须透传返回 False，
+        否则触发图标永远不重绘（实测：paintEvent 被吞，图标纯白 N 轮）。
+        """
         if obj is self._collections_trigger:
             if event.type() == QEvent.Type.Enter:
                 self.show_collection_panel(
                     self._collections_trigger.mapToGlobal(QPoint(0, 0)))
-            elif event.type() == QEvent.Type.Leave:
+                return True
+            if event.type() == QEvent.Type.Leave:
                 self.schedule_hide_panel()
-            return True
+                return True
+            return False
         if obj is self._panel:
             if event.type() == QEvent.Type.Enter:
                 self._hide_timer.stop()
             elif event.type() == QEvent.Type.Leave:
-                self._hide_timer.start()
+                # 右键菜单模态打开时鼠标被菜单 grab → 面板收到 Leave，
+                # 若此时启动收回，菜单还没关面板就没了（实测 bug）
+                if not self._menu_open:
+                    self._hide_timer.start()
         return super().eventFilter(obj, event)
 
 
@@ -220,6 +243,8 @@ class CollectionsView(QWidget):
     def resizeEvent(self, event) -> None:
         """窗口缩放时仅跟随视图尺寸（面板高度已按内容自适应）。"""
         super().resizeEvent(event)
+        if self._empty_hint.isVisible():
+            self._empty_hint.setGeometry(self._items.viewport().rect())
 
     # ---- 数据 ----
 
@@ -229,6 +254,12 @@ class CollectionsView(QWidget):
         collection_service.ensure_favorites(self._engine)  # 内置 ★ 收藏始终可见
         current_id = self._current_id()
         self._collections = collection_service.list_collections(self._engine)
+        # 「全部」虚拟项（id=0）置顶：并集展示所有收藏夹条目
+        all_count = len(collection_service.list_all_items(self._engine))
+        self._collections = [
+            {"id": 0, "name": "全部", "count": all_count},
+            *self._collections,
+        ]
         self._list.blockSignals(True)
         self._list.clear()
         for c in self._collections:
@@ -242,6 +273,7 @@ class CollectionsView(QWidget):
             self._list.setCurrentRow(idx)
         else:
             self._model.clear()
+            self._update_empty_hint("")
         self._update_title()
 
     def _current_id(self) -> int:
@@ -262,10 +294,21 @@ class CollectionsView(QWidget):
     def _on_select(self, row: int) -> None:
         self._all_items = []
         if self._engine is not None and row >= 0:
-            self._all_items = collection_service.list_items(
-                self._engine, self._current_id())
+            cid = self._current_id()
+            if cid == 0:
+                # 「全部」虚拟项：并集展示所有收藏夹条目（按原条目去重）
+                self._all_items = collection_service.list_all_items(
+                    self._engine)
+            else:
+                self._all_items = collection_service.list_items(
+                    self._engine, cid)
         self._apply_filter()
         self._update_title()
+
+    def _on_search_text(self, text: str) -> None:
+        """输入框 textChanged：存文本 → 过滤（直接连 _apply_filter 无效）。"""
+        self._search_text = text
+        self._apply_filter()
 
     def apply_search_filter(self, text: str) -> None:
         """主窗口转发：按文本过滤当前收藏夹条目。"""
@@ -284,6 +327,22 @@ class CollectionsView(QWidget):
             row_item.setData(item, ROLE_ITEM)
             row_item.setEditable(False)
             self._model.appendRow(row_item)
+        self._update_empty_hint(query)
+
+    def _update_empty_hint(self, query: str) -> None:
+        """空态提示：无条目（收藏夹为空）/ 搜索无匹配。"""
+        if self._model.rowCount() > 0:
+            self._empty_hint.hide()
+            return
+        if query:
+            self._empty_hint.setText(f"未找到匹配「{self._search_text.strip()}」的内容")
+        elif not self._all_items:
+            self._empty_hint.setText("收藏夹暂无内容")
+        else:
+            self._empty_hint.hide()
+            return
+        self._empty_hint.setGeometry(self._items.viewport().rect())
+        self._empty_hint.show()
 
     # ---- 收藏夹操作 ----
 
@@ -317,14 +376,24 @@ class CollectionsView(QWidget):
             return
         cid = item.data(Qt.ItemDataRole.UserRole)
         coll = next((c for c in self._collections if c["id"] == cid), None)
-        if coll is None or coll["name"] == collection_service.FAVORITES_NAME:
-            return  # 内置「★ 收藏」不可重命名/删除
+        if coll is None or cid == 0 \
+                or coll["name"] == collection_service.FAVORITES_NAME:
+            return  # 「全部」虚拟项/内置「★ 收藏」不可重命名/删除
         menu = QMenu(self)
         self._active_menus.append(menu)
         menu.addAction("重命名").triggered.connect(lambda: self._rename(item))
         menu.addAction("删除").triggered.connect(
             lambda: self._delete_collection(cid))
-        menu.exec(self._list.viewport().mapToGlobal(pos))
+        self._hide_timer.stop()
+        self._menu_open = True  # 菜单模态期间：面板 Leave 不启动收回
+        try:
+            menu.exec(self._list.viewport().mapToGlobal(pos))
+        finally:
+            self._menu_open = False
+        # 菜单关闭后：鼠标仍在面板上 → 保持展开；移出 → 正常延时收回
+        if self._panel.isVisible() and not self._panel.geometry().contains(
+                self.mapFromGlobal(QCursor.pos())):
+            self.schedule_hide_panel()
 
     def _delete(self, cid: int) -> None:
         if self._engine is not None:

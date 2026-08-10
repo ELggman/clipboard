@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QHBoxLayout,
+    QLabel,
     QListView,
     QListWidget,
     QListWidgetItem,
@@ -448,7 +449,7 @@ class HistoryView(QWidget):
         self._filter_type = ""  # 当前类型筛选
         self._all_items: list = []  # set_items 传入的完整数据（筛选前）
         self._type_tabs = QListWidget()
-        self._type_tabs.setObjectName("topnav")
+        self._type_tabs.setObjectName("typeTabs")  # 独立样式：四周圆角（theme.py）
         self._type_tabs.setFlow(QListView.Flow.LeftToRight)
         self._type_tabs.setFixedHeight(30)
         self._type_tabs.setSpacing(2)
@@ -480,11 +481,14 @@ class HistoryView(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # 会话行：下拉（显示名 · 条数）+ ⋯ 管理菜单
+        # 会话行：标注 + 下拉（显示名 · 条数）+ ⋯ 管理菜单
         # 独立区域：底部留 8px 与类型筛选条分隔（靠太近视觉粘连，实测）
         session_row = QHBoxLayout()
-        session_row.setContentsMargins(8, 0, 8, 6)
+        session_row.setContentsMargins(8, 2, 8, 2)
         session_row.setSpacing(4)
+        self._session_tag_label = QLabel("当前会话：")
+        self._session_tag_label.setFixedHeight(30)  # 与下拉等高（纯文本无背景）
+        session_row.addWidget(self._session_tag_label)
         self._session_combo = QComboBox()
         self._session_combo.setObjectName("sessionCombo")
         # 弹出列表宽度由内容自适应：会话名可能较长（「论文写作优化 · 123 条」），

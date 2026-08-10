@@ -132,7 +132,9 @@ class TemplatesView(QWidget):
 
     def _build_ui(self) -> None:
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(10, 10, 10, 10)
+        # 顶边距必须为 0——主窗口内容区已自带 5px（main_window right 布局），
+        # 页面再加任何值都会叠加（实测：设 2 后间距 8 > 历史页搜索框的 6）
+        outer.setContentsMargins(10, 0, 10, 10)
         outer.setSpacing(8)
 
         # 顶部：搜索 + 新建

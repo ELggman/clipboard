@@ -46,9 +46,9 @@ class TimelineView(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # 时间段分段选择器（复用顶部导航 QSS）
+        # 时间段分段选择器（与历史页类型条同款：四周圆角 QSS）
         self._tabs = QListWidget()
-        self._tabs.setObjectName("topnav")
+        self._tabs.setObjectName("typeTabs")
         self._tabs.setFlow(QListView.Flow.LeftToRight)
         self._tabs.setFixedHeight(30)
         self._tabs.setSpacing(2)

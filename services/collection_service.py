@@ -157,13 +157,41 @@ def list_items(engine: Engine, collection_id: int,
             .limit(limit)
         ).scalars().all()
     return [
-        ClipboardItem(
-            id=row.id,                     # collection_items.id（收藏条目自己的 id）
-            type=row.type,
-            content=row.content or "",
-            preview=row.preview or "",
-            file_path=row.file_path or "",
-            created_at=row.created_at.strftime("%m-%d %H:%M"),
-        )
+        _row_to_item(row)
         for row in rows
     ]
+
+
+def list_all_items(engine: Engine, limit: int = 500) -> list[ClipboardItem]:
+    """全部收藏夹条目（并集，按 clipboard_id 去重，最新加入在前）。
+
+    供收藏夹面板「全部」虚拟项使用——同一历史条目可被加入多个收藏夹，
+    跨收藏夹并集时要按原条目去重。
+    """
+    with make_session_factory(engine)() as session:
+        rows = session.execute(
+            select(CollectionItem)
+            .order_by(CollectionItem.id.desc())
+        ).scalars().all()
+    seen: set[int] = set()
+    result: list[ClipboardItem] = []
+    for row in rows:
+        if row.clipboard_id in seen:
+            continue
+        seen.add(row.clipboard_id)
+        result.append(_row_to_item(row))
+        if len(result) >= limit:
+            break
+    return result
+
+
+def _row_to_item(row) -> ClipboardItem:
+    """CollectionItem 行 → ClipboardItem（与 list_items 同一构造）。"""
+    return ClipboardItem(
+        id=row.id,                     # collection_items.id（收藏条目自己的 id）
+        type=row.type,
+        content=row.content or "",
+        preview=row.preview or "",
+        file_path=row.file_path or "",
+        created_at=row.created_at.strftime("%m-%d %H:%M"),
+    )

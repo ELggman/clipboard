@@ -479,17 +479,95 @@ def test_collections_view_create_and_items(tmp_path):
     migrate(engine)
     view = CollectionsView()
     view.set_context(engine)
-    assert view._list.count() == 1  # 只有「★ 收藏」虚拟项
+    assert view._list.count() == 2  # 「全部」虚拟项 + 「★ 收藏」
+    assert "全部" in view._list.item(0).text()  # 全部置顶
 
     collection_service.create_collection(engine, "工作")
     view.reload()
-    assert view._list.count() == 2  # 「★ 收藏」虚拟项 + 收藏夹
-    assert "★ 收藏" in view._list.item(0).text()
-    assert "工作" in view._list.item(1).text()
+    assert view._list.count() == 3  # 「全部」+「★ 收藏」+ 收藏夹
+    assert "★ 收藏" in view._list.item(1).text()
+    assert "工作" in view._list.item(2).text()
 
     # 选中真实收藏夹 → 空条目
-    view._list.setCurrentRow(1)
+    view._list.setCurrentRow(2)
     assert view._model.rowCount() == 0
+    view.close()
+
+
+def test_collections_view_search(tmp_path):
+    """收藏夹页搜索：输入框 textChanged 过滤 + 空结果提示。
+
+    回归：textChanged 直接连 _apply_filter 时 _search_text 永不更新，
+    搜索框输入无任何效果（实测 bug）。
+    """
+    from database.engine import create_db_engine
+    from database.migrations import migrate
+    from services import collection_service, history_service
+    from ui.collections_view import CollectionsView
+
+    engine = create_db_engine(tmp_path / "cs.db")
+    migrate(engine)
+    cid = collection_service.create_collection(engine, "工作")
+    # 收藏两条内容（一条含「python」，一条不含）
+    import hashlib
+
+    for content in ("python 代码", "普通文本"):
+        item = ClipboardItem(type="text", content=content, preview=content)
+        item.hash = hashlib.sha256(content.encode()).hexdigest()
+        history_service.save_item(engine, item)
+        collection_service.add_item(engine, cid, item)
+
+    view = CollectionsView()
+    view.set_context(engine)
+    view._list.setCurrentRow(2)  # 0=全部 1=★收藏 2=工作
+    assert view._model.rowCount() == 2
+
+    view._search.setText("python")  # 触发 textChanged → 过滤
+    assert view._model.rowCount() == 1
+    assert view._search_text == "python"
+    assert view._empty_hint.isHidden()  # 有结果 → 提示隐藏
+
+    view._search.setText("不存在的关键词")
+    assert view._model.rowCount() == 0
+    assert not view._empty_hint.isHidden()  # 未检索到 → 显示空态提示
+
+    view._search.setText("")
+    assert view._model.rowCount() == 2
+    view.close()
+
+
+def test_collections_view_all_virtual(tmp_path):
+    """收藏夹面板「全部」虚拟项：并集展示所有收藏夹条目（按原条目去重）。"""
+    from database.engine import create_db_engine
+    from database.migrations import migrate
+    from services import collection_service, history_service
+    from ui.collections_view import CollectionsView
+
+    engine = create_db_engine(tmp_path / "all.db")
+    migrate(engine)
+    cid_a = collection_service.create_collection(engine, "A")
+    cid_b = collection_service.create_collection(engine, "B")
+    import hashlib
+
+    items = []
+    for content in ("a内容", "b内容", "共用内容"):
+        item = ClipboardItem(type="text", content=content, preview=content)
+        item.hash = hashlib.sha256(content.encode()).hexdigest()
+        history_service.save_item(engine, item)
+        items.append(item)
+    # A：前两条；B：后两条（「共用内容」同时在两个收藏夹 → 去重）
+    collection_service.add_item(engine, cid_a, items[0])
+    collection_service.add_item(engine, cid_a, items[2])
+    collection_service.add_item(engine, cid_b, items[1])
+    collection_service.add_item(engine, cid_b, items[2])
+
+    view = CollectionsView()
+    view.set_context(engine)
+    assert "全部" in view._list.item(0).text()  # 置顶
+    assert "（3）" in view._list.item(0).text()  # 并集去重后 3 条
+
+    view._list.setCurrentRow(0)  # 选中「全部」
+    assert view._model.rowCount() == 3  # 共用内容只出现一次
     view.close()
 
 
@@ -617,11 +695,11 @@ def test_favorite_feedback_and_virtual_collection(tmp_path):
 
     assert "★" in HistoryDelegate._meta_line(item)
 
-    # 收藏夹页：「★ 收藏」虚拟项显示该条目
+    # 收藏夹页：「★ 收藏」虚拟项显示该条目（0=全部 1=★收藏）
     cv = CollectionsView()
     cv.set_context(engine)
-    assert "★ 收藏" in cv._list.item(0).text()
-    cv._list.setCurrentRow(0)  # 选中虚拟项
+    assert "★ 收藏" in cv._list.item(1).text()
+    cv._list.setCurrentRow(1)  # 选中虚拟项
     assert cv._model.rowCount() == 1
     assert cv._model.index(0, 0).data(ROLE_ITEM).content == "fav target"
     cv.close()
@@ -693,7 +771,7 @@ def test_collection_context_menu_delete(tmp_path):
     cid = collection_service.create_collection(engine, "待删")
     view = CollectionsView()
     view.set_context(engine)
-    assert view._list.count() == 2  # ★ 收藏 + 待删
+    assert view._list.count() == 3  # 全部 + ★ 收藏 + 待删
 
     # 模拟右键菜单删除（与 _on_list_menu 相同的动作构建）
     from PySide6.QtWidgets import QMenu
@@ -703,7 +781,7 @@ def test_collection_context_menu_delete(tmp_path):
     menu.addAction("删除").triggered.connect(
         lambda: view._delete_collection(cid))
     menu.actions()[0].trigger()
-    assert view._list.count() == 1  # 只剩内置 ★ 收藏
+    assert view._list.count() == 2  # 只剩「全部」虚拟项 + 内置 ★ 收藏
     remaining = collection_service.list_collections(engine)
     assert len(remaining) == 1
     assert remaining[0]["name"] == collection_service.FAVORITES_NAME
@@ -1495,7 +1573,7 @@ def test_collections_title_shows_current(tmp_path):
 
     view = CollectionsView()
     view.set_context(engine)
-    assert "★ 收藏" in view._title.text()  # 默认选中内置收藏夹
+    assert "全部" in view._title.text()  # 默认选中「全部」虚拟项
     idx = next(i for i, c in enumerate(view._collections)
                if c["name"] == "论文资料")
     view._list.setCurrentRow(idx)  # 切到目标收藏夹

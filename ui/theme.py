@@ -93,6 +93,27 @@ QListView#topnav::item:selected {
     color: $accent_text;
 }
 
+/* 类型筛选条（历史页 全部/文本/URL…）：同款配色，四周圆角。
+   ⚠️ 必须独立 objectName——复用 #topnav 会连带顶部导航圆角化 */
+QListView#typeTabs {
+    background: $sidebar;
+    border: none;
+    border-radius: 8px;
+    font-size: 13px;
+    padding: 4px 8px;
+}
+QListView#typeTabs::item {
+    height: 28px;
+    padding: 0 14px;
+    margin: 0 2px;
+    border-radius: 6px;
+}
+QListView#typeTabs::item:hover { background: $hover; }
+QListView#typeTabs::item:selected {
+    background: $accent;
+    color: $accent_text;
+}
+
 /* 搜索框：NSSearchField 风格 */
 QLineEdit#searchBox {
     background: $search_bg;
