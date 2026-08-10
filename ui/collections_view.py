@@ -8,21 +8,64 @@
 """
 import logging
 
-from PySide6.QtCore import QEvent, QModelIndex, QRect, Qt, QTimer, Signal
-from PySide6.QtGui import QStandardItem, QStandardItemModel
+from PySide6.QtCore import QEvent, QModelIndex, QPoint, QRect, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QPainter, QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
     QDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListView,
     QListWidget,
     QListWidgetItem,
     QMenu,
     QPushButton,
     QVBoxLayout,
-    QWidget,
-)
+    QWidget)
+
+class _IconLabel(QWidget):
+    """自绘图标标签：QPainter 绘制 emoji 文字。
+
+    QPushButton/QToolButton 的 icon、QLabel 的 pixmap/文字在深层窗口
+    上下文的布局内均渲染空白（Qt 6.9 macOS 实测）——自绘与列表
+    delegate 同一 QPainter 路径，渲染可靠（完整视图验证 608 像素）。
+    """
+
+    def __init__(self, text: str, parent: QWidget | None = None):
+        super().__init__(parent)
+        self._text = text
+        self.setFixedSize(30, 28)
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self._text)
+        painter.end()
+
+
+def _sf_symbol_icon(name: str, size: int = 18):
+    """SF Symbol 系统图标 → QIcon。
+
+    QPushButton 的 emoji 文本在 macOS 渲染异常（实测空白）——
+    改用系统矢量图标（Apple 官方方案）。
+    """
+    from AppKit import NSImage
+    from PySide6.QtGui import QIcon, QPixmap
+
+    try:
+        img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
+            name, None)
+        if img is None:
+            return QIcon()
+        img.setSize_((size, size))
+        tiff = img.TIFFRepresentation()
+        pix = QPixmap()
+        pix.loadFromData(bytes(tiff))
+        return QIcon(pix)
+    except Exception:
+        return QIcon()
+
 
 from services import collection_service
 
@@ -41,6 +84,7 @@ class CollectionsView(QWidget):
         super().__init__(parent)
         self._engine = None
         self._collections: list[dict] = []
+        self._all_items: list = []  # 当前收藏夹全部条目（搜索过滤前）
         self._image_service = None     # 删除条目时清理图片文件
         self._active_menus: list = []  # 防 GC（PySide 菜单包装器 Python 所有）
         self._build_ui()
@@ -72,6 +116,26 @@ class CollectionsView(QWidget):
         self._title = QLabel("")
         self._title.setObjectName("collectionTitle")
         layout.addWidget(self._title)
+
+        # 搜索行：📁 触发 + 搜索框（**页面内**——centralWidget 层控件
+        # 渲染空白（Qt 6.9 macOS 实测），页面内 QPushButton 文字可靠）
+        search_row = QHBoxLayout()
+        search_row.setSpacing(6)
+        self._collections_trigger = QPushButton("📁 收藏")
+        self._collections_trigger.setObjectName("collectionTrigger")
+        self._collections_trigger.setFixedHeight(28)
+        self._collections_trigger.setToolTip("收藏夹（悬停展开）")
+        self._collections_trigger.installEventFilter(self)
+        search_row.addWidget(self._collections_trigger)
+        self._search = QLineEdit()
+        self._search.setObjectName("searchBox")
+        self._search.setFixedHeight(28)
+        self._search.setPlaceholderText("搜索收藏内容…")
+        self._search.setClearButtonEnabled(True)
+        self._search.textChanged.connect(self._apply_filter)
+        search_row.addWidget(self._search, 1)
+        layout.addLayout(search_row)
+        self._search_text = ""
 
         # 条目区占满（收藏夹列表在浮层中；📁 触发图标在主窗口搜索行）
         self._model = QStandardItemModel(self)
@@ -111,13 +175,21 @@ class CollectionsView(QWidget):
     # ---- 悬浮面板显隐（主窗口 📁 图标驱动）----
 
     def eventFilter(self, obj, event) -> bool:
-        """面板自身 hover：进入取消收回，离开延时收回。"""
+        """📁 触发：悬停展开面板；面板自身 hover 取消收回。"""
+        if obj is self._collections_trigger:
+            if event.type() == QEvent.Type.Enter:
+                self.show_collection_panel(
+                    self._collections_trigger.mapToGlobal(QPoint(0, 0)))
+            elif event.type() == QEvent.Type.Leave:
+                self.schedule_hide_panel()
+            return True
         if obj is self._panel:
             if event.type() == QEvent.Type.Enter:
                 self._hide_timer.stop()
             elif event.type() == QEvent.Type.Leave:
                 self._hide_timer.start()
         return super().eventFilter(obj, event)
+
 
     def show_collection_panel(self, anchor_global=None) -> None:
         """展开收藏夹面板（主窗口 📁 图标悬停调用）。
@@ -127,15 +199,17 @@ class CollectionsView(QWidget):
         悬停后鼠标直接向左下方移动操作，符合操作习惯（实测反馈）。
         """
         self._hide_timer.stop()
+        # 面板高度随内容自适应（行数×行高 + 按钮/边距/余量），上限 320 后滚动
+        content_h = self._list.count() * 28 + 64
+        panel_h = max(60, min(320, content_h))
         if anchor_global is not None:
             local = self.mapFromGlobal(anchor_global)
             x = local.x() - self._panel.width() + 4   # 面板右缘贴图标左侧
             y = max(0, local.y())                     # 顶部对齐图标
             self._panel.move(max(0, x), y)
-            self._panel.setFixedHeight(max(60, self.height() - y))
         else:
             self._panel.move(0, 0)
-            self._panel.setFixedHeight(self.height())
+        self._panel.setFixedHeight(panel_h)
         self._panel.raise_()
         self._panel.show()
 
@@ -144,10 +218,8 @@ class CollectionsView(QWidget):
         self._hide_timer.start()
 
     def resizeEvent(self, event) -> None:
-        """面板高度跟随视图（悬浮覆盖，不占布局）。"""
+        """窗口缩放时仅跟随视图尺寸（面板高度已按内容自适应）。"""
         super().resizeEvent(event)
-        if self._panel.isVisible():
-            self._panel.setFixedHeight(self.height())
 
     # ---- 数据 ----
 
@@ -188,16 +260,30 @@ class CollectionsView(QWidget):
             self._title.setText("")
 
     def _on_select(self, row: int) -> None:
+        self._all_items = []
+        if self._engine is not None and row >= 0:
+            self._all_items = collection_service.list_items(
+                self._engine, self._current_id())
+        self._apply_filter()
+        self._update_title()
+
+    def apply_search_filter(self, text: str) -> None:
+        """主窗口转发：按文本过滤当前收藏夹条目。"""
+        self._search_text = text
+        self._apply_filter()
+
+    def _apply_filter(self) -> None:
+        """搜索过滤当前收藏夹条目（内容/预览匹配，清空恢复）。"""
         self._model.clear()
-        if self._engine is None or row < 0:
-            return
-        for item in collection_service.list_items(self._engine,
-                                                  self._current_id()):
+        query = self._search_text.strip().lower()
+        for item in self._all_items:
+            if query and query not in (item.content or "").lower() \
+                    and query not in (item.preview or "").lower():
+                continue
             row_item = QStandardItem()
             row_item.setData(item, ROLE_ITEM)
             row_item.setEditable(False)
             self._model.appendRow(row_item)
-        self._update_title()
 
     # ---- 收藏夹操作 ----
 

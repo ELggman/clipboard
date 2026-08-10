@@ -86,11 +86,44 @@ class CollectionItem(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
 
 
+class SnippetFolder(Base):
+    """模板文件夹（v6）：模板分组。
+
+    删除文件夹时模板 folder_id 置 NULL（ON DELETE SET NULL，文档 §14
+    默认「移入未分类」）。
+    """
+
+    __tablename__ = "snippet_folders"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
 class Snippet(Base):
+    """模板（v6 重构，原「片段」）：shortcut 触发的本地模板引擎。
+
+    字段对应《Snippet 模块开发功能需求文档》§81：
+    shortcut 唯一（触发词）、folder 分组、enabled/favorite、
+    trigger_mode（tab/boundary）、usage_count/last_used_at 使用统计。
+    server_default：裸 SQL INSERT（迁移回填）不提供列时不违反约束。
+    """
+
     __tablename__ = "snippets"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(128), nullable=False)
+    shortcut: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
+    folder_id: Mapped[int | None] = mapped_column(
+        ForeignKey("snippet_folders.id", ondelete="SET NULL"))
+    enabled: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    favorite: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    trigger_mode: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="tab", server_default="tab")
+    usage_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)

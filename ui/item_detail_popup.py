@@ -69,8 +69,16 @@ class _GutterWidget(QWidget):
         bottom = top + round(self._editor.blockBoundingRect(block).height())
         while block.isValid() and top <= event.rect().bottom():
             if block.isVisible() and bottom >= event.rect().top():
-                painter.drawText(0, top, self.width() - 8, fm.height(),
-                                 Qt.AlignmentFlag.AlignRight, str(number + 1))
+                number_text = str(number + 1)
+                # 基线对齐（drawText(x, y, text) 的 y 是基线）：行号基线 =
+                # block 顶 + **布局** ascent = 代码文本基线。不能用
+                # QFontMetrics.ascent（11）：QTextLayout 用 OpenType 度量
+                # ascent≈12.7、行高 17，fm 只有 14——用 fm 基线高 ~2-3px
+                # （实测：行号与代码对不齐）
+                ascent = block.layout().lineAt(0).ascent()
+                text_w = fm.horizontalAdvance(number_text)
+                painter.drawText(self.width() - 8 - text_w,
+                                 top + ascent, number_text)
             block = block.next()
             top = bottom
             bottom = top + round(self._editor.blockBoundingRect(block).height())

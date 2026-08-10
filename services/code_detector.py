@@ -124,6 +124,13 @@ def detect(content: str) -> CodeResult | None:
     }
     lang = max(scores, key=scores.get)
     conf = scores[lang]
+    # 文档型 Markdown 常内嵌 shell 命令代码块（README/需求文档），shell 分会
+    # 反超；若 markdown 命中 ≥2 种结构信号（标题/列表/引用/表格/围栏/链接）
+    # 且分数达阈值，整个文档按 markdown 处理（2026-08-08 用户实测误判）
+    if lang == "shell" and scores["markdown"] >= CODE_THRESHOLD \
+            and _md_distinct_types(lines) >= 2:
+        lang = "markdown"
+        conf = scores["markdown"]
     if conf < _WEAK_FLOOR:
         return None
     return CodeResult(lang, conf, lang in _STRUCTURED)
@@ -315,6 +322,9 @@ def _looks_like_command(text: str) -> bool:
 # 预处理器指令：不是 shell 注释（#include/#define/#if 等，实测把 C++ 误判为 shell）
 _PREPROCESSOR = ("#include", "#define", "#if", "#ifdef", "#ifndef", "#endif",
                  "#elif", "#pragma", "#error", "#undef")
+# markdown 标题（# 开头 + 空格）：不是 shell 注释。
+# 需求/说明文档里满屏 "# 标题"，曾被计为注释把整份 md 误判成 shell（2026-08-08）
+_MD_HEADING = re.compile(r"^\s{0,3}#{1,6}\s+\S")
 # 重定向：> 前不能是 < 或单词字符（避免 <int> 泛型被当作重定向）
 _REDIRECT = re.compile(r"(?<![<\w])>\s*[\w./-]+")
 
@@ -331,12 +341,17 @@ def _score_shell(text: str, lines) -> float:
             strong += 1
         elif re.search(r"\$\{?\w+\}?", ls):  # $VAR 引用
             strong += 1
-        elif ls.startswith("#") and not ls.startswith(_PREPROCESSOR):
-            strong += 1  # 注释行（排除预处理器指令）
+        elif ls.startswith("#") and not ls.startswith(_PREPROCESSOR) \
+                and not _MD_HEADING.match(ls):
+            strong += 1  # 注释行（排除预处理器指令与 markdown 标题形行）
     if re.search(r"(&&|\|\|)", text):
         strong += 1
     if "|" in text or _REDIRECT.search(text):
         strong += 1
+    if strong == 0:
+        # 零信号返回 0.0：shell 原来有 0.45 保底分，任何纯文本/表格
+        # 都会以最低分胜出被标成 shell（2026-08-08 用户实测误判）
+        return 0.0
     return min(1.0, 0.45 + 0.18 * strong)
 
 
@@ -389,6 +404,9 @@ def _score_yaml(text: str, lines) -> float:
                 return 1.0
         except Exception:
             pass
+    if structure_ratio == 0:
+        # 零结构信号不得参与竞争（原 0.45 保底分把纯文本识别为 yaml）
+        return 0.0
     score = min(1.0, 0.45 + 0.5 * structure_ratio)
     if lists >= 2:
         score = min(1.0, score + 0.1)
@@ -396,7 +414,7 @@ def _score_yaml(text: str, lines) -> float:
 
 
 _MD_SIGNALS = (
-    re.compile(r"^\s{0,3}#{1,6}\s+\S"),        # 标题
+    _MD_HEADING,                                # 标题
     re.compile(r"^\s*([-*+]|\d+\.)\s+"),       # 列表
     re.compile(r"^\s*```"),                     # 代码围栏
     re.compile(r"\[[^\]]+\]\([^)]+\)"),         # 链接
@@ -411,10 +429,25 @@ def _score_markdown(text: str, lines) -> float:
     for ln in non_empty(lines):
         if any(pat.search(ln) for pat in _MD_SIGNALS):
             hits += 1
+    if hits == 0:
+        return 0.0  # 零信号不得参与竞争（原 0.4 保底分把纯文本识别为 markdown）
     score = min(1.0, 0.4 + 0.13 * hits)
     if re.search(r"^#{1,6}\s", text, re.MULTILINE) and "```" in text:
         score = max(score, 0.85)  # 标题+代码块 = 明显 Markdown 文档
     return score
+
+
+def _md_distinct_types(lines) -> int:
+    """命中的 markdown 结构信号种类数（标题/列表/围栏/链接/加粗/引用/表格）。
+
+    shell↔markdown 裁决用：shell 脚本的注释行最多形似标题（1 种），
+    真正的 md 文档通常同时具备列表/引用/表格等 ≥2 种结构。
+    """
+    kinds = 0
+    for pat in _MD_SIGNALS:
+        if any(pat.search(ln) for ln in non_empty(lines)):
+            kinds += 1
+    return kinds
 
 
 def non_empty(lines) -> list:

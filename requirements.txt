@@ -5,5 +5,6 @@ SQLAlchemy>=2.0.0
 PyYAML>=6.0.0
 Pillow>=11.0.0
 pyobjc-framework-Quartz>=12.0.0
+pyobjc-framework-ApplicationServices>=12.0.0   # AX C API（焦点文本读取 + 输入法组合检测）
 pyperclip>=1.9.0
 Pygments>=2.17.0   # 代码语法高亮（新增.md §8.7，纯 Python 本地）

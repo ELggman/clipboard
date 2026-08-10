@@ -287,10 +287,157 @@ def start_workspace(app: QApplication) -> None:
     popup.selected.connect(on_picked)
     hotkey.activated.connect(on_quick_paste)
     # 隐私模式热键 ⌘⇧P（§9.4）：同一 CGEventTap 多绑定
-    from services.hotkey_manager import KEY_P, MASK_HOTKEY
+    from services.hotkey_manager import KEY_P, KEY_S, MASK_HOTKEY
 
     hotkey.add_binding(KEY_P, MASK_HOTKEY, hotkey.privacy_toggle)
     hotkey.privacy_toggle.connect(privacy_state.toggle)
+
+    # 模板模块（v6）：Tab Trigger + 全局 Picker（文档 §7/§16）
+    from services.template.insertion import delete_backspaces, insert_text
+    from services.template.matcher import ShortcutMatcher
+    from services.template_service import TemplateService
+    from ui.input_variable_dialog import InputVariableDialog
+    from ui.template_picker_popup import TemplatePickerPopup
+
+    template_service = TemplateService(engine)
+
+    def render_and_insert(template: dict, delete_count: int = 0,
+                          cancel_ime: bool = False) -> None:
+        """模板渲染 → （输入变量对话框）→ 模拟粘贴插入。
+
+        delete_count > 0：先删除用户输入的 shortcut 文本
+        （§5.1：shrug<Tab> → ¯\\_(ツ)_/¯，原始输入不残留）——
+        必须在弹输入框**之前**删除（弹框夺焦后退格会打错位置）。
+        cancel_ime=True（中文输入法 Tab 触发）：shortcut 还在输入法组合里
+        未上屏 → 发 Escape 取消组合（字母随之消失），不能 ⌥⌫（会破坏
+        组合，实测 sig 被改写为 siv）。
+        """
+        if delete_count > 0:
+            if cancel_ime:
+                from services.template.insertion import cancel_composition
+
+                cancel_composition()
+            else:
+                delete_backspaces(delete_count)
+        content = template["content"]
+        text, _cursor, inputs = template_service.render_template(content)
+        if inputs:
+            # 全局触发：应用可能未激活，先激活再弹输入框（§40-41）
+            from AppKit import (NSApplication,
+                                NSApplicationActivateIgnoringOtherApps)
+            from PySide6.QtWidgets import QDialog
+
+            NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+            dlg = InputVariableDialog(inputs)
+            if dlg.exec() != QDialog.DialogCode.Accepted:
+                logger.info("模板输入取消: shortcut=%s", template["shortcut"])
+                return
+            text, _, _ = template_service.render_template(
+                content, input_values=dlg.values())
+        template_service.record_usage(template["id"])
+        # §95 日志安全：只记 id/shortcut，不记展开内容
+        logger.info("模板触发: id=%s shortcut=%s",
+                    template["id"], template["shortcut"])
+        if not insert_text(text, watcher):
+            logger.error("模板插入失败: shortcut=%s", template["shortcut"])
+
+    from services.template.ax_text import is_ime_composing
+    from services.template.ime import is_chinese_ime
+
+    matcher = ShortcutMatcher(template_service, on_trigger=render_and_insert,
+                              composing_check=is_ime_composing,
+                              chinese_ime_check=is_chinese_ime)
+
+    # 自动触发延迟确认（防 prefix 误触：signature 的 sig 不触发）：
+    # matcher 命中 automatic shortcut 后挂起 pending（缓冲保留），
+    # 200ms 内缓冲未变 → 确认触发；继续输入更长的词 → 缓冲变化取消。
+    # 词边界键（空格/标点）在 feed 内同步确认（"sig"+空格 立即触发）。
+    from PySide6.QtCore import QTimer
+
+    _auto_timer = QTimer(app)
+    _auto_timer.setInterval(200)
+    _auto_timer.setSingleShot(True)
+    _auto_timer.timeout.connect(matcher.confirm_pending)
+
+    def _on_raw_key(vk: int, ch: str) -> None:
+        if ch == "\t":
+            # Tab 触发：先按键缓冲（英文 shortcut），再 AX 焦点文本
+            # 末尾匹配（中文 shortcut——输入法上屏的汉字无按键事件，
+            # CGEventTap 只能看到拼音，必须在文本层匹配）
+            from services.template.ax_text import read_focused_text
+
+            if matcher.feed(ch):
+                return
+            try:
+                if matcher.match_text(read_focused_text()):
+                    logger.info("Tab 触发：AX 焦点文本末尾匹配成功")
+            except Exception:
+                pass
+        else:
+            matcher.feed(ch)
+            if matcher.has_pending():
+                _auto_timer.start()  # 重启 = 重新计时 200ms
+
+    hotkey.raw_key_down.connect(_on_raw_key)
+    hotkey.enable_raw_keys(True)
+
+
+
+    # 焦点文本轮询（中文 shortcut 触发）：输入法上屏的汉字不产生按键
+    # 事件，且中文 IME 下 Tab 可能被输入法吞掉——定时读焦点文本、
+    # 末尾匹配 automatic 模式 shortcut，文本变化才匹配。
+    #
+    # **skip_ascii=True（只匹配中文 shortcut）**：英文 shortcut 一律由
+    # 按键路径覆盖（英文输入法：延迟确认；中文输入法：提交键）——轮询
+    # 里的英文 shortcut 有两个问题：1) 组合中 AX 值可能含未上屏拼音
+    # （部分应用读不到 marked range），会提前触发（用户实测：uuid 未按
+    # 回车就触发）；2) prefix 误触风险（signature 的 sig）。中文 shortcut
+    # 组合中显示的是拼音，天然不会误匹配。
+    #
+    # 组合守卫：输入法组合中跳过匹配，**且不更新缓存**——组合上屏后
+    # 文本变化才能触发（否则组合文本被缓存，上屏后文本未变，永不触发）。
+    from PySide6.QtCore import QTimer
+
+    from services.template.ax_text import read_focused_text
+
+    _focused_last = {"text": None}
+
+    def _poll_focused_text() -> None:
+        try:
+            if is_ime_composing():
+                return  # 组合未上屏：跳过且不更新缓存
+            text = read_focused_text()
+            if not text or text == _focused_last["text"]:
+                return  # 文本未变化（防重复触发）
+            _focused_last["text"] = text
+            if matcher.match_text(text, mode="automatic", skip_ascii=True):
+                logger.info("焦点文本轮询触发：末尾匹配 shortcut")
+        except Exception:
+            pass
+
+    _focus_timer = QTimer(app)
+    _focus_timer.setInterval(400)
+    _focus_timer.timeout.connect(_poll_focused_text)
+    _focus_timer.start()
+
+    # 全局 Picker（⌘⇧S）：搜索 → Enter 走同一渲染+插入流程
+    picker = TemplatePickerPopup()
+    picker.set_service(template_service)
+    picker.selected.connect(render_and_insert)
+
+    def on_picker() -> None:
+        logger.info("模板 Picker：打开")
+        picker.show_near_cursor()
+
+    from PySide6.QtCore import QObject, Signal as _Signal
+
+    class _PickerSignals(QObject):
+        opened = _Signal()
+
+    _picker_sig = _PickerSignals()
+    _picker_sig.opened.connect(on_picker)
+    hotkey.add_binding(KEY_S, MASK_HOTKEY, _picker_sig.opened)
+
     hotkey.permission_required.connect(_on_permission_required)
     if config["hotkey"]["enabled"]:
         hotkey.start()
@@ -298,6 +445,10 @@ def start_workspace(app: QApplication) -> None:
     # 测试/调试钩子（不对外暴露 API）
     app._quick_paste_popup = popup
     app._on_quick_paste = on_quick_paste
+    app._template_picker = picker
+    app._template_matcher = matcher
+    app._template_service = template_service
+    app._render_and_insert = render_and_insert
 
     logger.info("启动完成")
 

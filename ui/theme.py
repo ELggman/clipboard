@@ -208,7 +208,11 @@ QMenu::separator {
     margin: 4px 10px;
 }
 
-/* 详情弹层：元信息与按钮 */
+/* 详情弹层：背景必须不透明（macOS 的 Qt.Popup 是 NSPanel，可能走透明合成，
+   曾导致 QPlainTextEdit 首行渲染错位——§9 坑速查）；元信息与按钮 */
+QWidget#itemDetail {
+    background: $window;
+}
 QLabel#detailMeta { color: $secondary; font-size: 12px; }
 
 /* 按钮统一：文字色、字号、尺寸（primary/secondary 同 padding 同高） */
@@ -298,15 +302,17 @@ QPushButton#searchScopeBtn {
 QPushButton#searchScopeBtn:hover { background: $separator; }
 QPushButton#searchScopeBtn:pressed { background: $scrollbar_hover; }
 
-/* 收藏夹触发图标（搜索行，仅收藏夹页显示）：悬停展开浮层面板 */
-QPushButton#collectionTrigger {
-    background: transparent;
-    border: none;
+/* 收藏夹触发（收藏夹行，仅收藏夹页显示）：悬停展开浮层面板。
+   ⚠️ 必须带背景色——MainWindow 上下文中无背景的控件渲染空白
+   （Qt 6.9 macOS 实测：QLabel 文字 + 背景可靠） */
+QLabel#collectionTrigger {
+    background: $search_bg;
     border-radius: 8px;
-    font-size: 16px;
+    padding: 0 10px;
     color: $secondary;
+    font-size: 13px;
 }
-QPushButton#collectionTrigger:hover { background: $search_bg; }
+QLabel#collectionTrigger:hover { background: $scrollbar_hover; }
 
 /* 收藏夹浮层面板：悬浮覆盖在条目区上方 */
 QFrame#collectionPanel {

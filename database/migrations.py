@@ -12,7 +12,7 @@ from .models import Base
 
 logger = logging.getLogger(__name__)
 
-_SCHEMA_VERSION = 5
+_SCHEMA_VERSION = 6
 
 # 幂等扩展 DDL（FTS5 全文索引 + 常用索引）
 _EXTRA_DDL = [
@@ -39,6 +39,8 @@ def migrate(engine: Engine) -> None:
         _upgrade_v4_sessions(engine)
     if current < 5:
         _upgrade_v5_dedupe_scope(engine)
+    if current < 6:
+        _upgrade_v6_snippets_to_templates(engine)
 
     with engine.begin() as conn:
         for ddl in _EXTRA_DDL:
@@ -207,3 +209,100 @@ def _upgrade_v5_dedupe_scope(engine: Engine) -> None:
             conn.execute(text(
                 "INSERT INTO items_fts(items_fts) VALUES('rebuild')"))
     logger.info("v5 迁移：唯一约束改为 (hash, session_id)（去重范围可配置）")
+
+
+# ---- v6：模板模块（原「片段」，文档 §80-82）----
+
+# 默认文件夹（文档 §9）：模板分组
+_DEFAULT_FOLDERS = ("个人", "工作", "开发", "模板")
+# 默认示例模板（文档 §101/§127）：INSERT OR IGNORE（shortcut 唯一保护幂等）
+_DEFAULT_TEMPLATES = [
+    ("Shrug", "shrug", "¯\\_(ツ)_/¯"),
+    ("Today", "today", "Today: {{date}}"),
+    ("UUID", "uuid", "{{uuid}}"),
+    ("Markdown Quote", "quote", "> {{clipboard}}"),
+]
+
+
+def _upgrade_v6_snippets_to_templates(engine: Engine) -> None:
+    """v5 → v6：模板模块——snippets 表重建 + snippet_folders 新表。
+
+    新结构（文档 §81）：shortcut UNIQUE / folder_id / enabled / favorite /
+    trigger_mode / usage_count / last_used_at / updated_at。
+    SQLite 无法添加 UNIQUE 约束 → RENAME→CREATE→INSERT→DROP（v5 同模式）。
+    旧数据：shortcut 取 name 小写（冲突追加 _<id>），description 保留。
+    """
+    with engine.begin() as conn:
+        # 1) snippet_folders 表 + 默认文件夹（新库由 create_all 建表，
+        #    但表存在不代表默认文件夹已插入——INSERT OR IGNORE 幂等）
+        conn.execute(text(
+            "CREATE TABLE IF NOT EXISTS snippet_folders ("
+            " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            " name TEXT NOT NULL UNIQUE,"
+            " created_at DATETIME NOT NULL,"
+            " updated_at DATETIME NOT NULL)"))
+        for name in _DEFAULT_FOLDERS:
+            conn.execute(text(
+                "INSERT OR IGNORE INTO snippet_folders"
+                " (name, created_at, updated_at)"
+                " VALUES (:n, datetime('now'), datetime('now'))"),
+                {"n": name})
+        # 2) snippets 已是新结构则跳过（新库由 create_all 建好）
+        cols = {r[1] for r in conn.execute(
+            text("PRAGMA table_info(snippets)")).fetchall()}
+        if "shortcut" not in cols:
+            # 3) 重建表
+            conn.execute(text("ALTER TABLE snippets RENAME TO snippets_v5"))
+            conn.execute(text(
+                "CREATE TABLE snippets ("
+                " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                " name VARCHAR(128) NOT NULL,"
+                " shortcut VARCHAR(128) NOT NULL UNIQUE,"
+                " content TEXT NOT NULL, description TEXT,"
+                " folder_id INTEGER"
+                "   REFERENCES snippet_folders(id) ON DELETE SET NULL,"
+                " enabled INTEGER NOT NULL DEFAULT 1,"
+                " favorite INTEGER NOT NULL DEFAULT 0,"
+                " trigger_mode VARCHAR(16) NOT NULL DEFAULT 'tab',"
+                " usage_count INTEGER NOT NULL DEFAULT 0,"
+                " last_used_at DATETIME,"
+                " created_at DATETIME NOT NULL,"
+                " updated_at DATETIME NOT NULL)"))
+            old = conn.execute(text(
+                "SELECT id, name, content, description, created_at"
+                " FROM snippets_v5 ORDER BY id")).fetchall()
+            used: set[str] = set()
+            for row in old:
+                base = (row[1] or "").strip().lower()
+                sc = base if base else f"tmpl{row[0]}"
+                if sc in used:
+                    sc = f"{sc}_{row[0]}"
+                used.add(sc)
+                conn.execute(text(
+                    "INSERT INTO snippets"
+                    " (id, name, shortcut, content, description, folder_id,"
+                    "  enabled, favorite, trigger_mode, usage_count,"
+                    "  last_used_at, created_at, updated_at)"
+                    " VALUES (:id, :name, :sc, :content, :desc, NULL,"
+                    "  1, 0, 'tab', 0, NULL, :created, :created)"),
+                    {"id": row[0], "name": row[1], "sc": sc,
+                     "content": row[2], "desc": row[3], "created": row[4]})
+            conn.execute(text("DROP TABLE snippets_v5"))
+        # 4) 索引
+        for idx in (
+            "CREATE INDEX IF NOT EXISTS idx_snippets_shortcut"
+            " ON snippets (shortcut)",
+            "CREATE INDEX IF NOT EXISTS idx_snippets_folder"
+            " ON snippets (folder_id)",
+            "CREATE INDEX IF NOT EXISTS idx_snippets_last_used"
+            " ON snippets (last_used_at)",
+        ):
+            conn.execute(text(idx))
+        # 5) 默认示例模板（文档 §101）
+        for name, sc, content in _DEFAULT_TEMPLATES:
+            conn.execute(text(
+                "INSERT OR IGNORE INTO snippets"
+                " (name, shortcut, content, created_at, updated_at)"
+                " VALUES (:n, :sc, :c, datetime('now'), datetime('now'))"),
+                {"n": name, "sc": sc, "c": content})
+    logger.info("v6 迁移：模板模块（snippets 重建 + snippet_folders + 默认模板）")

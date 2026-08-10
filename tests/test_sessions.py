@@ -173,7 +173,9 @@ def test_migration_v4_defaults(engine):
         assert "sessions" in tables
         name = conn.execute(text("SELECT name FROM sessions WHERE id = 1")).scalar()
         assert name == "普通"
-        assert conn.execute(text("PRAGMA user_version")).scalar() == 5
+        from database.migrations import _SCHEMA_VERSION
+
+        assert conn.execute(text("PRAGMA user_version")).scalar() == _SCHEMA_VERSION
 
 
 # ---- 去重范围（v5）与删除策略 ----

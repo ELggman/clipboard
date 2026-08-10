@@ -253,7 +253,8 @@ def test_context_menu_copy_action(tmp_path):
     menu = view._build_menu(item)
 
     labels = [a.text() for a in menu.actions()]
-    assert labels == ["复制", "置顶", "标记为敏感", "收藏", "", "删除"]  # "" = 分隔线
+    assert labels == ["复制", "添加到模板…", "置顶", "标记为敏感",
+                      "收藏", "", "删除"]  # "" = 分隔线
 
     menu.actions()[0].trigger()  # 复制
     pb = NSPasteboard.generalPasteboard()
@@ -280,13 +281,13 @@ def test_context_menu_pin_action(tmp_path):
     view.add_item(item)
     view.set_menu_context(engine, None, lambda: refreshed.append(True))
     menu = view._build_menu(item)
-    menu.actions()[1].trigger()  # 置顶
+    next(a for a in menu.actions() if a.text() == "置顶").trigger()
     assert refreshed == [True]
     assert history_service.list_recent(engine)[0].pinned == 1
 
     # 再次构建菜单：显示「取消置顶」
     menu2 = view._build_menu(item)
-    assert menu2.actions()[1].text() == "取消置顶"
+    assert next(a.text() for a in menu2.actions() if a.text() == "取消置顶")
 
 
 def test_context_menu_actions_submenu(tmp_path):
@@ -396,31 +397,74 @@ def test_history_item_clicked_signal(tmp_path):
     view.close()
 
 
-def test_snippets_view_save_and_copy(tmp_path):
-    """片段页：新建保存 → 列表出现；复制渲染变量到剪贴板。"""
-    from AppKit import NSPasteboard, NSPasteboardTypeString
-
+def test_templates_view_save_and_validate(tmp_path):
+    """模板页：新建保存 → 列表出现；shortcut 冲突/变量错误提示。"""
     from database.engine import create_db_engine
     from database.migrations import migrate
-    from ui.snippets_view import SnippetsView
+    from ui.templates_view import TemplatesView
 
     engine = create_db_engine(tmp_path / "s.db")
     migrate(engine)
-    view = SnippetsView()
+    view = TemplatesView()
+    warnings = []
+    view._warn = lambda msg: warnings.append(msg)  # 模态框换记录（测试）
     view.set_context(engine)
-    assert view._list.count() == 0
+    base_count = view._list.count()
+    assert base_count == 4  # 默认模板（§101）
 
-    # 新建 + 保存
-    view._new_snippet()
+    # 新建 + 保存（含 shortcut/文件夹/触发方式）
+    view._new_template()
     view._name.setText("日期")
+    view._shortcut.setText("today2")
     view._content.setPlainText("今天：{{date}}")
     view._save()
-    assert view._list.count() == 1
+    assert view._list.count() == base_count + 1
+    row = next(r for r in range(view._list.count())
+               if "today2" in view._list.item(r).text())
+    assert view._list.item(row).text().startswith("日期")
 
-    # 复制（渲染变量）
-    view._copy()
-    clip = NSPasteboard.generalPasteboard().stringForType_(NSPasteboardTypeString)
-    assert clip.startswith("今天：") and "{{" not in clip
+    # 无效模板变量：保存被拒（validate_template 提示，不落库）
+    view._new_template()
+    view._name.setText("Bad")
+    view._shortcut.setText("badx")
+    view._content.setPlainText("Hello {{unknown}}")
+    view._save()
+    assert view._list.count() == base_count + 1  # 未新增
+    assert warnings and "未知变量" in warnings[-1]  # 错误提示（§66）
+    view.close()
+
+
+def test_templates_view_folder_filter(tmp_path):
+    """模板页：文件夹列表过滤模板 + 收藏星标显示。"""
+    from database.engine import create_db_engine
+    from database.migrations import migrate
+    from services.template_service import TemplateService
+    from ui.templates_view import TemplatesView
+
+    engine = create_db_engine(tmp_path / "f.db")
+    migrate(engine)
+    svc = TemplateService(engine)
+    fid = svc.create_folder("项目")
+    svc.create_template("Cmd", "cmd1", "x", folder_id=fid)
+    svc.toggle_favorite(svc.find_by_shortcut("shrug")["id"])
+
+    view = TemplatesView()
+    view.set_context(engine)
+    # 「全部」显示所有（含新模板）
+    assert any("cmd1" in view._list.item(r).text()
+               for r in range(view._list.count()))
+    # 选中「工作」文件夹 → 只显示该文件夹模板
+    idx = next(i for i in range(view._folder_list.count())
+               if view._folder_list.item(i).text().startswith("项目"))
+    view._folder_list.setCurrentRow(idx)
+    pytest_app.processEvents()
+    assert view._list.count() == 1
+    assert "cmd1" in view._list.item(0).text()
+    # 收藏星标（默认模板 shrug 已收藏）
+    view._folder_list.setCurrentRow(0)  # 全部
+    pytest_app.processEvents()
+    assert any(view._list.item(r).text().startswith("★")
+               for r in range(view._list.count()))
     view.close()
 
 
@@ -1340,18 +1384,23 @@ def test_search_scope_toggle_button():
 
 
 def test_page_specific_search_row_controls():
-    """搜索范围按钮仅历史页显示；📁 触发仅收藏夹页显示（回归）。"""
+    """搜索行（搜索框+范围按钮）仅历史页显示；📁 在收藏夹页内。"""
     from ui.main_window import MainWindow
 
     w = MainWindow()
     w.show()
     pytest_app.processEvents()
     assert w._search_scope_btn.isVisible()          # 默认历史页
-    assert not w._collections_trigger.isVisible()
+    cv = w._pages.widget(1)
+    for row in (2, 3, 4):  # 非历史页：搜索行隐藏（不留空白带）
+        w._nav.setCurrentRow(row)
+        pytest_app.processEvents()
+        assert not w._search_scope_btn.isVisible(), f"row={row} 范围按钮应隐藏"
+        assert not w._search.isVisible(), f"row={row} 搜索框应隐藏"
     w._nav.setCurrentRow(1)  # 收藏夹页
     pytest_app.processEvents()
-    assert not w._search_scope_btn.isVisible()
-    assert w._collections_trigger.isVisible()
+    assert not w._search_scope_btn.isVisible()  # 历史搜索行隐藏
+    assert cv._collections_trigger.isVisible()  # 📁 在收藏夹页内
     w._nav.setCurrentRow(0)  # 回历史
     pytest_app.processEvents()
     assert w._search_scope_btn.isVisible()
@@ -1380,7 +1429,9 @@ def test_collections_panel_hover_show_hide(tmp_path):
     # 📁 悬停（主窗口转发）→ 展开在视图左上角
     view.show_collection_panel()
     assert view._panel.isVisible()
-    assert view._panel.x() == 0 and view._panel.height() == view.height()
+    assert view._panel.x() == 0
+    # 高度随内容自适应（不占满视图；默认收藏夹 1 项 → 小面板）
+    assert 0 < view._panel.height() < view.height()
 
     # 离开 → 延时收回（timer 触发隐藏；emit 直接验证连接，
     # 避免 offscreen qWait 跨测试事件循环的时序伪影）
@@ -1452,3 +1503,383 @@ def test_collections_title_shows_current(tmp_path):
     assert "论文资料" in view._title.text()
     assert "1 条" in view._title.text()
     view.close()
+
+
+# ---- 类型切换手势（←/→ 键 + 触控板双指横滑）----
+
+def _mk_item(type_, content="x"):
+    from app.types import ClipboardItem
+
+    return ClipboardItem(type=type_, content=content)
+
+
+def _swipe_event(dx: int, dy: int = 0, phase=None):
+    """构造触控板横向滑动的 Wheel 事件（pixelDelta x 主导）。
+
+    phase 默认 ScrollUpdate（滑动中）；真实 macOS 序列见探针实测：
+    Begin → Update×N → End → Momentum×N
+    """
+    from PySide6.QtCore import QPoint, QPointF
+    from PySide6.QtGui import QWheelEvent
+
+    return QWheelEvent(
+        QPointF(10, 10), QPointF(10, 10),
+        QPoint(dx, dy), QPoint(dx * 8, dy * 8),
+        Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+        phase if phase is not None else Qt.ScrollPhase.ScrollUpdate, False)
+
+
+def _swipe_gesture(dx: int):
+    """完整一次物理滑动（探针实测结构）：
+
+    手指段 Begin→Update×N→End + 动量段 Begin→Momentum×N→End
+    （动量开始也被系统标成 ScrollBegin）
+    """
+    return ([_swipe_event(dx, phase=Qt.ScrollPhase.ScrollBegin)]
+            + [_swipe_event(dx // 2, phase=Qt.ScrollPhase.ScrollUpdate) for _ in range(5)]
+            + [_swipe_event(0, phase=Qt.ScrollPhase.ScrollEnd)]
+            + [_swipe_event(dx // 2, phase=Qt.ScrollPhase.ScrollBegin)]  # 动量段 Begin
+            + [_swipe_event(15, phase=Qt.ScrollPhase.ScrollMomentum) for _ in range(10)]
+            + [_swipe_event(0, phase=Qt.ScrollPhase.ScrollEnd)])
+
+
+def test_history_arrow_keys_switch_type_filter():
+    """←/→ 键循环切换类型筛选（全部→文本→URL→…→代码→全部）。"""
+    from PySide6.QtTest import QTest
+
+    view = HistoryView()
+    view.set_items([_mk_item("text"), _mk_item("url"), _mk_item("image")])
+    assert view._type_tabs.currentRow() == 0  # 全部
+    assert view._model.rowCount() == 3
+
+    QTest.keyClick(view._list, Qt.Key.Key_Right)   # → 文本
+    assert view._type_tabs.currentRow() == 1
+    assert view._filter_type == "text"
+    assert view._model.rowCount() == 1
+
+    QTest.keyClick(view._list, Qt.Key.Key_Right)   # → URL
+    assert view._filter_type == "url"
+    assert view._model.rowCount() == 1
+
+    QTest.keyClick(view._list, Qt.Key.Key_Left)    # ← 回文本
+    assert view._filter_type == "text"
+
+    QTest.keyClick(view._list, Qt.Key.Key_Left)    # ← 全部
+    QTest.keyClick(view._list, Qt.Key.Key_Left)    # ← 代码（循环）
+    assert view._filter_type == "code"
+    QTest.keyClick(view._list, Qt.Key.Key_Right)   # → 全部（循环回来）
+    assert view._filter_type == ""
+    assert view._model.rowCount() == 3
+    view.close()
+
+
+def test_history_swipe_wheel_switches_type_filter():
+    """完整手势（Begin→Update→End→Momentum）只切一格；再次滑动再切。"""
+    view = HistoryView()
+    view.set_items([_mk_item("text"), _mk_item("url"), _mk_item("image")])
+    vp = view._list.viewport()
+
+    for ev in _swipe_gesture(-60):  # 滑动 1：只切一格 → 文本
+        QApplication.sendEvent(vp, ev)
+    assert view._type_tabs.currentRow() == 1
+
+    for ev in _swipe_gesture(-60):  # 滑动 2：→ URL
+        QApplication.sendEvent(vp, ev)
+    assert view._type_tabs.currentRow() == 2
+
+    for ev in _swipe_gesture(60):   # 反向滑动：→ 文本
+        QApplication.sendEvent(vp, ev)
+    assert view._type_tabs.currentRow() == 1
+    view.close()
+
+
+def test_history_swipe_momentum_segment_no_switch():
+    """动量段（Begin 后紧跟 Momentum——系统把动量开始标成 Begin）不切换。"""
+    view = HistoryView()
+    view.set_items([_mk_item("text"), _mk_item("url")])
+    vp = view._list.viewport()
+
+    # 动量段完整序列：Begin(62) → Momentum×30 → End
+    seq = ([_swipe_event(62, phase=Qt.ScrollPhase.ScrollBegin)]
+           + [_swipe_event(-30, phase=Qt.ScrollPhase.ScrollMomentum) for _ in range(30)]
+           + [_swipe_event(0, phase=Qt.ScrollPhase.ScrollEnd)])
+    for ev in seq:
+        QApplication.sendEvent(vp, ev)
+    assert view._type_tabs.currentRow() == 0  # 动量段绝不切换
+    view.close()
+
+
+def test_history_swipe_begin_zero_dx_deferred():
+    """ScrollBegin 的 dx=0（实测首事件 dx 可能为 0/1）：由后续首个非零 Update 补切。"""
+    view = HistoryView()
+    view.set_items([_mk_item("text"), _mk_item("url")])
+    vp = view._list.viewport()
+
+    QApplication.sendEvent(vp, _swipe_event(0, phase=Qt.ScrollPhase.ScrollBegin))
+    assert view._type_tabs.currentRow() == 0  # dx=0：未切换
+    QApplication.sendEvent(vp, _swipe_event(-80, phase=Qt.ScrollPhase.ScrollUpdate))
+    assert view._type_tabs.currentRow() == 1  # 首个非零 Update 补切
+    QApplication.sendEvent(vp, _swipe_event(-40, phase=Qt.ScrollPhase.ScrollUpdate))
+    assert view._type_tabs.currentRow() == 1  # 不再重复切
+    view.close()
+
+
+def test_history_swipe_no_phase_not_intercepted():
+    """无阶段信息（鼠标滚轮等）放行不拦截；纵向主导放行。"""
+    view = HistoryView()
+    view.set_items([_mk_item("text"), _mk_item("url")])
+    vp = view._list.viewport()
+
+    QApplication.sendEvent(vp, _swipe_event(-60, phase=Qt.ScrollPhase.NoScrollPhase))
+    assert view._type_tabs.currentRow() == 0  # 不切换
+    QApplication.sendEvent(vp, _swipe_event(0, 50, phase=Qt.ScrollPhase.ScrollBegin))
+    assert view._type_tabs.currentRow() == 0  # 纵向主导：不切换
+    view.close()
+
+
+def test_history_vertical_wheel_not_intercepted():
+    """纵向滚动/鼠标滚轮不触发类型切换。"""
+    view = HistoryView()
+    view.set_items([_mk_item("text"), _mk_item("url")])
+    vp = view._list.viewport()
+
+    QApplication.sendEvent(vp, _swipe_event(0, 50))    # 纵向触控板
+    assert view._type_tabs.currentRow() == 0
+    # 鼠标滚轮：angleDelta 只有 y 分量
+    from PySide6.QtCore import QPoint, QPointF
+    from PySide6.QtGui import QWheelEvent
+
+    wheel = QWheelEvent(
+        QPointF(5, 5), QPointF(5, 5),
+        QPoint(0, 0), QPoint(0, 120),
+        Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+        Qt.ScrollPhase.NoScrollPhase, False)
+    QApplication.sendEvent(vp, wheel)
+    assert view._type_tabs.currentRow() == 0
+    view.close()
+
+
+def test_history_swipe_double_begin_only_once():
+    """同一次滑动被系统拆成多个 ScrollBegin（实测）时只切一格。"""
+    view = HistoryView()
+    view.set_items([_mk_item("text"), _mk_item("url"), _mk_item("image")])
+    vp = view._list.viewport()
+
+    # 实测序列：Begin(-16) → Begin(0) → Update(-34) → End → Momentum×N
+    seq = ([_swipe_event(-16, phase=Qt.ScrollPhase.ScrollBegin),
+            _swipe_event(0, phase=Qt.ScrollPhase.ScrollBegin),
+            _swipe_event(-34, phase=Qt.ScrollPhase.ScrollUpdate),
+            _swipe_event(0, phase=Qt.ScrollPhase.ScrollEnd)]
+           + [_swipe_event(-30, phase=Qt.ScrollPhase.ScrollMomentum) for _ in range(5)])
+    for ev in seq:
+        QApplication.sendEvent(vp, ev)
+    assert view._type_tabs.currentRow() == 1  # 只切一格
+
+    # 下一次滑动（完整两段：手指段 + 动量段）：正常再切一格 → URL
+    for ev in _swipe_gesture(-92):
+        QApplication.sendEvent(vp, ev)
+    assert view._type_tabs.currentRow() == 2
+    view.close()
+
+
+def test_history_vertical_events_passthrough():
+    """纵向滑动/纵向动量必须放行（不拦截）——拦截会导致惯性滚动失效、
+    下滑变成一格一格（回归：ScrollMomentum 曾无条件吞掉）。"""
+    view = HistoryView()
+    view.set_items([_mk_item("text"), _mk_item("url")])
+    vp = view._list.viewport()
+
+    # 纵向手势全阶段：eventFilter 全部返回 False（放行，不拦截）
+    # （sendEvent 返回值是 viewport 处理结果，不能用来判断过滤器）
+    assert not view.eventFilter(vp, _swipe_event(0, 50, phase=Qt.ScrollPhase.ScrollBegin))
+    assert not view.eventFilter(vp, _swipe_event(0, 60, phase=Qt.ScrollPhase.ScrollUpdate))
+    assert not view.eventFilter(vp, _swipe_event(0, 30, phase=Qt.ScrollPhase.ScrollMomentum))
+    assert not view.eventFilter(vp, _swipe_event(0, 0, phase=Qt.ScrollPhase.ScrollEnd))
+    assert view._type_tabs.currentRow() == 0  # 不触发类型切换
+    view.close()
+
+
+# ---- HotkeyManager raw key 扩展（Tab Trigger 输入流）----
+
+def _key_event(vk, flags=0, autorepeat=False):
+    from PySide6.QtCore import QPoint
+    from Quartz import (
+        CGEventCreateKeyboardEvent,
+        CGEventSetFlags,
+        CGEventSetIntegerValueField,
+        kCGKeyboardEventAutorepeat,
+    )
+
+    ev = CGEventCreateKeyboardEvent(None, vk, True)
+    CGEventSetFlags(ev, flags)
+    if autorepeat:
+        CGEventSetIntegerValueField(ev, kCGKeyboardEventAutorepeat, 1)
+    return ev
+
+
+def test_hotkey_raw_key_forwarding():
+    """普通按键 → raw_key_down 转发（含字符）；事件不消费（透传）。"""
+    from services.hotkey_manager import HotkeyManager
+
+    mgr = HotkeyManager()
+    received = []
+    mgr.raw_key_down.connect(lambda vk, ch: received.append((vk, ch)))
+    mgr.enable_raw_keys(True)
+
+    # 构造事件（无 unicode）→ 回退表字符
+    assert mgr.handle_event(_key_event(12)) is False  # q：透传不消费
+    assert mgr.handle_event(_key_event(48)) is False  # Tab
+    assert received == [(12, "q"), (48, "\t")]
+
+
+def test_hotkey_raw_key_excludes_modifiers():
+    """⌘/⌃/⌥ 组合键不进入 raw 输入流（热键逻辑独占）。"""
+    from Quartz import (
+        kCGEventFlagMaskAlternate,
+        kCGEventFlagMaskCommand,
+        kCGEventFlagMaskControl,
+    )
+
+    from services.hotkey_manager import HotkeyManager
+
+    mgr = HotkeyManager()
+    received = []
+    mgr.raw_key_down.connect(lambda vk, ch: received.append((vk, ch)))
+    mgr.enable_raw_keys(True)
+
+    mgr.handle_event(_key_event(12, kCGEventFlagMaskCommand))
+    mgr.handle_event(_key_event(12, kCGEventFlagMaskControl))
+    mgr.handle_event(_key_event(12, kCGEventFlagMaskAlternate))
+    assert received == []
+
+
+def test_hotkey_binding_priority_over_raw():
+    """热键绑定（⌘⇧V）优先于 raw 转发且消费事件。"""
+    from services.hotkey_manager import HotkeyManager, KEY_V, MASK_HOTKEY
+
+    mgr = HotkeyManager()
+    activated = []
+    raw = []
+    mgr.activated.connect(lambda: activated.append(1))
+    mgr.raw_key_down.connect(lambda vk, ch: raw.append(vk))
+    mgr.enable_raw_keys(True)
+
+    assert mgr.handle_event(_key_event(KEY_V, MASK_HOTKEY)) is True  # 消费
+    assert activated == [1]
+    assert raw == []
+
+
+def test_hotkey_raw_disabled_no_forward():
+    """未 enable_raw_keys：普通按键不转发。"""
+    from services.hotkey_manager import HotkeyManager
+
+    mgr = HotkeyManager()
+    raw = []
+    mgr.raw_key_down.connect(lambda vk, ch: raw.append(vk))
+    assert mgr.handle_event(_key_event(12)) is False
+    assert raw == []
+
+
+def test_hotkey_autorepeat_suppressed():
+    """自动重复事件被吞（不触发热键也不转发 raw）。"""
+    from services.hotkey_manager import HotkeyManager
+
+    mgr = HotkeyManager()
+    activated = []
+    raw = []
+    mgr.activated.connect(lambda: activated.append(1))
+    mgr.raw_key_down.connect(lambda vk, ch: raw.append(vk))
+    mgr.enable_raw_keys(True)
+    assert mgr.handle_event(_key_event(9, autorepeat=True)) is True
+    assert activated == [] and raw == []
+
+
+def test_templates_view_folder_buttons_visible(tmp_path):
+    """文件夹区操作入口必须有文字（曾用 ＋/✎/－ 符号按钮不可识别，回归）。"""
+    from database.engine import create_db_engine
+    from database.migrations import migrate
+    from ui.templates_view import TemplatesView
+
+    engine = create_db_engine(tmp_path / "fb.db")
+    migrate(engine)
+    view = TemplatesView()
+    view.set_context(engine)
+    # 底部「＋ 新建类型」文字按钮
+    texts = [b.text() for b in view.findChildren(QPushButton)]
+    assert "＋ 新建类型" in texts
+    # 右键菜单策略已启用（CustomContextMenu）
+    from PySide6.QtCore import Qt as _Qt
+
+    assert view._folder_list.contextMenuPolicy() == \
+        _Qt.ContextMenuPolicy.CustomContextMenu
+    view.close()
+
+
+def test_templates_view_context_menu_favorite_and_move(tmp_path):
+    """模板右键：收藏切换 + 移动到类型（用户要求：收藏/移动走右键菜单）。"""
+    from database.engine import create_db_engine
+    from database.migrations import migrate
+    from services.template_service import TemplateService
+    from ui.templates_view import TemplatesView
+
+    engine = create_db_engine(tmp_path / "cm.db")
+    migrate(engine)
+    svc = TemplateService(engine)
+    fid = svc.create_folder("项目")
+    svc.create_template("Test", "tctx", "hello")
+
+    view = TemplatesView()
+    view.set_context(engine)
+    row = next(r for r in range(view._list.count())
+               if "tctx" in view._list.item(r).text())
+    view._list.setCurrentRow(row)
+    t = view._templates[row]
+
+    # 右键菜单动作：收藏 → 列表出现 ★
+    from PySide6.QtWidgets import QMenu
+
+    menu = QMenu()
+    view._active_menus.append(menu)
+    menu.addAction("收藏").triggered.connect(
+        lambda: view._toggle_favorite(t))
+    menu.actions()[0].trigger()
+    pytest_app.processEvents()
+    assert svc.get_template(t["id"])["favorite"] is True
+    assert any("★" in view._list.item(r).text()
+               for r in range(view._list.count()))
+
+    # 移动到类型
+    view._move_template(t, fid)
+    pytest_app.processEvents()
+    assert svc.get_template(t["id"])["folder_id"] == fid
+    # 类型过滤后可见
+    idx = next(i for i in range(view._folder_list.count())
+               if view._folder_list.item(i).text().startswith("项目"))
+    view._folder_list.setCurrentRow(idx)
+    pytest_app.processEvents()
+    assert any("tctx" in view._list.item(r).text()
+               for r in range(view._list.count()))
+    view.close()
+
+
+def test_main_window_search_only_on_history_page(tmp_path):
+    """搜索框是历史页专属：切换到其它页面隐藏（用户反馈：所有页面都有搜索框）。"""
+    from database.engine import create_db_engine
+    from database.migrations import migrate
+    from ui.main_window import MainWindow
+
+    engine = create_db_engine(tmp_path / "sp.db")
+    migrate(engine)
+    w = MainWindow()
+    w.show()
+    pytest_app.processEvents()
+
+    assert w._search.isVisible()          # 历史页（默认）显示
+    for row in (1, 2, 3):                 # 收藏夹/模板/时间线
+        w._nav.setCurrentRow(row)
+        pytest_app.processEvents()
+        assert not w._search.isVisible(), f"row={row} 搜索框应隐藏"
+    w._nav.setCurrentRow(0)
+    pytest_app.processEvents()
+    assert w._search.isVisible()          # 回到历史页恢复
+    w.close()

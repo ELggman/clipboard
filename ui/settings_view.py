@@ -83,7 +83,7 @@ class SettingsView(QWidget):
         container = QWidget()
         container.setObjectName("settingsContainer")
         layout = QFormLayout(container)
-        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setContentsMargins(16, 6, 16, 14)
         layout.setHorizontalSpacing(16)
         layout.setVerticalSpacing(10)
         scroll.setWidget(container)

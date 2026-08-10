@@ -245,6 +245,10 @@ def load_actions(extra_dirs: list[Path] = ()) -> list[ClipboardAction]:
 
 ### 3.4 搜索性能（10k 条 <100ms）
 
+- 历史列表键盘/手势（eventFilter，列表获得焦点时生效）：
+  - **←/→ 键**循环切换类型筛选（全部/文本/URL/图片/文件/代码）
+  - **触控板双指左右滑**：拦截 viewport 的 Wheel 事件（QAbstractScrollArea 滚轮在 viewport 上，须对 viewport 装 eventFilter），x 分量主导时切换。**判定 = Begin 后首个非 Begin 事件**：`Update` → 手指段（用户滑动）切 1 格；`Momentum` → 动量段不切（锁死）。⚠️ 探针实测 458 事件的真实结构：**一次物理滑动 = 手指段 `Begin→Update×N→End` + 动量段 `Begin→Momentum×N→End`**——动量开始也被系统标成 `ScrollBegin`，段间 End→Begin 间隔 <65ms（时间窗口方案全不可靠：250/400ms 都会多切/漏切）；同一次滑动还可能出现多个 Begin（`Begin(-16)→Begin(0)→Update(-34)`），也不能「见 Begin 就切」。连续 Begin 吞；Begin dx=0 由首个非零 Update 补切。**纵向事件全放行（含 Momentum 动量——曾无条件吞掉导致惯性滚动失效、下滑变一格一格）且不改变手势状态**；End 也放行（无 delta 无害）。双指向左滑 → 下一类型（类翻页语义）
+  - 类型 tabs 构建时必须 `setCurrentRow(0)`：否则 `currentRow=-1` 无选中态（默认「全部」无高亮），且首次 ←/→ 落在 0 而非相邻项（实测）
 - SQLite 开 **FTS5**，对 `clipboard_items.content` 建全文索引，普通搜索走 FTS5 匹配（模糊、忽略大小写天然满足）
 - **中文搜索**：FTS5 unicode61 把连续中文当一个 token，子串匹配不上（实测「胶原」搜不出「最近胶原蛋白满满」）→ 查询含 CJK 时改走 `LIKE '%词%'` 子串扫描（10k 行毫秒级，含通配符转义），ASCII 仍走 FTS5
 - Regex 高级模式：`LIKE`/`REGEXP` 兜底，数据量 10k 级别同样 <100ms，无需优化
@@ -523,13 +527,27 @@ CREATE INDEX ix_items_session ON clipboard_items (session_id);
 - FTS5 同步：应用层在插入/删除后同步更新 items_fts（10k 量级足够，不引触发器）；code 内容正常全文检索
 - 自动删除策略（1/7/30/90/365 天/永不）：后台 `QTimer` 每日扫描一次，删除时同步删**受管**图片文件（置顶豁免，§9.22）
 - 历史数量上限（100/500/1000/无限）：插入前裁剪最旧记录（**置顶优先豁免**，与 list_recent 排序一致）
-- 迁移：`PRAGMA user_version`（当前 = 5）；v2 快照化、v3 加元数据列、v4 会话用 `PRAGMA table_info` 防重 + ALTER TABLE；**v5 唯一约束 hash → (hash, session_id) 需重建表**（SQLite 无法删约束），保留 id 与全部列 + FTS rebuild（新库 items_fts 未建时跳过）
+- 迁移：`PRAGMA user_version`（当前 = 6）；v2 快照化、v3 加元数据列、v4 会话用 `PRAGMA table_info` 防重 + ALTER TABLE；**v5 唯一约束 hash → (hash, session_id) 需重建表**（SQLite 无法删约束），保留 id 与全部列 + FTS rebuild（新库 items_fts 未建时跳过）；**v6 模板模块重建 snippets 表**（shortcut UNIQUE）同上模式 + snippet_folders 表
 - 文件大小上限：`history.max_file_size_mb`（默认 50MB，0=不限制），on_clipboard_changed 对 FILE 类型 stat 超限跳过
 - 会话：`sessions` 表 + `clipboard_items.session_id`（§3.8）；默认会话幂等创建
 
-### 7.3 Snippet 变量
+### 7.3 模板模块（v6，原 Snippet）
 
-`{{date}}` → 当日日期、`{{time}}` → 当前时间、`{{uuid}}` → uuid4。渲染逻辑放 `services/snippet_service.py`，支持后续扩展变量。复制时渲染成最终文本。
+- **定位**（文档 §1）：shortcut 触发的本地模板引擎——输入 `pyfunc`+Tab → 解析渲染 `{{date}}/{{time}}/{{datetime}}/{{uuid}}/{{clipboard}}/{{input:name}}/{{cursor}}` → 模拟 ⌘V 粘贴 → 恢复原剪贴板
+- **分层**（§83-89）：`services/template/`（errors/token/parser/variables/renderer/matcher）+ `template_service.py`（CRUD/文件夹/搜索评分排序）+ `insertion.py`（粘贴模拟）
+- **数据**：snippets 表（shortcut UNIQUE/folder_id/enabled/favorite/trigger_mode/usage_count/last_used_at）+ snippet_folders；旧数据迁移 shortcut=name 小写（冲突加 `_<id>`）；默认文件夹（个人/工作/开发/模板）+ 默认模板（shrug/today/uuid/quote）幂等插入
+- **触发**（§7）：HotkeyManager 扩展 `raw_key_down` 信号转发无 ⌘⌃⌥ 修饰的按键（字符用 `CGEventKeyboardGetUnicodeString` 跟随布局，回退 vk 映射表），事件透传不消费；matcher 主线程维护输入缓冲，tab 模式 Tab 触发 / automatic 模式输完立即触发，匹配从缓冲末尾扫最长后缀
+  - **输入法策略（用户要求：无论哪种输入法，必须完整 shortcut 彻底输入文本框后才触发）**：
+    - **英文输入法**：无组合，按键即上屏 → 输完最后一个字符**延迟确认**触发：命中后挂起 pending（缓冲快照），**200ms 内缓冲变化（还在输更长的词，如 signature 的 sig）取消；词边界键（空格/标点 = 词完整）或 200ms 超时确认触发**——防 prefix 误触（用户实测：想打 signature，输到 sig 就被替换）
+    - **中文输入法**（`is_chinese_ime()`，TIS/ctypes 检测输入源 ID，不依赖被聚焦应用）：所有字母都进输入法组合、未上屏，按键路径**完全不碰文本**（碰了会破坏组合，实测 sig→siv）；**提交键**（空格/回车/标点，输入法正在提交组合）keyDown 时触发——事件顺序保证 ⌥⌫ 落在已提交文本上；Tab 触发由插入层 **Escape 取消组合** + 粘贴（`cancel_ime=True`，不能 ⌥⌫）
+    - **自动纠正免疫**：缓冲记录的是用户按下的原始键（sig），不管输入法界面显示 siv，触发替换以实际输入为准，⌥⌫ 整词删除
+    - **焦点文本轮询固定 `skip_ascii=True`（只匹配中文 shortcut）**：英文 shortcut 由按键路径覆盖（英文延迟确认 / 中文提交键）——轮询里英文 shortcut 有两个问题：组合中 AX 值可能含未上屏拼音（部分应用读不到 marked range）会提前触发（用户实测：uuid 未按回车就触发）；且英文 shortcut 有 prefix 误触风险。中文 shortcut 组合中显示的是拼音，天然不会误匹配
+  - **TIS 实现坑**：符号在 **HIToolbox**（`Carbon.framework/Versions/A/Frameworks/HIToolbox.framework/Versions/A/HIToolbox`），ApplicationServices umbrella 不导出；加载 Carbon 主二进制是 stub 会崩（曾经的坑）；CFString* 符号单独从 CoreFoundation 加载
+  - **AX 路径（补充，非主路）**：`is_ime_composing()` 读焦点元素 `AXTextInputMarkedRange`（length>0 = 组合中）+ 焦点文本轮询（400ms）匹配已提交文本——只对 AX 健全的应用有效（TextEdit/Notes 等）；**VS Code/Electron 的 AX 树没有任何文本元素，焦点元素读取返回 kAXErrorNoValue，AX 方案在那里整体不可用**（见 §9 坑速查）
+  - **焦点文本轮询**：`mode="automatic"`（**不是 "all"**——"all" 会让 tab 模式模板在英文输入法下被随便输入触发，破坏防误触语义）；组合中跳过且不更新缓存（否则组合文本被缓存，上屏后文本未变永不触发）
+- **插入**（§70-72）：保存原剪贴板 → `watcher.set_paused(True)`（临时内容不进历史）→ 写入 → CGEventPost ⌘V → 恢复 → 恢复监听；`{{cursor}}` 第一阶段不定位（光标停末尾）
+- **Picker**（§16）：⌘⇧S 全局弹窗（搜索排序：shortcut 精确>name 精确>shortcut 前缀>name 前缀>content>最近使用）
+- **兼容**：`snippet_service.py` 代理到 TemplateService（旧 `render_snippet` 保留：未知变量原样保留不抛错）
 
 ---
 
@@ -564,14 +582,34 @@ CREATE INDEX ix_items_session ON clipboard_items (session_id);
 | 代码详情无高亮 | Pygments 2.x token 是 `_TokenType` 实例，`type(token).__mro__` 取元类链 | 遍历 `token.parent` 链匹配（§3.6） |
 | 代码文本压到行号区 | QSS padding 渲染层覆盖 `setViewportMargins` | 行号改独立 gutter 组件（§3.6） |
 | 代码首行显示不全 | macOS 透明 QPlainTextEdit viewport 合成异常 | 背景不透明 `$window`（§3.6） |
+| 弹窗内容比预期低 8px（「不是从第一行开始」） | macOS 上 Qt.Popup 顶层窗口的 QPropertyAnimation 不被事件循环驱动（pos 动画卡 Running、valueChanged 不发射），`move(y+8)` 初始偏移永久保留 | `fade_in_window` 用 QTimer 强制校正最终位置，不依赖动画信号；复用弹窗先停旧 timer（§6.2） |
+| 行号与代码对不齐（数字偏上 ≈3px） | gutter 用 rect 重载顶部对齐画行号，数字 glyph 矮（8.5px vs 文本 14px）；且 QFontMetrics.ascent(11) ≠ QTextLayout 的 OpenType ascent(≈12.7) | 行号用 `drawText(x, y, text)` 基线绘制，基线 = block 顶 + **layout** ascent（§3.6） |
+| 弹窗背景透出/首行合成 | Qt.Popup 是 NSPanel 可能走透明合成，`#itemDetail` 无 QSS 背景规则 | `QWidget#itemDetail { background: $window; }` 显式不透明（§3.6） |
 | C++ 判成 shell | `#include` 计为 shell 注释、`<int>` 计为重定向 | 预处理器排除 + `(?<![<\w])>` 限定（§3.6） |
 | Swift 判成 Python | import+缩进加分过宽 | 缩进加分要求强信号 ≥2（§3.6） |
+| md 文档判成 shell | `# 标题` 计为 shell 注释 + 围栏内命令/表格 `|` 反超，平局字典序 shell 靠前 | 标题形行不计 shell 注释；shell 胜出时 md ≥0.80 且 ≥2 种结构信号则按 md（§3.6） |
+| 纯文本判成 shell/yaml | shell 0.45 / yaml 0.45 / md 0.4 保底分，零信号也参与竞争 | 零信号一律返回 0.0，不得参与竞争（§3.6） |
 | 微信 URL 判成敏感 | 分享链接 token= 查询参数命中 token 正则 | URL 类型跳过敏感检测（§3.7） |
 | 复制新文本把置顶挤下去 | add_item 固定插行 0 | 插到置顶组之后（pinned DESC 一致） |
 | 会话下拉为空 | 只注入 context 未填充下拉 | bootstrap 装配时显式 `reload_sessions(active_id)`（§3.8） |
 | 全局搜索看不到会话来源 | 条目未带 session 名 | `_to_item` LEFT JOIN sessions 填 `session_name`，delegate `_session_tag` 标注（§3.8） |
 | 删除会话移回后内容丢失/成孤儿 | INSERT SELECT 同表 id 冲突、session_id 带出原值 | 先取数据再删再插 + 覆盖 session_id=1（§3.8） |
 | 新会话复制旧图片被去重吞掉 | 唯一约束 hash 全局去重 | v5 改 (hash, session_id) 联合 + `dedupe_scope` 可配置（§3.8） |
+| 右键菜单测试挂起 | 菜单新增「添加到模板」后 `actions()[1]` 索引位移，trigger 到模态对话框 | 测试按文本找动作，不依赖索引（§7.3） |
+| 模态 QMessageBox 阻塞测试 | `_warn` 用 QMessageBox.warning（exec 模态） | 测试 patch `_warn` 记录消息（§7.3） |
+| CGEventKeyboardGetUnicodeString 返回空 | 只对真实硬件事件有效（构造事件无 unicode 字段） | 回退 vk 映射表（US 布局，§7.3） |
+| 默认模板占用 shortcut | 迁移插入 shrug/today/uuid/quote，测试建同名模板撞 UNIQUE | 测试避开默认 shortcut（§7.3） |
+| Tab Trigger 误触发（输入法） | CGEventTap 无法读 IME composing 状态 | **已解决**：中文输入法由 `is_chinese_ime()`（TIS）判定——组合未上屏不碰文本，提交键触发；AX marked range 只作 AX 健全应用的补充（§7.3） |
+| 组合守卫失效（sig→siv 依旧） | 守卫用 AX marked range，但 VS Code/Electron 的 `kAXFocusedUIElementAttribute` 返回 kAXErrorNoValue、AX 树无文本元素 → `is_ime_composing()` 永远 False | 守卫改用 **TIS 输入法检测**（ctypes + HIToolbox，不依赖被聚焦应用）：中文输入法下按键路径不触发，提交键触发（§7.3） |
+| TIS 检测在 pyobjc 里没有 | pyobjc ApplicationServices 只绑定部分 HIServices，TISCopyCurrentKeyboardInputSource 不在 | ctypes 加载 HIToolbox 二进制（`Carbon.framework/.../HIToolbox`），CFString* 从 CoreFoundation 加载（§7.3） |
+| AX 路径静默全死 | venv 缺 `pyobjc-framework-ApplicationServices`，`Quartz.kAXValueAttribute` 等常量不存在 → read_focused_text 每次 AttributeError 被 try/except 吞成 None | requirements.txt 显式加 `pyobjc-framework-ApplicationServices`；坑在 pyobjc 的 AX C API 在 HIServices/ApplicationServices 包里，**不在 Quartz**（§7.3） |
+| 中文输入法下自动触发把 sig 改写成 siv | 组合中（marked text）收到最后一个字符 keyDown 即触发，⌥⌫ 删除 + 粘贴破坏活动组合，IME 重新提交出乱码；tab 触发没这问题（按 Tab 时早已上屏） | 中文输入法（TIS）下按键路径不触发，**提交键**（空格/回车/标点）触发——⌥⌫ 落在已提交文本上；Tab 触发发 Escape 取消组合（§7.3） |
+| tab 模式模板被自动触发（uuid/today 输入即展开） | 焦点文本轮询用 `mode="all"`（无模式过滤），AX 修复后英文输入法下提交的 tab 模式 shortcut 也被匹配 | 轮询改 `mode="automatic"`，只匹配 automatic/boundary；tab 模式走 Tab 键（英文：按键缓冲，中文：Tab 时 AX 末尾匹配）（§7.3） |
+| 焦点文本轮询永不触发 | 组合期间把文本（含未上屏组合）写进 `_focused_last` 缓存，上屏后文本未变 → 判"未变化"跳过 | 组合中跳过且**不更新缓存**，上屏后文本变化才能进入匹配（§7.3） |
+| 英文输入法打 signature 输到 sig 就触发 | 即时触发在最后一个字符开火，无法区分"完整词"和"更长单词的前缀"（缓冲就是 sig） | 自动触发**延迟确认**：命中挂起 pending（缓冲快照），200ms 内缓冲变化取消，词边界键/超时确认触发（§7.3） |
+| 中文输入法 uuid 未按回车就触发 | 焦点文本轮询匹配了组合中未上屏的拼音（部分应用读不到 marked range，`is_ime_composing` 失效） | 轮询固定 `skip_ascii=True` 只匹配中文 shortcut；英文 shortcut 由按键路径（中文提交键）覆盖（§7.3） |
+| 触发后 shortcut 残留输入框 | 只粘贴渲染文本，未删除用户输入的 shortcut | matcher 回调携带 delete_count，插入前 `delete_backspaces(n)`（**必须在弹输入框之前**，弹框夺焦后退格打错位置）（§7.3） |
+| 文件夹操作按钮不可识别 | ＋/✎/－ 符号按钮：✎ 渲染不出、无文字 | 改文字按钮「＋ 新建文件夹」+ 右键菜单（新建/重命名/删除）（§7.3） |
 
 ---
 
@@ -579,7 +617,7 @@ CREATE INDEX ix_items_session ON clipboard_items (session_id);
 
 | 版本 | 内容 | 本文档对应 |
 |---|---|---|
-| V1 | 文本/图片/URL/文件历史、搜索、收藏、Snippet、Action | §3 全部就绪 |
+| V1 | 文本/图片/URL/文件历史、搜索、收藏、模板、Action | §3 全部就绪 |
 | V1.5 | 代码/图片/敏感条目渲染、列表卡片底色、详情弹窗、清理数据弹窗 | §3.5/§3.6 就绪 |
 | V1.5 | **Session 会话**（任务分组/激活切换/搜索范围/来源标注） | §3.8 就绪 |
 | V1.5 | **Code Mode**（代码检测/语言识别/语法高亮/代码 Actions）、**Privacy Mode**（暂停监控/应用排除/敏感检测/遮蔽/自动过期） | 新增.md §8/§9，本版本已完成 |
@@ -606,7 +644,7 @@ CREATE INDEX ix_items_session ON clipboard_items (session_id);
 - [x] 自动删除定时清扫（每日 + 启动 1 分钟后；置顶条目豁免；FTS 用 rebuild 重建避免外部内容表 DELETE malformed）
 - [x] 开机启动 LaunchAgent（services/autostart.py；打包版替换 .app 路径）
 - [x] Collections 收藏夹页（新建/重命名/删除/条目浏览/右键加入收藏夹/Actions）
-- [x] Snippet 片段页（CRUD + 复制渲染 {{date}}/{{time}}/{{uuid}}）
+- [x] 模板页（shortcut 触发 + 7 变量渲染 + 文件夹/收藏/统计 + Picker ⌘⇧S + Tab Trigger，v6）
 - [x] Timeline 时间线页（今天/昨天/本周/更早按月分组，点击进详情）
 - [x] **Code Mode**：代码检测（services/code_detector.py，18 语言启发式 + 置信度）+ v3 迁移元数据 + 列表 mono 预览 + 详情 Pygments 高亮 + 7 个代码 Actions
 - [x] **Privacy Mode**：⌘⇧P 暂停监控 + 来源应用排除 + 敏感检测（warn/ignore/临时过期）+ 遮蔽显示 + ⌘Delete 手动删除

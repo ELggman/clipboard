@@ -1,70 +1,56 @@
-"""Snippet 服务：CRUD + 变量渲染（DEVELOPMENT.md §4.5 / §7.3）。
+"""Snippet 兼容层（v6 重构后）：代理到 TemplateService，旧 API 保持可用。
 
-复制时渲染 {{date}} {{time}} {{uuid}} 为最终文本；未知变量原样保留。
+旧 API 语义差异：
+- create_snippet(name, content, description) 无 shortcut → shortcut 取 name 小写
+- render_snippet：仅 {{date}}/{{time}}/{{uuid}} 三个变量，
+  **未知变量原样保留**（旧行为，与模板引擎的报错策略不同）
 """
 import datetime
 import logging
 import re
 import uuid
 
-from sqlalchemy import select
 from sqlalchemy.engine import Engine
 
-from database.engine import make_session_factory
-from database.models import Snippet
+from services.template_service import TemplateService
 
 logger = logging.getLogger(__name__)
 
 _VAR_RE = re.compile(r"\{\{(\w+)\}\}")
 
-# 可用变量提示（页面展示用）
+# 可用变量提示（页面展示用，兼容旧引用）
 AVAILABLE_VARS = ("{{date}}", "{{time}}", "{{uuid}}")
 
 
-# ---- CRUD ----
+# ---- CRUD（代理到 TemplateService，shortcut 兼容）----
 
 def list_snippets(engine: Engine) -> list[dict]:
-    """全部片段（最新创建在前）。"""
-    with make_session_factory(engine)() as session:
-        rows = session.execute(
-            select(Snippet).order_by(Snippet.created_at.desc(), Snippet.id.desc())
-        ).scalars().all()
-    return [
-        {"id": r.id, "name": r.name, "content": r.content,
-         "description": r.description or ""}
-        for r in rows
-    ]
+    """全部片段（最新创建在前）。返回含模板新字段的 dict。"""
+    return TemplateService(engine).list_templates()
 
 
 def create_snippet(engine: Engine, name: str, content: str,
                    description: str = "") -> int:
-    with make_session_factory(engine)() as session:
-        row = Snippet(name=name, content=content, description=description,
-                      created_at=datetime.datetime.now())
-        session.add(row)
-        session.commit()
-        return row.id
+    """创建片段。旧 API 无 shortcut → 默认取 name 小写。"""
+    sc = (name or "").strip().lower() or f"tmpl-{uuid.uuid4().hex[:6]}"
+    try:
+        return TemplateService(engine).create_template(
+            name, sc, content, description=description)
+    except ValueError:
+        # shortcut 冲突（name 重复）：追加短后缀重试
+        sc = f"{sc}-{uuid.uuid4().hex[:4]}"
+        return TemplateService(engine).create_template(
+            name, sc, content, description=description)
 
 
 def update_snippet(engine: Engine, snippet_id: int, name: str, content: str,
                    description: str = "") -> bool:
-    with make_session_factory(engine)() as session:
-        row = session.get(Snippet, snippet_id)
-        if row is None:
-            return False
-        row.name, row.content, row.description = name, content, description
-        session.commit()
-        return True
+    return TemplateService(engine).update_template(
+        snippet_id, name=name, content=content, description=description)
 
 
 def delete_snippet(engine: Engine, snippet_id: int) -> bool:
-    with make_session_factory(engine)() as session:
-        row = session.get(Snippet, snippet_id)
-        if row is None:
-            return False
-        session.delete(row)
-        session.commit()
-        return True
+    return TemplateService(engine).delete_template(snippet_id)
 
 
 def render_snippet(
@@ -74,7 +60,7 @@ def render_snippet(
     time_fmt: str = "%H:%M:%S",
     now: datetime.datetime | None = None,
 ) -> str:
-    """渲染 Snippet 变量。now 参数便于测试固定时间。"""
+    """渲染 Snippet 变量（旧语义）：未知变量原样保留，不抛错。"""
     now = now or datetime.datetime.now()
 
     def _replace(match: re.Match) -> str:

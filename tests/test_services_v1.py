@@ -28,16 +28,17 @@ def test_snippet_crud(engine):
 
     s_id = snippet_service.create_snippet(engine, "email", "hello@{{date}}", "常用邮箱")
     items = snippet_service.list_snippets(engine)
-    assert len(items) == 1
-    assert items[0]["name"] == "email"
-    assert items[0]["description"] == "常用邮箱"
+    me = next(i for i in items if i["id"] == s_id)  # 列表含 4 个默认模板
+    assert me["name"] == "email"
+    assert me["description"] == "常用邮箱"
+    assert me["shortcut"] == "email"  # 兼容层：shortcut 默认取 name 小写
 
     assert snippet_service.update_snippet(engine, s_id, "email2", "{{uuid}}@x.com", "新") is True
-    items = snippet_service.list_snippets(engine)
-    assert items[0]["name"] == "email2" and items[0]["content"] == "{{uuid}}@x.com"
+    me = next(i for i in snippet_service.list_snippets(engine) if i["id"] == s_id)
+    assert me["name"] == "email2" and me["content"] == "{{uuid}}@x.com"
 
     assert snippet_service.delete_snippet(engine, s_id) is True
-    assert snippet_service.list_snippets(engine) == []
+    assert s_id not in [i["id"] for i in snippet_service.list_snippets(engine)]
     assert snippet_service.update_snippet(engine, 999, "x", "y") is False
 
 
@@ -263,7 +264,10 @@ def test_list_grouped_buckets(engine):
     labels = [g[0] for g in groups]
     assert labels[0] == "今天"
     assert labels[1] == "昨天"
-    assert "本周" in labels
+    # 「本周」桶只在周起点早于昨天时才有非今天/昨天的条目（周一周二周三
+    # 的 3 天前条目已落上一周 → 无本周条目，周一测不到该桶）
+    if now.weekday() >= 3:
+        assert "本周" in labels
     # 40 天前归入「更早」的月份桶
     assert any("月" in l for l in labels)
     assert groups[0][1][0].content == "today"  # 组内最新在前
@@ -329,7 +333,9 @@ def test_migration_v3_from_v2(tmp_path):
                 "sensitive_type", "expires_at", "session_id"} <= cols
         row = conn.execute(text("SELECT content FROM clipboard_items")).fetchone()
         assert row[0] == "old row"
-        assert conn.execute(text("PRAGMA user_version")).scalar() == 5
+        from database.migrations import _SCHEMA_VERSION
+
+        assert conn.execute(text("PRAGMA user_version")).scalar() == _SCHEMA_VERSION
     eng.dispose()
 
 
@@ -444,3 +450,72 @@ def test_set_sensitive_manual_roundtrip(engine):
     assert history_service.set_sensitive(engine, item.id, False) is True
     loaded = history_service.list_recent(engine)[0]
     assert loaded.sensitive == 0 and loaded.sensitive_type == ""
+
+
+# ---- v6 迁移：模板模块（原片段）----
+
+def test_migration_v6_snippets_to_templates(tmp_path):
+    """v5 → v6：snippets 表重建（shortcut 回填）+ snippet_folders + 默认模板。"""
+    from database.engine import create_db_engine
+    from database.migrations import _SCHEMA_VERSION, migrate
+
+    eng = create_db_engine(tmp_path / "old.db")
+    with eng.begin() as conn:
+        # 老版本 snippets 表（v5：无 shortcut/folder/enabled 等列）
+        conn.execute(text(
+            "CREATE TABLE snippets ("
+            " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            " name VARCHAR(128) NOT NULL, content TEXT NOT NULL,"
+            " description TEXT, created_at DATETIME NOT NULL)"))
+        conn.execute(text(
+            "INSERT INTO snippets (name, content, description, created_at)"
+            " VALUES ('邮箱签名', 'Best regards', '工作用', '2026-01-01 10:00:00')"))
+        conn.execute(text(
+            "INSERT INTO snippets (name, content, created_at)"
+            " VALUES ('邮箱签名', '重复名', '2026-01-02 10:00:00')"))
+        conn.execute(text("PRAGMA user_version = 5"))
+
+    migrate(eng)
+    with eng.connect() as conn:
+        assert conn.execute(text("PRAGMA user_version")).scalar() == _SCHEMA_VERSION
+        # 旧数据保留 + shortcut 回填（冲突加 _id 后缀）
+        rows = conn.execute(text(
+            "SELECT name, shortcut, content, description FROM snippets"
+            " WHERE name LIKE '邮箱签名%' ORDER BY id")).fetchall()
+        assert len(rows) == 2
+        assert rows[0].shortcut == "邮箱签名"
+        assert rows[1].shortcut.startswith("邮箱签名_")
+        assert rows[0].description == "工作用"  # description 保留
+        # 新列默认值
+        cols = {r[1] for r in conn.execute(
+            text("PRAGMA table_info(snippets)")).fetchall()}
+        for c in ("enabled", "favorite", "trigger_mode", "usage_count",
+                  "last_used_at", "updated_at", "folder_id"):
+            assert c in cols
+        # 默认文件夹
+        folders = conn.execute(text(
+            "SELECT name FROM snippet_folders ORDER BY id")).fetchall()
+        assert "个人" in [f[0] for f in folders]
+        # 默认示例模板
+        scs = conn.execute(text(
+            "SELECT shortcut FROM snippets WHERE shortcut IN"
+            " ('shrug','today','uuid','quote')")).fetchall()
+        assert len(scs) == 4
+    eng.dispose()
+
+
+def test_migration_v6_idempotent(tmp_path):
+    """v6 迁移幂等：重复运行不崩、数据不重复。"""
+    from database.engine import create_db_engine
+    from database.migrations import migrate
+
+    eng = create_db_engine(tmp_path / "idem.db")
+    migrate(eng)
+    migrate(eng)  # 第二次
+    with eng.connect() as conn:
+        # 默认模板不重复（shortcut 唯一保护）
+        count = conn.execute(text(
+            "SELECT COUNT(*) FROM snippets WHERE shortcut='shrug'")).scalar()
+        assert count == 1
+        assert conn.execute(text("PRAGMA user_version")).scalar() == 6
+    eng.dispose()

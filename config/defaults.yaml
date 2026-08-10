@@ -32,9 +32,13 @@ hotkey:
   flags: [command, shift]  # ⌘⇧V（Quick Paste）
   privacy_keycode: 35      # ⌘⇧P 隐私模式开关（P = 35）
 
-snippet:
+# 模板模块（v6，原 snippet）：shortcut 触发的本地模板引擎
+template:
+  picker_keycode: 1             # ⌘⇧S 打开模板 Picker（S = 1）
+  default_trigger_mode: tab     # tab(Tab 触发) / boundary(词边界触发)
   date_format: "%Y-%m-%d"
-  time_format: "%H:%M:%S"
+  time_format: "%H:%M"
+  datetime_format: "%Y-%m-%d %H:%M:%S"
 
 search:
   page_size: 100

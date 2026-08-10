@@ -427,9 +427,14 @@ class HistoryView(QWidget):
         self._list.setContextMenuPolicy(Qt.ContextMenuPolicy.DefaultContextMenu)
         # 条目间隔：白底下列表更易区分（随窗口缩放，见 resizeEvent）
         self._list.setSpacing(4)
-        # ⌘Delete 删除 / 回车复制：键盘事件经 eventFilter 处理
+        # ⌘Delete 删除 / 回车复制 / ←→ 切换类型：键盘事件经 eventFilter 处理；
+        # 触控板双指横滑是 viewport 上的 Wheel 事件，需对 viewport 也安装过滤器
         self._list.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._list.installEventFilter(self)
+        self._list.viewport().installEventFilter(self)
+        # 触控板手势状态机：以 ScrollEnd 为手势边界（一次滑动可能多个 Begin）
+        self._gesture_ended = True     # 上次手势已结束（允许下一次 Begin 切换）
+        self._gesture_switched = False  # 当前手势是否已切换类型
 
         self._model = QStandardItemModel(self._list)
         self._list.setModel(self._model)
@@ -438,6 +443,10 @@ class HistoryView(QWidget):
         self._list.clicked.connect(self._on_item_clicked)  # 单击展开详情
 
         # 顶部类型筛选条（全部 / 文本 / URL / 图片 / 文件）
+        # 状态先于控件初始化：setCurrentRow(0) 会同步触发 _on_type_filter
+        # → _apply_type_filter，需 _filter_type/_all_items 已存在（实测崩）
+        self._filter_type = ""  # 当前类型筛选
+        self._all_items: list = []  # set_items 传入的完整数据（筛选前）
         self._type_tabs = QListWidget()
         self._type_tabs.setObjectName("topnav")
         self._type_tabs.setFlow(QListView.Flow.LeftToRight)
@@ -448,11 +457,12 @@ class HistoryView(QWidget):
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._type_tabs.setVerticalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        for _type, label in TYPE_FILTERS:
+        for _, label in TYPE_FILTERS:
             self._type_tabs.addItem(QListWidgetItem(label))
         self._type_tabs.currentRowChanged.connect(self._on_type_filter)
-        self._filter_type = ""  # 当前类型筛选
-        self._all_items: list = []  # set_items 传入的完整数据（筛选前）
+        # 默认选中「全部」：否则 currentRow=-1 无选中态，←/→ 切换
+        # 第一次会落在 0（全部）而非直觉的相邻项（实测）
+        self._type_tabs.setCurrentRow(0)
 
         # 右键菜单依赖（bootstrap 注入）
         self._engine = None              # 置顶/收藏写库
@@ -473,7 +483,7 @@ class HistoryView(QWidget):
         # 会话行：下拉（显示名 · 条数）+ ⋯ 管理菜单
         # 独立区域：底部留 8px 与类型筛选条分隔（靠太近视觉粘连，实测）
         session_row = QHBoxLayout()
-        session_row.setContentsMargins(8, 6, 8, 8)
+        session_row.setContentsMargins(8, 0, 8, 6)
         session_row.setSpacing(4)
         self._session_combo = QComboBox()
         self._session_combo.setObjectName("sessionCombo")
@@ -502,7 +512,13 @@ class HistoryView(QWidget):
         self._list.doItemsLayout()  # 行高随 scale 变化，重新布局
 
     def eventFilter(self, obj, event) -> bool:
-        """键盘快捷键：⌘Delete 删除（§9.20）；Enter/Return 直接复制选中条目。"""
+        """键盘/手势快捷键（列表获得焦点时生效）：
+
+        - ⌘Delete 删除选中条目（§9.20）
+        - Enter/Return 直接复制选中条目
+        - ←/→ 切换类型筛选（全部/文本/URL/图片/文件/代码，循环）
+        - 触控板双指左右滑：Wheel 事件 x 分量主导时同方向切换类型
+        """
         if obj is self._list and event.type() == QEvent.Type.KeyPress:
             # ⌘⌫（macOS 主删除键）或 ⌦ 前向删除 → 删除选中条目（§9.20）；
             # 普通 ⌫ 不删，防误触
@@ -524,7 +540,85 @@ class HistoryView(QWidget):
                         self._run_copy(item)
                         self.feedback.emit("已复制到剪贴板")
                 return True
+            # ←/→ 切换类型筛选（上下键保持列表内选择，左右键无默认行为）
+            if event.key() == Qt.Key.Key_Left:
+                self._step_type_filter(-1)
+                return True
+            if event.key() == Qt.Key.Key_Right:
+                self._step_type_filter(1)
+                return True
+        # 触控板双指横滑：事件目标是 viewport（QAbstractScrollArea 滚轮语义）
+        if obj is self._list.viewport() and event.type() == QEvent.Type.Wheel:
+            return self._on_swipe_wheel(event)
         return super().eventFilter(obj, event)
+
+    # ---- 类型切换手势 ----
+
+    def _step_type_filter(self, delta: int) -> None:
+        """←/→ 键：类型筛选循环切换（全部 ↔ 代码）。"""
+        total = self._type_tabs.count()
+        if total == 0:
+            return
+        row = self._type_tabs.currentRow()
+        if row < 0:
+            row = 0  # 防御：理论上默认已选中「全部」
+        # setCurrentRow 触发 currentRowChanged → _on_type_filter 刷新列表
+        self._type_tabs.setCurrentRow((row + delta) % total)
+
+    def _on_swipe_wheel(self, event) -> bool:
+        """触控板双指横滑 → 切换类型筛选；纵向滚动放行。
+
+        macOS 事件流（2026-08-08 探针实测 458 事件）：
+        一次物理滑动 = **手指段** `Begin→Update×N→End`
+        + **动量段** `Begin→Momentum×N→End`（动量开始也被系统标成
+        ScrollBegin，段间 End→Begin 间隔 <65ms——无法用时间区分）。
+        可靠判定 = **Begin 后第一个非 Begin 事件**：
+        - `Update` → 手指段（用户滑动）→ 切 1 格
+        - `Momentum` → 动量段 → 不切（锁死）
+        连续 Begin（实测 `Begin(-16)→Begin(0)→Update(-34)`）吞；
+        Begin dx=0 由首个非零 Update 补切。无阶段信息（鼠标滚轮等）放行。
+        """
+        pd = event.pixelDelta()
+        dx = pd.x() if not pd.isNull() else 0
+        if dx == 0:
+            dx = event.angleDelta().x()
+        dy = pd.y() if not pd.isNull() else 0
+        if dy == 0:
+            dy = event.angleDelta().y()
+        phase = event.phase()
+        if phase == Qt.ScrollPhase.NoScrollPhase:
+            return False  # 鼠标滚轮等：放行
+        if phase == Qt.ScrollPhase.ScrollBegin:
+            if not self._gesture_ended:
+                return True  # 连续 Begin（同一次滑动）：吞
+            if abs(dx) <= abs(dy) and (dx != 0 or dy != 0):
+                return False  # 纵向主导：放行，不改变手势状态
+            # 横向手势开始（含 dx=dy=0）：等待首个 Update（手指段）或
+            # Momentum（动量段）判定
+            self._gesture_ended = False
+            self._gesture_switched = False
+            return True
+        if phase == Qt.ScrollPhase.ScrollUpdate:
+            if not self._gesture_switched:
+                if abs(dx) <= abs(dy):
+                    return False  # 纵向主导：放行
+                if dx != 0:
+                    # 手指段：双指向左滑（dx<0）→ 下一类型；向右滑 → 上一类型
+                    self._gesture_switched = True
+                    self._step_type_filter(-(1 if dx > 0 else -1))
+            return True
+        if phase == Qt.ScrollPhase.ScrollMomentum:
+            if abs(dx) <= abs(dy):
+                # 纵向动量：放行——惯性滚动必须交给列表（曾无条件吞掉，
+                # 手指一停列表就停，下滑变成「一格一格」）
+                return False
+            if not self._gesture_switched:
+                self._gesture_switched = True  # 横向动量段：不切，锁死本次滑动
+            return True
+        if phase == Qt.ScrollPhase.ScrollEnd:
+            self._gesture_ended = True  # 手势边界：允许下一次 Begin 判定
+            return False  # 放行（End 无 delta，对滚动无害）
+        return True
 
     # ---- 注入 ----
 
@@ -733,6 +827,8 @@ class HistoryView(QWidget):
         self._active_menus.append(menu)
         menu.addAction("复制").triggered.connect(
             lambda: self._run_copy(item))
+        menu.addAction("添加到模板…").triggered.connect(
+            lambda: self._add_to_template(item))  # §22-24：Clipboard → Snippet
         pin_label = "取消置顶" if item.pinned else "置顶"
         menu.addAction(pin_label).triggered.connect(
             lambda: self._toggle_flag(item, "pinned"))
@@ -842,6 +938,33 @@ class HistoryView(QWidget):
         if item.id and collection_service.add_item(self._engine, coll["id"], item):
             logger.info("已加入收藏夹「%s」: item=%s", coll["name"], item.id)
             self.feedback.emit(f"已收藏到「{coll['name']}」")
+
+    def _add_to_template(self, item) -> None:
+        """历史内容 → 模板（§22-24）：内容预填，名称/Shortcut 用户确认。
+
+        第一阶段不自动推导名称/shortcut（§23 建议功能第二阶段），
+        用户填写后创建，shortcut 冲突由 service 校验提示。
+        """
+        if self._engine is None:
+            return
+        from ui.templates_view import TemplateCreateDialog
+
+        dlg = TemplateCreateDialog(self, initial_content=item.content or "")
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        from services.template_service import TemplateService
+
+        svc = TemplateService(self._engine)
+        try:
+            svc.create_template(dlg.name(), dlg.shortcut(), dlg.content(),
+                                description=dlg.description())
+        except (ValueError, Exception) as e:
+            from PySide6.QtWidgets import QMessageBox
+
+            QMessageBox.warning(self, "模板", str(e))
+            return
+        logger.info("历史内容已添加到模板: shortcut=%s", dlg.shortcut())
+        self.feedback.emit("已添加到模板")
 
     def _delete_item(self, item) -> None:
         """删除单条历史（图片文件同步清理，状态栏反馈）。"""
