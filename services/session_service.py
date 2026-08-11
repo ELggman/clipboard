@@ -36,26 +36,33 @@ def ensure_default(engine: Engine) -> int:
 
 
 def list_sessions(engine: Engine) -> list[dict]:
-    """会话列表（默认置顶）：{id, name, is_default, count}。"""
+    """会话列表（默认置顶）：{id, name, is_default, created_at, count}。"""
     with make_session_factory(engine)() as session:
         rows = session.execute(
             select(Session.id, Session.name, Session.is_default,
+                   Session.created_at,
                    func.count(ItemRow.id))
             .outerjoin(ItemRow, ItemRow.session_id == Session.id)
             .group_by(Session.id)
             .order_by(Session.is_default.desc(), Session.id)
         ).all()
     return [{"id": sid, "name": name, "is_default": bool(is_default),
+             "created_at": created_at,
              "count": count or 0}
-            for sid, name, is_default, count in rows]
+            for sid, name, is_default, created_at, count in rows]
 
 
 def create_session(engine: Engine, name: str) -> int:
-    """新建会话，返回 id。"""
+    """新建会话，返回 id；**同名已存在返回 0**（用户反馈：不应允许重复名）。"""
     name = (name or "").strip()
     if not name:
         return 0
     with make_session_factory(engine)() as session:
+        exists = session.execute(
+            select(Session.id).where(Session.name == name)).first()
+        if exists:
+            logger.warning("会话名已存在，拒绝创建: %s", name)
+            return 0
         row = Session(name=name, created_at=datetime.now())
         session.add(row)
         session.commit()
@@ -65,13 +72,20 @@ def create_session(engine: Engine, name: str) -> int:
 
 
 def rename_session(engine: Engine, session_id: int, name: str) -> bool:
-    """重命名会话（默认会话允许重命名，不可删除）。"""
+    """重命名会话（默认会话允许重命名，不可删除）。
+    与其他会话重名返回 False（默认会话原名除外——只查其他会话）。"""
     name = (name or "").strip()
     if not name or session_id == DEFAULT_SESSION_ID:
         return False
     with make_session_factory(engine)() as session:
         row = session.get(Session, session_id)
         if row is None:
+            return False
+        exists = session.execute(
+            select(Session.id).where(Session.name == name,
+                                     Session.id != session_id)).first()
+        if exists:
+            logger.warning("重命名冲突，已存在同名会话: %s", name)
             return False
         row.name = name
         session.commit()

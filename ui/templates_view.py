@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -39,6 +40,7 @@ from ui.template_components import (
     ROLE_FOLDER_COUNT,
     ROLE_FOLDER_NAME,
     ROLE_TEMPLATE,
+    ROW_INSET,
     STAR_ZONE,
     FolderSourceDelegate,
     TemplateCardDelegate,
@@ -49,6 +51,15 @@ from ui.template_components import (
 # 用户自定义变量持久化键（config template 段）
 _CONFIG_VARS_KEY = "template"
 _CONFIG_VARS_FIELD = "extra_variables"
+
+# ---- 模板页布局常量（手动调整模板条目宽度 = 中间栏宽度）----
+# 中间栏不再硬编码（旧 setFixedWidth(280) 与左列 160 + 边距 恒 > 420 窗口，
+# 右缘被裁掉 ~64px——怎么调都溢出）。现在由 _apply_middle_width 按窗口自适应：
+#   - _PAGE_MARGIN 缩 → 中间栏变宽；_LEFT_WIDTH 改动 → 中间栏跟随；
+#   - _ENTRY_WIDTH 设 >0 可手动固定条目宽（自动夹紧在窗口内，不会再溢出）。
+_PAGE_MARGIN = 8      # 模板页左右页边距（仅本页，历史/收藏页不受影响）
+_LEFT_WIDTH  = 160    # 左列「分类」固定宽（用户确认保持 160）
+_ENTRY_WIDTH = 0      # 模板条目宽：0 = 随中间栏自适应（推荐）；>0 固定该值
 
 
 def _load_extra_variables() -> list[str]:
@@ -443,6 +454,8 @@ class TemplatesView(QWidget):
         self._templates: list[dict] = []
         self._folders: list[dict] = []
         self._active_menus: list = []  # 右键菜单引用防 GC
+        self._pan: dict[int, int] = {}  # 长条目横向平移偏移（行号 → px）
+        self._pan_state: dict | None = None  # 拖拽平移暂存
         self._build_ui()
 
     # ---- 注入 ----
@@ -457,12 +470,28 @@ class TemplatesView(QWidget):
         if self._svc is not None:
             self.reload()
 
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._apply_middle_width()
+
+    def _apply_middle_width(self) -> None:
+        """中间栏宽：_ENTRY_WIDTH=0 随窗口自适应填满；>0 手动固定（夹紧防溢出）。
+
+        公式：窗口宽 − 左右页边距 − 左列 160 − cards 间距 12 = 中间栏宽。
+        """
+        if not hasattr(self, "_middle"):
+            return
+        avail = self.width() - 2 * _PAGE_MARGIN - _LEFT_WIDTH - 12
+        if _ENTRY_WIDTH > 0:
+            avail = min(_ENTRY_WIDTH, avail)
+        self._middle.setFixedWidth(max(0, avail))
+
     # ---- 构建 ----
 
     def _build_ui(self) -> None:
         """三栏卡片布局（设计规范：白色卡片 16px 圆角、大量留白、蓝色强调）。"""
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(12, 8, 12, 12)
+        outer.setContentsMargins(_PAGE_MARGIN, 8, _PAGE_MARGIN, 12)
         outer.setSpacing(12)
 
         cards = QHBoxLayout()
@@ -472,7 +501,7 @@ class TemplatesView(QWidget):
         left = QFrame()
         left.setObjectName("templateCard")
         lv = QVBoxLayout(left)
-        lv.setContentsMargins(12, 12, 12, 12)
+        lv.setContentsMargins(12, 12, 6, 12)
         lv.setSpacing(8)
         head = QHBoxLayout()
         head.setSpacing(6)
@@ -497,7 +526,7 @@ class TemplatesView(QWidget):
         self._folder_list.customContextMenuRequested.connect(
             self._folder_context_menu)
         lv.addWidget(self._folder_list, 1)
-        left.setFixedWidth(160)  # 分类列固定宽（source-list）
+        left.setFixedWidth(_LEFT_WIDTH)  # 分类列固定宽（用户确认保持 160）
         cards.addWidget(left)
 
         # ---- 中栏：模板列表（搜索 + 两行卡片行）----
@@ -525,7 +554,8 @@ class TemplatesView(QWidget):
         self._list.setObjectName("templateList")
         self._list.setFrameShape(QListWidget.Shape.NoFrame)
         self._list.setSpacing(4)
-        self._list.setItemDelegate(TemplateCardDelegate(self._list))
+        self._list.setUniformItemSizes(True)  # 行高恒定 58px：跳过逐行布局计算，滚轮更流畅
+        self._list.setItemDelegate(TemplateCardDelegate(self._list, self))
         # 模板右键：收藏 / 移动到类型 / 删除（§15/§21）
         self._list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._list.customContextMenuRequested.connect(
@@ -539,14 +569,21 @@ class TemplatesView(QWidget):
         self._list_empty.setWordWrap(True)
         self._list_empty.setParent(self._list.viewport())
         self._list_empty.hide()
-        middle.setFixedWidth(260)  # 模板列固定宽（约为旧三栏的 2/3，整体更窄）
+        # 中间栏宽不硬编码：resizeEvent → _apply_middle_width 按窗口自适应填满
+        # （_ENTRY_WIDTH=0 自适应；>0 手动固定并夹紧，面板永不出窗口、无横滚条）
+        middle.setMinimumWidth(0)
+        middle.setSizePolicy(QSizePolicy.Policy.Expanding,
+                             QSizePolicy.Policy.Preferred)
+        self._middle = middle
         cards.addWidget(middle)
 
         # 右栏编辑器已改为弹窗（TemplateEditorDialog）：点击模板/新建时弹出，
         # 页面不再常驻编辑面板（设计决策：整体更窄）
-
-        cards.addStretch(1)  # 剩余空间留白（Raycast 风格，内容不撑满窗口）
         outer.addLayout(cards, 1)
+
+        # 长条目平移用鼠标/触摸板，列表本身不出横向滚轮条（用户要求）
+        self._list.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
     # ---- 数据 ----
 
@@ -588,6 +625,7 @@ class TemplatesView(QWidget):
             self._templates = self._svc.list_templates(folder_id=folder_id)
         if not preserve_id:
             preserve_id = self._current_id()
+        self._pan.clear()  # 列表重建：平移偏移作废
         self._list.blockSignals(True)
         self._list.clear()
         for t in self._templates:
@@ -659,19 +697,103 @@ class TemplatesView(QWidget):
         self._list_empty.show()
 
     def eventFilter(self, obj, event) -> bool:
-        """模板行尾 ★ 点击区 → 切换收藏（不触发行选中/编辑弹窗）。"""
-        if obj is self._list.viewport() \
-                and event.type() == QEvent.Type.MouseButtonPress:
+        """模板行 ★ 点击区 → 收藏切换；长条目横向平移（横滑/拖动）。
+
+        平移只影响内容，★ 固定右缘；拖拽超过 4px 视为平移、吃掉释放事件，
+        避免误触发「点击打开编辑」。列表不出横向滚轮条（用户要求）。
+        """
+        if obj is not self._list.viewport():
+            return super().eventFilter(obj, event)
+        et = event.type()
+        vp = self._list.viewport()
+
+        # 触摸板双指横滑 / 横向滚轮 / Shift+滚轮 → 平移鼠标下条目
+        if et == QEvent.Type.Wheel:
+            pos = event.position().toPoint()
+            dx = event.angleDelta().x()
+            dy = event.angleDelta().y()
+            # 横滑判定：明显横向（|dx|≥|dy|）或 Shift+纵向。纵向滑动常混入
+            # 微小横向分量（dx=±1~2），旧判定 dx!=0 会逐个吞掉并整视口重绘
+            # → 上下滚轮明显卡顿（用户反馈）。
+            horiz = (dx != 0 and abs(dx) >= abs(dy)) or (
+                bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+                and dy != 0)
+            if horiz:
+                return self._pan_step(pos, dx if dx else dy)
+            return False  # 纵向滚动照常交给列表
+
+        # 鼠标按下：★ 点击区切收藏；条目区记录拖拽起点（4px 内视为点击）
+        if et == QEvent.Type.MouseButtonPress \
+                and event.button() == Qt.MouseButton.LeftButton:
             pos = event.position().toPoint()
             item = self._list.itemAt(pos)
             row = self._list.row(item) if item is not None else -1
             if 0 <= row < len(self._templates):
                 rect = self._list.visualItemRect(item)
-                if pos.x() > rect.right() - STAR_ZONE \
+                # ★ 点击区 = delegate 绘制星标的实际位置（右缘减 ROW_INSET）。
+                # 直接用 visualRect 原右缘会把命中区右偏 8px，点不到星标。
+                star_right = rect.right() - ROW_INSET
+                if pos.x() > star_right - STAR_ZONE \
+                        and pos.x() <= star_right \
                         and pos.y() < rect.top() + 30:
                     self._toggle_favorite(self._templates[row])
                     return True  # 消费点击，不选中行
+                self._pan_state = {
+                    "row": row, "press_x": pos.x(),
+                    "start": self._pan.get(row, 0), "dragging": False,
+                }
+            return False  # 放行：列表处理选中，释放时若未拖动 → 打开编辑
+
+        # 鼠标按住拖动 → 横向平移（内容跟随鼠标），超过阈值才进拖拽态
+        if et == QEvent.Type.MouseMove:
+            if event.buttons() & Qt.MouseButton.LeftButton:
+                st = self._pan_state
+                if st is not None:
+                    pos = event.position().toPoint()
+                    dx = pos.x() - st["press_x"]
+                    if st["dragging"] or abs(dx) > 4:
+                        if not st["dragging"]:
+                            st["dragging"] = True
+                            vp.setCursor(Qt.CursorShape.SizeHorCursor)
+                        self._set_pan(
+                            st["row"], st["start"] + (st["press_x"] - pos.x()))
+                        return True  # 拖拽中吃掉移动，避免列表做选区
+                    return False  # 未过阈值：放行，不影响点击
+                return False
+            vp.setCursor(Qt.CursorShape.ArrowCursor)  # 无按钮移动：兜底复位光标
+            return False
+
+        # 鼠标释放：拖拽结束吃事件（不触发点击/编辑）；普通点击放行
+        if et == QEvent.Type.MouseButtonRelease \
+                and event.button() == Qt.MouseButton.LeftButton:
+            st = self._pan_state
+            self._pan_state = None
+            vp.setCursor(Qt.CursorShape.ArrowCursor)
+            if st is not None and st["dragging"]:
+                return True
+            return False
+
         return super().eventFilter(obj, event)
+
+    def _pan_step(self, pos, delta: int) -> bool:
+        """横滑一步：鼠标/触摸板横滚下条目内容左右平移（不显示滚轮）。"""
+        item = self._list.itemAt(pos)
+        row = self._list.row(item) if item is not None else -1
+        if 0 <= row < len(self._templates):
+            self._set_pan(row, self._pan.get(row, 0) - delta / 120.0 * 40)
+        return True  # 吃掉横滚事件
+
+    def _set_pan(self, row, offset) -> None:
+        """写入平移偏移并重绘（精确夹紧由 delegate 绘制时按内容宽计算）。
+
+        偏移未变时不触发重绘：纵向滚轮混入的微小横向分量（dx=±1）经
+        _pan_step 算成 0，若每次都 update() 整视口 → 滚轮明显卡顿。
+        """
+        off = int(offset)
+        if self._pan.get(row, 0) == off:
+            return
+        self._pan[row] = off
+        self._list.viewport().update()
 
     # ---- 模板右键菜单 ----
 

@@ -2,12 +2,19 @@
 
 - 弹层出现：fade + 从触发方向轻微位移（origin-aware，OutCubic 近似 spring）
 - 页面切换：淡入
+- 列表行 hover 背景过渡（delegate 自绘背景，150-200ms）
 - 尊重系统「减少动效」设置（apple-design §14 accessibility）
 - 动画可中断：QPropertyAnimation 新动画自动打断旧的
 """
 import logging
 
-from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QTimer
+from PySide6.QtCore import (
+    QEasingCurve,
+    QEvent,
+    QObject,
+    QPropertyAnimation,
+    QTimer,
+)
 from PySide6.QtWidgets import QGraphicsOpacityEffect, QWidget
 
 logger = logging.getLogger(__name__)
@@ -96,3 +103,72 @@ def fade_in_widget(widget: QWidget) -> None:
     anim.finished.connect(lambda: widget.setGraphicsEffect(None))
     anim.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
     widget._page_anim = anim
+
+
+class HoverAnimator(QObject):
+    """delegate 行 hover 背景过渡（QTimer 步进逼近，≈180ms 完成）。
+
+    用法：`anim = HoverAnimator(listview, delegate)`；delegate.paint 里用
+    `anim.alpha(index.row())` 取 0.0-1.0 当前值（非当前行返回 0）。
+
+    - 尊重系统「减少动效」：直接跳到目标（0/1），无过渡
+    - 不吞事件（eventFilter 返回 False）：列表键盘/右键等逻辑不受影响
+    """
+
+    def __init__(self, view, delegate):
+        super().__init__(view)
+        self._view = view
+        self._delegate = delegate
+        self._row = -1
+        self._alpha = 0.0
+        self._target = 0.0
+        view.viewport().setMouseTracking(True)
+        view.viewport().installEventFilter(self)
+        self._timer = QTimer(view)
+        self._timer.setInterval(16)
+        self._timer.timeout.connect(self._tick)
+        self._instant = reduce_motion_enabled()
+
+    def eventFilter(self, obj, event) -> bool:
+        try:
+            vp = self._view.viewport()
+        except RuntimeError:  # view 已销毁（进程退出时序）
+            return False
+        if obj is vp:
+            if event.type() == QEvent.Type.MouseMove:
+                self._set_target(self._view.indexAt(
+                    event.position().toPoint()).row())
+            elif event.type() == QEvent.Type.Leave:
+                self._set_target(-1)
+        return False  # 放行所有事件
+
+    def _set_target(self, row: int) -> None:
+        if row == self._row and self._alpha == self._target:
+            return
+        self._row = row
+        self._target = 1.0 if row >= 0 else 0.0
+        if self._instant:
+            self._alpha = self._target
+            try:
+                self._view.viewport().update()
+            except RuntimeError:
+                pass
+            return
+        if not self._timer.isActive():
+            self._timer.start()
+
+    def _tick(self) -> None:
+        try:
+            vp = self._view.viewport()
+        except RuntimeError:
+            self._timer.stop()
+            return
+        # 指数逼近（每次 25% 余量）≈ 180ms 完成，非线性更接近原生
+        self._alpha += (self._target - self._alpha) * 0.25
+        if abs(self._alpha - self._target) < 0.01:
+            self._alpha = self._target
+            self._timer.stop()
+        vp.update()
+
+    def alpha(self, row: int) -> float:
+        return self._alpha if row == self._row else 0.0

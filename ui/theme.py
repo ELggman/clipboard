@@ -79,20 +79,19 @@ QListView#topnav {
     font-size: 16px;
 }
 
-/* 类型筛选条（历史页 全部/文本/URL…）：同款配色，四周圆角。
-   ⚠️ 必须独立 objectName——复用 #topnav 会连带顶部导航圆角化 */
+/* 类型筛选条（历史页 全部/文本/URL…）：Compact Tab——透明底，
+   选中项 = 蓝胶囊 9px 圆角白字（UI 优化：40px 高） */
 QListView#typeTabs {
-    background: $sidebar;
+    background: transparent;
     border: none;
-    border-radius: 8px;
     font-size: 13px;
-    padding: 4px 8px;
 }
 QListView#typeTabs::item {
-    height: 28px;
+    height: 30px;
     padding: 0 14px;
-    margin: 0 2px;
-    border-radius: 6px;
+    margin: 4px 2px;
+    border-radius: 9px;
+    color: #3A3A3C;
 }
 QListView#typeTabs::item:hover { background: $hover; }
 QListView#typeTabs::item:selected {
@@ -100,21 +99,34 @@ QListView#typeTabs::item:selected {
     color: $accent_text;
 }
 
-/* 搜索框：NSSearchField 风格 */
-QLineEdit#searchBox {
-    background: $search_bg;
-    border: none;
-    border-radius: 8px;
-    padding: 6px 10px;
-    font-size: 13px;
-    selection-background-color: $accent;
+/* 时间线页右侧计数（当前时间段条目数）：次要色小字，叠加在分段条
+   透明区右端。⚠️ 不加 padding-right：右缘已贴 tabs 右缘（页边距 10px），
+   加了会把「156 条」这类宽度顶过 44px 空隙、压到最后一个胶囊。 */
+QLabel#timelineCount {
+    color: $secondary;
+    font-size: 12px;
 }
 
-/* 历史列表：条目渲染由 HistoryDelegate 全权负责（自绘选中/hover/缩略图）。
-   ⚠️ 不要加 padding / ::item 规则：QSS 的 padding 会被应用到每个条目的
-   option.rect，导致高亮背景相对条目内容整体偏移（实测：高亮下移、文字顶出框） */
+/* 搜索框：NSSearchField 风格（UI 优化：40px 高、11px 圆角、
+   focus 白底 + 蓝边；蓝光 ring 由代码 QGraphicsDropShadowEffect 实现） */
+QLineEdit#searchBox {
+    background: $search_bg;
+    border: 1px solid transparent;
+    border-radius: 11px;
+    padding: 0 10px;
+    font-size: 14px;
+    color: $text;
+    selection-background-color: $accent;
+}
+QLineEdit#searchBox:focus {
+    background: $window;
+    border: 1px solid rgba(0, 122, 255, 0.35);
+}
+
+/* 历史列表：浅灰底（UI 优化——条目正常透明/hover 白/选中淡蓝，
+   由 HistoryDelegate 自绘；列表背景不再透白色） */
 QListView#historyList {
-    background: transparent;
+    background: $content;
     border: none;
     font-size: 13px;
 }
@@ -254,8 +266,8 @@ QPushButton#destructiveButton:pressed { background: #D63A30; }
 QStatusBar { color: $secondary; font-size: 11px; background: transparent; }
 QStatusBar::item { border: none; }
 /* 隐私模式状态指示（📋 / 🔒，§9.4） */
-QLabel#privacyStatus { color: $secondary; font-size: 11px; padding: 0 8px; }
-QLabel#privacyStatus[paused="true"] { color: $accent_soft; }
+QLabel#privacyStatus { color: #34C759; font-size: 11px; padding: 0 8px; }
+QLabel#privacyStatus[paused="true"] { color: $secondary; }
 
 /* 设置页分区标题（隐私模式等） */
 QLabel#sectionTitle { color: $secondary; font-size: 12px; font-weight: 600; }
@@ -297,6 +309,9 @@ QPushButton#sessionMenuBtn {
 }
 QPushButton#sessionMenuBtn:hover { background: $search_bg; }
 
+/* 会话创建时间（右侧靠右，次要灰——填充 ⋯ 按钮右侧留白） */
+QLabel#sessionCreated { color: $secondary; font-size: 12px; }
+
 /* 搜索范围切换按钮（全部会话/本会话，历史页）：点按切换无弹层 */
 QPushButton#searchScopeBtn {
     background: $search_bg;
@@ -308,6 +323,28 @@ QPushButton#searchScopeBtn {
 }
 QPushButton#searchScopeBtn:hover { background: $separator; }
 QPushButton#searchScopeBtn:pressed { background: $scrollbar_hover; }
+
+/* 搜索范围（全部会话/本会话）：Apple 风格 segmented——外层灰底圆角，
+   选中项白块 + 深字（UI 优化：取代大蓝块；objectName 独立于模板页
+   segGroup，互不影响） */
+QFrame#scopeSeg {
+    background: $search_bg;
+    border-radius: 10px;
+}
+QPushButton#scopeSegBtn {
+    background: transparent;
+    border: none;
+    border-radius: 8px;
+    color: #6E6E73;
+    font-size: 12px;
+    min-height: 28px;   /* 填满外层 seg 36px（减 margins 3×2） */
+}
+QPushButton#scopeSegBtn:hover { background: $hover; }
+QPushButton#scopeSegBtn:checked {
+    background: $window;
+    color: $text;
+    font-weight: 500;
+}
 
 /* 收藏夹触发（收藏夹行，仅收藏夹页显示）：悬停展开浮层面板。
    ⚠️ 必须带背景色——MainWindow 上下文中无背景的控件渲染空白
@@ -424,6 +461,16 @@ QLabel#collectionTitle {
     font-size: 13px;
     font-weight: 600;
     padding: 0 4px;
+}
+
+/* 命名对话框校验错误：红字 + 输入框红框（同名会话/收藏夹新建失败时对话框内报错） */
+QLabel#dialogError {
+    color: #FF3B30;
+    font-size: 12px;
+    font-weight: 600;
+}
+QLineEdit[error="true"] {
+    border: 1px solid #FF3B30;
 }
 """)
 

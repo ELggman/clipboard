@@ -10,9 +10,10 @@
 import logging
 from pathlib import Path
 
-from PySide6.QtCore import QModelIndex, Qt, Signal
+from PySide6.QtCore import QEvent, QModelIndex, Qt, Signal
 from PySide6.QtGui import QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
+    QLabel,
     QListView,
     QListWidget,
     QListWidgetItem,
@@ -46,11 +47,16 @@ class TimelineView(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # 时间段分段选择器（与历史页类型条同款：四周圆角 QSS）
+        # 时间段分段选择器（与历史页类型条同款：四周圆角 QSS）。
+        # ⚠️ 必须整行铺满、不能缩到默认 sizeHint 256px：QSS 胶囊 4 个共
+        # ~272px，容器若是 256px 会把尾部「更早」裁掉、需左右滑动（曾出此 bug）。
+        # 计数标签叠加在透明区右端，不占用布局宽度。
         self._tabs = QListWidget()
         self._tabs.setObjectName("typeTabs")
         self._tabs.setFlow(QListView.Flow.LeftToRight)
-        self._tabs.setFixedHeight(30)
+        # ⚠️ 高度必须 40（与历史页 typeTabs 一致）：QSS item 高 30px + 上下
+        # margin 4px = 38px，容器若 30px 会把选中蓝胶囊上下裁切（曾显示不全）。
+        self._tabs.setFixedHeight(40)
         self._tabs.setSpacing(2)
         self._tabs.setFrameShape(QListWidget.Shape.NoFrame)
         self._tabs.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -58,7 +64,18 @@ class TimelineView(QWidget):
         for label, _ in _BUCKETS:
             self._tabs.addItem(QListWidgetItem(label))
         self._tabs.currentRowChanged.connect(self._on_bucket_selected)
+        self._tabs.installEventFilter(self)  # Resize → 重定位计数标签
         layout.addWidget(self._tabs)
+
+        # 当前时间段条目计数（留白处用途）：切段更新，如「12 条」。
+        # 作为 _tabs 子控件叠加在透明区右端（不挤占胶囊宽度），右缘贴容器边。
+        self._count_label = QLabel("", self._tabs)
+        self._count_label.setObjectName("timelineCount")
+        self._count_label.setAlignment(
+            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight)
+        self._count_label.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents)  # 不挡点击
+        self._position_count_label()
 
         # 条目列表：QListView + HistoryDelegate（与历史页一致的渲染）
         self._model = QStandardItemModel(self)
@@ -95,6 +112,19 @@ class TimelineView(QWidget):
         self._list.setSpacing(max(2, round(4 * scale)))
         self._list.doItemsLayout()
 
+    def eventFilter(self, obj, event) -> bool:
+        """_tabs 尺寸变化 → 计数标签保持贴右端（tabs 铺满页宽，宽恒定）。"""
+        if obj is self._tabs and event.type() == QEvent.Type.Resize:
+            self._position_count_label()
+        return super().eventFilter(obj, event)
+
+    def _position_count_label(self) -> None:
+        """计数标签叠加定位：右缘贴 tabs 右缘（QSS padding-right 12px 留边）。"""
+        self._count_label.adjustSize()
+        w, h = self._count_label.width(), self._count_label.height()
+        self._count_label.setGeometry(self._tabs.width() - w,
+                                      (self._tabs.height() - h) // 2, w, h)
+
     def reload(self) -> None:
         """重载分组数据，保持当前时间段选择。"""
         if self._engine is None:
@@ -104,11 +134,25 @@ class TimelineView(QWidget):
 
     # ---- 渲染 ----
 
+    def _bucket_counts(self) -> dict[str, int]:
+        """各时间段条目数：今天/昨天/本周按桶名，月份桶全归「更早」。"""
+        counts = {"今天": 0, "昨天": 0, "本周": 0, "更早": 0}
+        for label, items in self._groups:
+            if label in counts:
+                counts[label] += len(items)
+            else:  # 「YYYY年M月」月份桶 → 更早
+                counts["更早"] += len(items)
+        return counts
+
     def _on_bucket_selected(self, row: int) -> None:
         self._model.clear()
         if not (0 <= row < len(_BUCKETS)):
             return
         _, match = _BUCKETS[row]
+        # 右侧计数随当前时间段更新（「更早」= 所有月份桶之和）
+        counts = self._bucket_counts()
+        self._count_label.setText(f"{counts[_BUCKETS[row][0]]} 条")
+        self._position_count_label()  # QLabel 不随文本变宽，须重算并贴右
         if match is None:
             # 更早：所有月份桶，带月份标题
             for label, items in self._groups:

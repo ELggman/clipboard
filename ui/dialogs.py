@@ -49,15 +49,21 @@ class ConfirmDialog(QDialog):
 
 
 class NameDialog(QDialog):
-    """单行命名对话框（新建/重命名收藏夹等）。"""
+    """单行命名对话框（新建/重命名收藏夹等）。
+
+    validate: 可选的 `validate(text) -> str | None` 回调——返回非空错误消息时，
+    在输入框下方红字提示且**不关闭对话框**（用于查重等即时校验，实测：仅状态栏
+    提示太弱，用户注意不到，必须停在对话框里报错）。
+    """
 
     def __init__(self, title: str, label: str, initial: str = "",
                  placeholder: str = "", confirm_text: str = "确定",
-                 parent=None):
+                 validate=None, parent=None):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.setModal(True)
         self.setMinimumWidth(320)
+        self._validate = validate
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 16, 20, 16)
@@ -66,8 +72,15 @@ class NameDialog(QDialog):
         layout.addWidget(QLabel(label))
         self._edit = QLineEdit(initial)
         self._edit.setPlaceholderText(placeholder)
-        self._edit.returnPressed.connect(self.accept)  # 回车即确认
+        self._edit.returnPressed.connect(self._on_confirm)  # 回车即确认（走校验）
         layout.addWidget(self._edit)
+
+        # 校验错误红字（默认隐藏；validate 返回消息时显示并阻止关闭）
+        self._error = QLabel("")
+        self._error.setObjectName("dialogError")
+        self._error.setWordWrap(True)
+        self._error.hide()
+        layout.addWidget(self._error)
 
         buttons = QHBoxLayout()
         buttons.addStretch(1)
@@ -76,12 +89,33 @@ class NameDialog(QDialog):
         cancel.clicked.connect(self.reject)
         confirm = QPushButton(confirm_text)
         confirm.setObjectName("primaryButton")
-        confirm.clicked.connect(self.accept)
+        confirm.setDefault(True)  # 回车 = 确认：QDialog 默认按钮（取消先建会抢走默认
+        #   按钮 → 回车触发 reject 关对话框而不创建，实测 macOS 踩坑）
+        confirm.clicked.connect(self._on_confirm)
         buttons.addWidget(cancel)
         buttons.addWidget(confirm)
         layout.addLayout(buttons)
 
         self._edit.setFocus()
+
+    def _on_confirm(self) -> None:
+        """确认：validate 通过则 accept，否则红字 + 输入框红框提示保持打开。"""
+        if self._validate is not None:
+            err = self._validate(self._edit.text().strip())
+            if err:
+                self._error.setText(err)
+                self._error.show()
+                # 输入框红框（QSS [error="true"] 属性选择器；重新 polish 生效）
+                self._edit.setProperty("error", "true")
+                self._edit.style().unpolish(self._edit)
+                self._edit.style().polish(self._edit)
+                self._edit.setFocus()
+                return
+        self._error.hide()
+        self._edit.setProperty("error", "")
+        self._edit.style().unpolish(self._edit)
+        self._edit.style().polish(self._edit)
+        self.accept()
 
     def showEvent(self, event) -> None:
         super().showEvent(event)

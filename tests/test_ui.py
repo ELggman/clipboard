@@ -756,6 +756,90 @@ def test_timeline_view_grouped(tmp_path):
     view.close()
 
 
+def test_timeline_tabs_bar_matches_history_style(tmp_path):
+    """时间线「今天/昨天/本周/更早」条高度与历史页「全部/文本…」条一致。
+
+    回归：时间线条曾用 setFixedHeight(30)，而 QSS item 高 30px + 上下
+    margin 4px = 38px → 选中蓝胶囊被上下裁切（显示不全）。须与历史页
+    typeTabs 同为 40px，胶囊完整可见。
+    """
+    from database.engine import create_db_engine
+    from database.migrations import migrate
+    from ui.history_view import HistoryView
+    from ui.timeline_view import TimelineView
+
+    engine = create_db_engine(tmp_path / "tabs.db")
+    migrate(engine)
+
+    t = TimelineView()
+    t.set_context(engine)
+    t.resize(420, 700)
+    t.show()
+    pytest_app.processEvents()
+    h = HistoryView()
+    h.resize(420, 700)
+    h.show()
+    pytest_app.processEvents()
+
+    # 高度一致：QSS 胶囊（30px + 上下 margin 4px）完整落在 40px 容器内
+    assert t._tabs.height() == h._type_tabs.height() == 40
+    item = t._tabs.visualItemRect(t._tabs.item(0))
+    assert item.bottom() <= t._tabs.height(), "胶囊被容器裁切"
+    # 分段条铺满页宽：回归——曾卡在默认 sizeHint 256px，QSS 生效后 4 个
+    # 胶囊共 ~272px，尾部「更早」被裁、需左右滑动。铺满后内容必 ≤ 页宽。
+    assert t._tabs.width() == t.width(), "分段条未铺满页宽（尾部会被裁）"
+    assert t._tabs.horizontalScrollBar().maximum() == 0, "分段条出现水平滚动"
+    last = t._tabs.visualItemRect(t._tabs.item(t._tabs.count() - 1))
+    assert last.x() + last.width() <= t._tabs.width(), "最后一个分段未完整显示"
+    t.close()
+    h.close()
+
+
+def test_timeline_bucket_count_label(tmp_path):
+    """时间线条右侧计数：随当前时间段更新（更早=月份桶之和），右对齐贴边。
+
+    回归：留白处计数须与选中段同步——切段后数字变、且不与胶囊项重叠。
+    """
+    import datetime
+
+    from database.engine import create_db_engine
+    from database.migrations import migrate
+    from sqlalchemy import text
+    from ui.timeline_view import TimelineView
+
+    engine = create_db_engine(tmp_path / "cnt.db")
+    migrate(engine)
+    now = datetime.datetime.now()
+    with engine.begin() as conn:
+        for name, days in (("t1", 0), ("t2", 0), ("y1", 1),
+                           ("o1", 40), ("o2", 41), ("o3", 80)):
+            conn.execute(text(
+                "INSERT INTO clipboard_items (type, content, preview, hash,"
+                " favorite, pinned, created_at, updated_at) VALUES"
+                " ('text', :c, :c, :h, 0, 0, :t, :t)"),
+                {"c": name, "h": name, "t": now - datetime.timedelta(days=days)})
+
+    view = TimelineView()
+    view.set_context(engine)
+    view.resize(420, 700)
+    view.show()
+    pytest_app.processEvents()
+
+    assert view._count_label.text() == "2 条"     # 今天 x2
+    view._tabs.setCurrentRow(1)
+    pytest_app.processEvents()
+    assert view._count_label.text() == "1 条"     # 昨天 x1
+    view._tabs.setCurrentRow(3)
+    pytest_app.processEvents()
+    assert view._count_label.text() == "3 条"     # 更早：40/41/80 天 3 条
+    # 计数右对齐贴边，且不压到左侧胶囊项
+    assert view._count_label.x() + view._count_label.width() == view.width()
+    last_item_right = (view._tabs.visualItemRect(view._tabs.item(3)).x()
+                       + view._tabs.visualItemRect(view._tabs.item(3)).width())
+    assert last_item_right < view._count_label.x(), "计数与胶囊重叠"
+    view.close()
+
+
 def test_history_menu_add_to_collection(tmp_path):
     """右键菜单「加入收藏夹」：收藏夹列表 + 触发加入。"""
     from database.engine import create_db_engine
@@ -1081,9 +1165,13 @@ def test_context_menu_bottom_row_hit(tmp_path):
     view.show()
     pytest_app.processEvents()
 
-    # 底部可见行的 viewport 坐标
+    # 底部可见行的 viewport 坐标（向上扫描避开行间 spacing——
+    # 行高/间距随 UI 优化可变，固定 -8 可能落在间隙导致命中失败）
     vp = view._list.viewport()
-    bottom_pos = QPoint(200, vp.height() - 8)
+    y = vp.height() - 2
+    while y > 4 and not view._list.indexAt(QPoint(200, y)).isValid():
+        y -= 1
+    bottom_pos = QPoint(200, y)
     bottom_index = view._list.indexAt(bottom_pos)
     assert bottom_index.isValid(), "底部行应可命中"
 
@@ -1202,15 +1290,17 @@ def test_history_delete_key_removes_item(tmp_path):
 
 
 def test_main_window_privacy_status_label():
-    """状态栏隐私指示：暂停/恢复切换文案（§9.4）。"""
+    """状态栏隐私指示：暂停/恢复切换文案（§9.4，● 绿点样式）。"""
     from ui.main_window import MainWindow
 
     w = MainWindow()
-    assert "📋" in w._privacy_label.text()
+    assert "● 监控中" in w._privacy_label.text()
     w.set_privacy_status(True)
-    assert "🔒" in w._privacy_label.text()
+    assert "● 监控已暂停" in w._privacy_label.text()
+    assert w._privacy_label.property("paused") is True
     w.set_privacy_status(False)
-    assert "📋" in w._privacy_label.text()
+    assert "● 监控中" in w._privacy_label.text()
+    assert w._privacy_label.property("paused") is False
     w.close()
 
 
@@ -1330,13 +1420,15 @@ def test_app_picker_lists_installed_apps():
 
 
 def test_code_meta_shows_pin_and_favorite_marks():
-    """代码条目置顶/收藏后 meta 显示 📌/★（与其他类型一致）。"""
+    """代码条目置顶/收藏后 meta 显示 📌/★（与其他类型一致；语言 emoji 已
+    移除——UI 优化改线性类型图标，meta 只保留语言名）。"""
     from ui.history_view import HistoryDelegate
 
     item = ClipboardItem(type="code", content="def f():\n    pass",
                          language="python", line_count=2,
                          created_at="08-07 10:00")
-    assert "🐍 Python" in HistoryDelegate._code_meta(item)
+    assert "Python" in HistoryDelegate._code_meta(item)
+    assert "🐍" not in HistoryDelegate._code_meta(item)
     item.pinned = 1
     assert "📌" in HistoryDelegate._code_meta(item)
     item.favorite = 1
@@ -2064,6 +2156,376 @@ def test_templates_view_context_menu_favorite_and_move(tmp_path):
     pytest_app.processEvents()
     assert any("tctx" in view._list.item(r).text()
                for r in range(view._list.count()))
+    view.close()
+
+
+def test_template_page_middle_auto_fit(tmp_path):
+    """模板页中间栏随窗口自适应：左列 160 + 页边距 8，middle 自动填满、右缘不溢出、无横滚条。
+
+    回归：旧 setFixedWidth(280) 与左列 160 + 边距 恒 > 420 窗口，右缘被裁 ~64px
+    （用户反馈"怎么调都调不好"）。现在 middle 宽由 _apply_middle_width 按窗口计算。
+    """
+    from database.engine import create_db_engine
+    from database.migrations import migrate
+    from services.template_service import TemplateService
+    from ui.templates_view import (
+        _ENTRY_WIDTH,
+        _LEFT_WIDTH,
+        _PAGE_MARGIN,
+        TemplatesView,
+    )
+
+    engine = create_db_engine(tmp_path / "fit.db")
+    migrate(engine)
+    svc = TemplateService(engine)
+    svc.create_template("一条特别长的模板名称用于验证自适应宽度", "fit", "x")
+    view = TemplatesView()
+    view.set_context(engine)
+    view.resize(400, 600)
+    view.show()
+    pytest_app.processEvents()
+
+    # 布局常量块存在（手动调整模板条目宽度的接口）
+    assert _PAGE_MARGIN == 8 and _LEFT_WIDTH == 160 and _ENTRY_WIDTH == 0
+    # 中间栏 = 窗口 − 左右页边距 − 左列 − cards 间距 12
+    assert view._middle.width() == 400 - 2 * _PAGE_MARGIN - _LEFT_WIDTH - 12
+    # 右缘不超出窗口（完整显示，不再被裁）
+    right = view._middle.mapTo(view, view._middle.rect().topRight()).x()
+    assert right <= view.width()
+    # 列表无横向滚轮条
+    assert view._list.horizontalScrollBar().maximum() == 0
+    assert view._list.horizontalScrollBarPolicy() == \
+        Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+    view.close()
+
+
+def test_template_pan_wheel_moves_row(tmp_path):
+    """触摸板/横向滚轮横滑 → 鼠标下条目内容平移（不显示滚轮）。"""
+    from PySide6.QtCore import QPoint, QPointF
+    from PySide6.QtGui import QWheelEvent
+
+    from database.engine import create_db_engine
+    from database.migrations import migrate
+    from services.template_service import TemplateService
+    from ui.templates_view import TemplatesView
+
+    engine = create_db_engine(tmp_path / "pan.db")
+    migrate(engine)
+    svc = TemplateService(engine)
+    svc.create_template("一个特别长的模板名称用于横向平移测试", "pw", "x")
+    view = TemplatesView()
+    view.set_context(engine)
+    view.resize(400, 600)
+    view.show()
+    pytest_app.processEvents()
+    row = next(r for r in range(view._list.count())
+               if "pw" in view._list.item(r).text())
+    view._list.setCurrentRow(row)
+    pytest_app.processEvents()
+    pos = view._list.visualItemRect(view._list.item(row)).center()
+
+    # 横滑（angleDelta.x=-120，向左滑 → 显示右端内容，方向与原生横向滚轮一致）
+    ev = QWheelEvent(QPointF(pos), QPointF(pos), QPoint(0, 0), QPoint(-120, 0),
+                     Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+                     Qt.ScrollPhase.NoScrollPhase, False)
+    QApplication.sendEvent(view._list.viewport(), ev)
+    pytest_app.processEvents()
+    assert view._pan.get(row, 0) > 0
+    view.close()
+
+
+def test_template_vertical_wheel_micro_dx_does_not_pan(tmp_path):
+    """上下滚轮的微小横向分量（trackpad dx=±1~2）不得触发条目平移/整视口重绘。
+
+    回归：旧判定 dx!=0 会把纵向滚轮里的 dx=1~2 当横向滑吞掉，逐事件
+    viewport().update() → 上下滚动明显卡顿（用户反馈）。修复后：
+    - |dx|<|dy| 归为纵向 → 事件透传给列表滚动（scrollbar 动）
+    - _set_pan 无变化时 no-op（不触发重绘）
+    横滑仍正常（dx=-120 单独测，见 test_template_pan_wheel_moves_row）。
+    """
+    from PySide6.QtCore import QPoint, QPointF
+    from PySide6.QtGui import QWheelEvent
+
+    from database.engine import create_db_engine
+    from database.migrations import migrate
+    from services.template_service import TemplateService
+    from ui.templates_view import TemplatesView
+
+    engine = create_db_engine(tmp_path / "vwheel.db")
+    migrate(engine)
+    svc = TemplateService(engine)
+    for i in range(8):  # 多条目使列表可纵向滚动
+        svc.create_template(f"纵向滚动条目{i}——名称足够长以产生横向溢出", f"vw{i}", "x")
+    view = TemplatesView()
+    view.set_context(engine)
+    view.resize(400, 600)
+    view.show()
+    pytest_app.processEvents()
+    row = next(r for r in range(view._list.count())
+               if "vw0" in view._list.item(r).text())
+    view._list.setCurrentRow(row)
+    pytest_app.processEvents()
+    sb = view._list.verticalScrollBar()
+    base = sb.value()
+    # 插桩 _set_pan：纵向滚轮若被误判成横滑，会走 _pan_step → _set_pan
+    # → viewport().update()（卡顿根因）。数调用次数即数误判次数。
+    calls = {"n": 0}
+    orig_set_pan = view._set_pan
+
+    def counting_set_pan(row, offset):
+        calls["n"] += 1
+        orig_set_pan(row, offset)
+
+    view._set_pan = counting_set_pan
+
+    pos = view._list.visualItemRect(view._list.item(row)).center()
+    # 5 个「纵向主导但带 dx=1 噪声」的滚轮事件（真实 trackpad 垂直滚动形态）
+    for _ in range(5):
+        ev = QWheelEvent(QPointF(pos), QPointF(pos), QPoint(1, -120),
+                         QPoint(1, -120), Qt.MouseButton.NoButton,
+                         Qt.KeyboardModifier.NoModifier,
+                         Qt.ScrollPhase.NoScrollPhase, False)
+        QApplication.sendEvent(view._list.viewport(), ev)
+        pytest_app.processEvents()
+    # 列表滚动条位置变化了（事件透传），但 _set_pan 一次都没被调用
+    assert sb.value() != base, "纵向滚轮事件应透传给滚动条"
+    assert calls["n"] == 0, "纵向滚轮的微小 dx 不应触发平移路径（卡顿根因）"
+    # 横向平移未受影响（_pan 值全为 0，没有被误写成正偏移）
+    assert max(view._pan.values(), default=0) == 0
+    view.close()
+
+
+def test_template_pan_delegate_shifts_content(tmp_path):
+    """delegate 绘制真正应用 _pan：长条目平移后名称像素变化、★ 固定右缘。
+
+    回归：delegate 曾用 self.parent()（=QListWidget）读 _pan 拿到 None，
+    平移只在 view 侧字典生效、画面不动——须显式传 TemplatesView 引用。
+    """
+    from database.engine import create_db_engine
+    from database.migrations import migrate
+    from services.template_service import TemplateService
+    from ui.templates_view import TemplatesView
+
+    engine = create_db_engine(tmp_path / "dlen.db")
+    migrate(engine)
+    svc = TemplateService(engine)
+    tid = svc.create_template("一条特别长的模板名称用于验证 delegate 是否应用平移偏移", "long", "x")
+    svc.toggle_favorite(tid)  # 金星 ★ 便于识别星标区
+    view = TemplatesView()
+    view.set_context(engine)
+    view.resize(400, 600)
+    view.show()
+    pytest_app.processEvents()
+    row = next(r for r in range(view._list.count())
+               if "long" in view._list.item(r).text())
+
+    a = view._list.viewport().grab().toImage()
+    view._pan[row] = 60
+    view._list.viewport().update()
+    pytest_app.processEvents()
+    b = view._list.viewport().grab().toImage()
+
+    name_diff = 0
+    star_diff = 0
+    for y in range(7, 30):  # 名称行
+        for x in range(a.width()):
+            pa, pb = a.pixelColor(x, y), b.pixelColor(x, y)
+            delta = (abs(pa.red() - pb.red()) + abs(pa.green() - pb.green())
+                     + abs(pa.blue() - pb.blue()))
+            if delta > 60:
+                if x < 148:  # 内容区（★ 在右缘 150+）
+                    name_diff += 1
+                else:
+                    star_diff += 1
+    assert name_diff > 50   # 内容已平移
+    assert star_diff == 0   # ★ 固定右缘不随内容动
+    view.close()
+
+
+def test_template_pan_drag_swallows_click(tmp_path):
+    """鼠标按住拖动 → 条目平移且不误开编辑弹窗；普通点击仍打开编辑。"""
+    from PySide6.QtCore import QEvent, QPointF
+    from PySide6.QtGui import QMouseEvent
+
+    from database.engine import create_db_engine
+    from database.migrations import migrate
+    from services.template_service import TemplateService
+    from ui.templates_view import TemplatesView
+
+    engine = create_db_engine(tmp_path / "drg.db")
+    migrate(engine)
+    svc = TemplateService(engine)
+    svc.create_template("超长模板名称用于验证按住拖动平移的交互", "drg", "x")
+    view = TemplatesView()
+    view.set_context(engine)
+    view.resize(400, 600)
+    view.show()
+    pytest_app.processEvents()
+    row = next(r for r in range(view._list.count())
+               if "drg" in view._list.item(r).text())
+    view._list.setCurrentRow(row)
+    pytest_app.processEvents()
+    pos = view._list.visualItemRect(view._list.item(row)).center()
+
+    opened = []
+    orig = view._open_editor
+    view._open_editor = lambda template=None: opened.append(True)
+    try:
+        # 拖动 >4px → 平移；释放时吃掉事件 → 不打开编辑器
+        QApplication.sendEvent(view._list.viewport(), QMouseEvent(
+            QEvent.Type.MouseButtonPress, QPointF(pos), QPointF(pos),
+            Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier))
+        pytest_app.processEvents()
+        before = view._pan.get(row, 0)
+        p2 = QPointF(pos.x() - 40, pos.y())
+        QApplication.sendEvent(view._list.viewport(), QMouseEvent(
+            QEvent.Type.MouseMove, p2, p2, Qt.MouseButton.NoButton,
+            Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier))
+        pytest_app.processEvents()
+        QApplication.sendEvent(view._list.viewport(), QMouseEvent(
+            QEvent.Type.MouseButtonRelease, p2, p2, Qt.MouseButton.LeftButton,
+            Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier))
+        pytest_app.processEvents()
+        assert view._pan.get(row, 0) > before          # 已平移
+        assert not opened                              # 未误开编辑
+
+        # 普通点击（原地按下释放）→ 打开编辑
+        QApplication.sendEvent(view._list.viewport(), QMouseEvent(
+            QEvent.Type.MouseButtonPress, QPointF(pos), QPointF(pos),
+            Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier))
+        pytest_app.processEvents()
+        QApplication.sendEvent(view._list.viewport(), QMouseEvent(
+            QEvent.Type.MouseButtonRelease, QPointF(pos), QPointF(pos),
+            Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton,
+            Qt.KeyboardModifier.NoModifier))
+        pytest_app.processEvents()
+        assert opened
+    finally:
+        view._open_editor = orig
+    view.close()
+
+
+def test_template_pan_star_zone_still_toggles(tmp_path):
+    """★ 点击区不受平移影响：点行尾 ★ 仍切换收藏，且不进拖拽状态。"""
+    from PySide6.QtCore import QEvent, QPoint, QPointF
+    from PySide6.QtGui import QMouseEvent
+
+    from database.engine import create_db_engine
+    from database.migrations import migrate
+    from services.template_service import TemplateService
+    from ui.template_components import STAR_ZONE
+    from ui.templates_view import TemplatesView
+
+    engine = create_db_engine(tmp_path / "star.db")
+    migrate(engine)
+    svc = TemplateService(engine)
+    svc.create_template("名称", "star", "x")
+    view = TemplatesView()
+    view.set_context(engine)
+    view.resize(400, 600)
+    view.show()
+    pytest_app.processEvents()
+    row = next(r for r in range(view._list.count())
+               if "star" in view._list.item(r).text())
+    view._list.setCurrentRow(row)
+    pytest_app.processEvents()
+    rect = view._list.visualItemRect(view._list.item(row))
+    star_pos = QPoint(rect.right() - STAR_ZONE // 2, rect.top() + 12)
+
+    QApplication.sendEvent(view._list.viewport(), QMouseEvent(
+        QEvent.Type.MouseButtonPress, QPointF(star_pos), QPointF(star_pos),
+        Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier))
+    pytest_app.processEvents()
+    assert svc.get_template(view._templates[row]["id"])["favorite"] is True
+    assert view._pan_state is None   # ★ 点击不进拖拽平移
+    view.close()
+
+
+def test_template_all_rows_render_content(tmp_path):
+    """多行模板全部渲染出内容（非仅第一行）。
+
+    回归：delegate 的 content_clip 高度误用绝对 name_rect.top()，row≥1 时
+    算出负数高度 → 空 clip → 除第一行外名称/钥匙片/触发全不绘制，只剩 ★。
+    """
+    from database.engine import create_db_engine
+    from database.migrations import migrate
+    from services.template_service import TemplateService
+    from ui.templates_view import TemplatesView
+
+    engine = create_db_engine(tmp_path / "rows.db")
+    migrate(engine)
+    svc = TemplateService(engine)
+    for name in ("第一个模板", "第二个模板名字长一些", "第三个模板"):
+        svc.create_template(name, name[:2], "x")
+    view = TemplatesView()
+    view.set_context(engine)
+    view.resize(400, 600)
+    view.show()
+    pytest_app.processEvents()
+
+    img = view._list.viewport().grab().toImage()
+    ok_rows = 0
+    for name in ("第一个模板", "第二个模板名字长一些", "第三个模板"):
+        row = next(r for r in range(view._list.count())
+                   if name in view._list.item(r).text())
+        rect = view._list.visualItemRect(view._list.item(row))
+        content = 0
+        for y in range(rect.top(), rect.bottom()):
+            for x in range(rect.left(), rect.right()):
+                c = img.pixelColor(x, y)
+                if c.red() != 255 or c.green() != 255 or c.blue() != 255:
+                    content += 1
+        ok_rows += content > 400   # 完整内容（名称+钥匙片+★）；仅 ★ 只有 ~100
+    assert ok_rows == 3
+    view.close()
+
+
+def test_template_star_click_at_drawn_position(tmp_path):
+    """点击星标字形实际位置 → 收藏切换，且不误开编辑面板。
+
+    回归：sizeHint 曾把条目撑到 220（超出视口），visualItemRect 与绘制
+    option.rect 右侧差 8px → 命中区右偏 → 对准可见星标点击落入条目体，
+    释放后打开编辑面板。点击区须用 delegate 同一 ROW_INSET 内缩值。
+    """
+    from PySide6.QtCore import QEvent, QPoint, QPointF
+    from PySide6.QtGui import QMouseEvent
+
+    from database.engine import create_db_engine
+    from database.migrations import migrate
+    from services.template_service import TemplateService
+    from ui.template_components import ROW_INSET, STAR_ZONE
+    from ui.templates_view import TemplatesView
+
+    engine = create_db_engine(tmp_path / "starpos.db")
+    migrate(engine)
+    svc = TemplateService(engine)
+    svc.create_template("名称", "sp", "x")
+    view = TemplatesView()
+    view.set_context(engine)
+    view.resize(400, 600)
+    view.show()
+    pytest_app.processEvents()
+    row = next(r for r in range(view._list.count())
+               if "sp" in view._list.item(r).text())
+    rect = view._list.visualItemRect(view._list.item(row))
+    # 星标字形中心 = 行右缘减 ROW_INSET 内缩后星标区的中心
+    star_x = rect.right() - ROW_INSET - STAR_ZONE // 2
+    star_y = rect.top() + 4 + 13
+
+    opened = []
+    view._open_editor = lambda t: opened.append(t["name"])
+    vp = view._list.viewport()
+    for ev_type in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonRelease):
+        QApplication.sendEvent(vp, QMouseEvent(
+            ev_type, QPointF(QPoint(star_x, star_y)),
+            QPointF(QPoint(star_x, star_y)), Qt.MouseButton.LeftButton,
+            Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier))
+    pytest_app.processEvents()
+    assert svc.get_template(view._templates[row]["id"])["favorite"] is True
+    assert opened == []   # 星标点击不打开编辑面板
     view.close()
 
 

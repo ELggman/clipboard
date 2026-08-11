@@ -13,6 +13,7 @@ import logging
 
 from PySide6.QtCore import QEvent, QModelIndex, QRect, QSize, Qt, Signal
 from PySide6.QtGui import (
+    QColor,
     QContextMenuEvent,
     QFont,
     QFontMetrics,
@@ -33,6 +34,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMenu,
     QPushButton,
+    QSizePolicy,
     QStyledItemDelegate,
     QStyle,
     QVBoxLayout,
@@ -40,6 +42,9 @@ from PySide6.QtWidgets import (
 )
 
 logger = logging.getLogger(__name__)
+
+from ui.animations import HoverAnimator
+from ui.icons import icon as ui_icon
 
 ROLE_ITEM = Qt.ItemDataRole.UserRole + 1  # QStandardItem 里存 ClipboardItem
 ROLE_HEADER = Qt.ItemDataRole.UserRole + 2  # 时间线月份标题（无条目数据）
@@ -50,10 +55,12 @@ TYPE_FILTERS = [("", "全部"), ("text", "文本"), ("url", "URL"),
 
 # ---- 基准尺寸（scale=1，即窗口宽度 380px 初始/最小档）----
 # 所有几何值 = 基准 × scale，随窗口宽度等比例放大（HistoryView.resizeEvent 驱动）
+# UI 优化（历史页 Refinement）：行高 44→64、圆角 12、正文 15px，
+# 列表浅灰底 + 条目正常透明/hover 白/选中淡蓝+左蓝条（用户设计规范）
 BASE_WIDTH = 380            # 基准宽度（与 main_window 初始/最小宽度一致）
-BASE_FONT_PX = 14           # 主文字像素（13 → 14，初始档更大）
+BASE_FONT_PX = 15           # 主文字像素（14 → 15，正文 1~2 行 elide）
 BASE_FONT_SMALL_PX = 12     # 次要文字像素（时间/类型/文件名）
-ROW_HEIGHT_BASE = 44        # 文本条目行高（两行，收紧原 48 的底部空白）
+ROW_HEIGHT_BASE = 64        # 文本条目行高（两行舒展：meta + 正文）
 THUMB_SIZE_BASE = 68        # 图片条目缩略图边长
 _CAPTION_LINE_H = 18        # 文件名行高（换行按行数累加）
 _TOP_PAD = 10               # 缩略图顶部间距
@@ -62,13 +69,17 @@ _TIME_LINE_H = 16           # 时间·类型行高
 _NAME_GAP = 2               # 时间行与文件名间距
 _BOTTOM_PAD = 8             # 底部间距
 _MARGIN_X = 12              # 文本左/右留白
-_RADIUS = 8                 # 选中/hover 圆角
+_RADIUS = 12                # 选中/hover 圆角（8 → 12，Apple 更柔）
+# 两行文本布局（行高 64）：meta 基线 top+19 / 正文基线 top+45
+_META_BASE = 19
+_TEXT_BASE = 45
+_TYPE_ICON_W = 16           # 类型线性图标（正文行左侧）
+_TYPE_ICON_GAP = 6
 # 代码条目（§8.6）：meta 行 + 预览行数（最多 6 行）+ "+N more lines" 行
 _CODE_LINE_H = 18           # 代码预览行高
 _CODE_PREVIEW_MAX = 6       # 列表最多显示的代码行数
-# 首行代码基线 = 33（与文本行内容基线一致）——之前 26 时字形顶 ≈ meta 基线
-# 附近，内容紧贴时间·类型行（实测踩坑：看起来很靠上）
-_CODE_TOP_GAP = 33
+# 首行代码基线（跟随 meta 基线：meta top+19 + 一行间距）
+_CODE_TOP_GAP = 38
 _HEADER_H = 26               # 时间线月份标题行高
 
 # 导出（scale=1 时的行高，测试用）
@@ -90,6 +101,7 @@ class HistoryDelegate(QStyledItemDelegate):
         self._main_font_px = BASE_FONT_PX        # 基准字号（设置页可调）
         self._small_font_px = BASE_FONT_SMALL_PX
         self._view_session_id: int | None = None  # 当前视图会话（None=全局搜索）
+        self.animator = None  # HoverAnimator（hover 背景过渡，view 装配）
 
     def set_image_service(self, service) -> None:
         self._provider = service
@@ -168,7 +180,9 @@ class HistoryDelegate(QStyledItemDelegate):
         rect = QRect(option.rect).adjusted(1, 1, -1, -1)
         selected = bool(option.state & QStyle.StateFlag.State_Selected)
         hovered = bool(option.state & QStyle.StateFlag.State_MouseOver)
-        self._draw_background(painter, rect, option, selected, hovered)
+        hover_alpha = (self.animator.alpha(index.row())
+                       if self.animator else (1.0 if hovered else 0.0))
+        self._draw_background(painter, rect, option, selected, hover_alpha)
 
         if item is None:
             painter.restore()
@@ -194,16 +208,39 @@ class HistoryDelegate(QStyledItemDelegate):
         painter.drawText(rect.left() + self._s(_MARGIN_X),
                          rect.top() + self._s(_HEADER_H - 8), label)
 
-    def _draw_background(self, painter, rect, option, selected, hovered) -> None:
+    # 类型→线性图标（正文行左侧；敏感优先 lock）
+    _TYPE_ICONS = {"text": "text", "url": "link", "file": "file", "code": "code"}
+
+    def _type_icon(self, item) -> str:
+        if item.sensitive:
+            return "lock"
+        return self._TYPE_ICONS.get(item.type, "text")
+
+    def _draw_background(self, painter, rect, option, selected,
+                         hover_alpha) -> None:
         path = QPainterPath()
         path.addRoundedRect(rect, self._s(_RADIUS), self._s(_RADIUS))
         if selected:
-            painter.fillPath(path, option.palette.highlight())
-        elif hovered:
-            painter.fillPath(path, option.palette.midlight())
-        else:
-            # 常态浅色卡片底色：白底上与间隔配合，条目区分度更高
-            painter.fillPath(path, option.palette.alternateBase())
+            # 选中：淡蓝底（≈ rgba(0,122,255,0.10)）+ 左侧 2px accent 竖条
+            bg = QColor(option.palette.highlight().color())
+            bg.setAlpha(round(255 * 0.12))
+            painter.fillPath(path, bg)
+            painter.save()
+            painter.setClipPath(path)
+            painter.fillRect(QRect(rect.left(), rect.top(),
+                                   self._s(2), rect.height()),
+                             option.palette.link().color())
+            painter.restore()
+        elif hover_alpha > 0:
+            # hover：白底过渡（浅色主题 palette.Base；深色主题半透明白，
+            # 避免比列表浅灰背景更暗）。HoverAnimator alpha 驱动
+            if option.palette.window().color().lightness() < 128:
+                bg = QColor(255, 255, 255)
+                bg.setAlpha(round(60 * hover_alpha))
+            else:
+                bg = QColor(option.palette.base().color())
+                bg.setAlpha(round(255 * hover_alpha))
+            painter.fillPath(path, bg)
 
     def _draw_text_row(self, painter, rect, option, item) -> None:
         # QPalette 颜色取值返回 QBrush，setPen 只收 QColor → 统一 .color()
@@ -214,23 +251,27 @@ class HistoryDelegate(QStyledItemDelegate):
 
         if item is None:
             return
-        # 注意：drawText 的 y 是基线，字形会向上延伸 ascent 像素。
-        # 基线 = top+15（12px 字 ascent≈10）→ 字形顶 ≈ top+5，完整落在
-        # 高亮框（top+1）内——之前 top+7 时字形顶 ≈ top-3，超出高亮 3px
-        # （ASCII 像素可视化实测：时间·类型顶部被高亮框截断）
+        mx = self._s(_MARGIN_X)
         # 第一行：[会话名] 📌(置顶) 时间 · 类型 · 来源软件（小号次要色）
         painter.setPen(secondary)
         meta = self._session_tag(item) + self._meta_line(item)
         self._draw_line(painter, meta,
-                        rect.left() + self._s(_MARGIN_X),
-                        rect.top() + self._s(15), small=True,
-                        avail=rect.width() - 2 * self._s(_MARGIN_X))
-        # 第二行：内容预览（主色，超出 elide）
+                        rect.left() + mx, rect.top() + self._s(_META_BASE),
+                        small=True, avail=rect.width() - 2 * mx)
+        # 第二行：类型图标（16px 线性）+ 内容预览（主色，超出 elide）
+        icon_w = self._s(_TYPE_ICON_W)
+        pix = ui_icon(self._type_icon(item), icon_w, secondary)
+        # 显式目标逻辑尺寸（icon_w×icon_w）：真机 Retina 与普通屏一致，
+        # 避免依赖 pixmap dpr 推断导致图标被放大/裁切（主窗口 nav 同规则）
+        painter.drawPixmap(rect.left() + mx,
+                           rect.top() + self._s(_TEXT_BASE) - self._s(13),
+                           icon_w, icon_w, pix)
+        content_x = rect.left() + mx + self._s(_TYPE_ICON_W + _TYPE_ICON_GAP)
         painter.setPen(text_color)
         self._draw_line(painter, item.display_text(),
-                        rect.left() + self._s(_MARGIN_X),
-                        rect.top() + self._s(33), small=False,
-                        avail=rect.width() - 2 * self._s(_MARGIN_X))
+                        content_x, rect.top() + self._s(_TEXT_BASE),
+                        small=False,
+                        avail=rect.width() - mx - (content_x - rect.left()))
 
     def _draw_image_row(self, painter, rect, option, item) -> None:
         # 缩略图水平居中
@@ -319,13 +360,13 @@ class HistoryDelegate(QStyledItemDelegate):
 
     @staticmethod
     def _code_meta(item) -> str:
-        """代码条目 meta：📌(置顶) ★(收藏) 🐍 Python · 时间 · N 行 · 来源。"""
-        from services.code_detector import LANGUAGE_EMOJI, LANGUAGE_NAMES
+        """代码条目 meta：📌(置顶) ★(收藏) Python · 时间 · N 行 · 来源。"""
+        from services.code_detector import LANGUAGE_NAMES
 
         lang = item.language or "code"
         name = LANGUAGE_NAMES.get(lang, lang)
         marks = ("📌 " if item.pinned else "") + ("★ " if item.favorite else "")
-        meta = (f"{marks}{LANGUAGE_EMOJI.get(lang, '🧾')} {name}"
+        meta = (f"{marks}{name}"
                 f"{' · ' + item.created_at if item.created_at else ''}"
                 f" · {item.line_count or len((item.content or '').splitlines())} 行"
                 f"{' · ' + item.source_app if item.source_app else ''}")
@@ -336,12 +377,21 @@ class HistoryDelegate(QStyledItemDelegate):
                       option.state & QStyle.StateFlag.State_Selected
                       else option.palette.text().color())
         secondary = option.palette.placeholderText().color()
+        mx = self._s(_MARGIN_X)
+        content_x = rect.left() + mx + self._s(_TYPE_ICON_W + _TYPE_ICON_GAP)
+        avail = rect.width() - mx - (content_x - rect.left())
 
-        # meta：[会话名] 📌 ★ 🐍 Python · 08-06 18:00 · 8 行 · 来源
+        # meta：[会话名] 📌 ★ Python · 08-06 18:00 · 8 行 · 来源
         painter.setPen(secondary)
         self._draw_line(painter, self._session_tag(item) + self._code_meta(item),
-                        rect.left() + self._s(_MARGIN_X), rect.top() + self._s(15),
-                        small=True, avail=rect.width() - 2 * self._s(_MARGIN_X))
+                        rect.left() + mx, rect.top() + self._s(_META_BASE),
+                        small=True, avail=rect.width() - 2 * mx)
+
+        # 类型图标（code）放代码首行左侧，与首行字形顶对齐
+        pix = ui_icon("code", self._s(_TYPE_ICON_W), secondary)
+        painter.drawPixmap(rect.left() + mx,
+                           rect.top() + self._s(_CODE_TOP_GAP) - self._s(9),
+                           self._s(_TYPE_ICON_W), self._s(_TYPE_ICON_W), pix)
 
         # 代码预览（mono，前 6 行，超出显示 "+N more lines"）
         shown, has_more, total = self._code_preview(item)
@@ -350,14 +400,13 @@ class HistoryDelegate(QStyledItemDelegate):
         y = rect.top() + self._s(_CODE_TOP_GAP)
         for line in shown:
             elided = QFontMetrics(font).elidedText(
-                line, Qt.TextElideMode.ElideRight,
-                rect.width() - 2 * self._s(_MARGIN_X))
+                line, Qt.TextElideMode.ElideRight, avail)
             painter.setPen(text_color)
-            painter.drawText(rect.left() + self._s(_MARGIN_X), y, elided)
+            painter.drawText(content_x, y, elided)
             y += self._s(_CODE_LINE_H)
         if has_more:
             painter.setPen(secondary)
-            painter.drawText(rect.left() + self._s(_MARGIN_X), y,
+            painter.drawText(content_x, y,
                              f"+ {total - len(shown)} more lines")
 
     # ---- 敏感行（§9.18/§9.19）----
@@ -376,16 +425,26 @@ class HistoryDelegate(QStyledItemDelegate):
         marks = ("📌 " if item.pinned else "") + ("★ " if item.favorite else "")
         painter.setPen(secondary)
         self._draw_line(painter, f"🔐 {self._session_tag(item)}{marks}{base}",
-                        rect.left() + self._s(_MARGIN_X), rect.top() + self._s(15),
+                        rect.left() + self._s(_MARGIN_X),
+                        rect.top() + self._s(_META_BASE),
                         small=True, avail=rect.width() - 2 * self._s(_MARGIN_X))
 
         from services.sensitive_detector import mask
 
+        # 内容行：lock 类型图标 + 遮蔽文本（与文本行一致的基线/偏移）
+        mx = self._s(_MARGIN_X)
+        icon_w = self._s(_TYPE_ICON_W)
+        pix = ui_icon("lock", icon_w, secondary)
+        painter.drawPixmap(rect.left() + mx,
+                           rect.top() + self._s(_TEXT_BASE) - self._s(13),
+                           icon_w, icon_w, pix)
+        content_x = rect.left() + mx + self._s(_TYPE_ICON_W + _TYPE_ICON_GAP)
         painter.setPen(text_color)
         self._draw_line(painter, mask(item.content or item.preview,
                                       item.sensitive_type),
-                        rect.left() + self._s(_MARGIN_X), rect.top() + self._s(33),
-                        small=False, avail=rect.width() - 2 * self._s(_MARGIN_X))
+                        content_x, rect.top() + self._s(_TEXT_BASE),
+                        small=False,
+                        avail=rect.width() - mx - (content_x - rect.left()))
 
     @staticmethod
     def _caption_lines(text: str, font: QFont, avail_width: int) -> int:
@@ -441,17 +500,30 @@ class HistoryView(QWidget):
         self._list.setModel(self._model)
         self._delegate = HistoryDelegate(self._list)
         self._list.setItemDelegate(self._delegate)
+        # hover 背景过渡（150-200ms，QTimer 驱动；list 已开 MouseTracking）
+        self._delegate.animator = HoverAnimator(self._list, self._delegate)
         self._list.clicked.connect(self._on_item_clicked)  # 单击展开详情
+
+        # 空态提示：覆盖列表视口，无内容时居中显示（搜索无匹配 / 会话暂无内容 /
+        # 类型筛选滤空）。复用 emptyHint QSS（次要灰字，与收藏夹/模板页一致）。
+        self._list_empty = QLabel("")
+        self._list_empty.setObjectName("emptyHint")
+        self._list_empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._list_empty.setWordWrap(True)
+        self._list_empty.setParent(self._list.viewport())
+        self._list_empty.hide()
 
         # 顶部类型筛选条（全部 / 文本 / URL / 图片 / 文件）
         # 状态先于控件初始化：setCurrentRow(0) 会同步触发 _on_type_filter
-        # → _apply_type_filter，需 _filter_type/_all_items 已存在（实测崩）
+        # → _apply_type_filter → _update_list_empty，需这些状态已存在（实测崩）
         self._filter_type = ""  # 当前类型筛选
         self._all_items: list = []  # set_items 传入的完整数据（筛选前）
+        self._view_session_id: int | None = 1  # 当前视图会话（None=全局搜索）
+        self._search_query = ""          # 当前搜索关键词（空态文案用；随会话切换清空）
         self._type_tabs = QListWidget()
         self._type_tabs.setObjectName("typeTabs")  # 独立样式：四周圆角（theme.py）
         self._type_tabs.setFlow(QListView.Flow.LeftToRight)
-        self._type_tabs.setFixedHeight(30)
+        self._type_tabs.setFixedHeight(40)  # 类型筛选条（UI 优化：40px）
         self._type_tabs.setSpacing(2)
         self._type_tabs.setFrameShape(QListWidget.Shape.NoFrame)
         self._type_tabs.setHorizontalScrollBarPolicy(
@@ -475,43 +547,60 @@ class HistoryView(QWidget):
         self._session_service = None
         self._on_active_changed = None   # 切换会话 → 持久化激活（bootstrap 闭包）
         self._delete_policy = "move"     # 删除会话策略（move/delete，设置页可配）
-        self._view_session_id: int | None = 1  # 当前视图会话（None=全局搜索）
+        self._sessions_meta: dict = {}   # {会话id: created_at} —— 右侧「创建于」标签数据
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # 会话行：标注 + 下拉 + 三个独立管理按钮（⋯ 菜单已展开为按钮，
-        # Apple 风格；下拉限宽防长会话名撑爆整行）
+        # 会话行：标注 + 下拉 + ⋯ 管理菜单（新建/重命名/删除收纳进菜单，
+        # 减少视觉噪声——Apple 风格；下拉限宽防长会话名撑爆整行）
         session_row = QHBoxLayout()
         session_row.setContentsMargins(8, 2, 8, 2)
-        session_row.setSpacing(4)
+        session_row.setSpacing(6)
         self._session_tag_label = QLabel("当前会话：")
         self._session_tag_label.setFixedHeight(30)  # 与下拉等高（纯文本无背景）
+        # ⚠️ 必须限宽（Maximum）：combo 被 maxWidth 截断后，布局会把
+        #    剩余空间塞给可伸展的 QLabel，导致「当前会话：」与下拉之间
+        #    出现大片空白（实测 tag 被拉宽到 172 vs sizeHint 62）。限宽后
+        #    标签保持固有宽度，combo 紧跟其右、无中间空隙。
+        self._session_tag_label.setSizePolicy(
+            QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
         session_row.addWidget(self._session_tag_label)
         self._session_combo = QComboBox()
         self._session_combo.setObjectName("sessionCombo")
-        # 弹出列表宽度由内容自适应：会话名可能较长（「论文写作优化 · 123 条」），
-        # 默认跟随按钮会裁切，固定 min-width 又过宽（实测）
-        self._session_combo.view().setSizeAdjustPolicy(
-            QAbstractScrollArea.SizeAdjustPolicy.AdjustToContents)
+        # 按钮宽度随内容自适应（最宽项；长会话名可能到 170 上限省略号），
+        # 弹出列表也随内容。combo 不加 stretch——stretch + maxWidth 会产生
+        # 「超额空间」，Qt 把它分散到各间距造成控件间莫名大留白（实测）
+        self._session_combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToContents)
         self._session_combo.setMaximumWidth(170)  # 按钮超长自动省略号（Apple 风格）
+        # ⚠️ combo 默认 Preferred：无 stretch 时 Qt 仍会把剩余空间喂给它
+        #    （拉到 maxWidth）并把 tag 推开。Maximum 只按 sizeHint 取宽，
+        #    但**行内仍有多余空间**——QBoxLayout 对全 0-stretch 行会把
+        #    剩余空间摊进各 spacing（实测 tag→combo 33px / combo→menu 33px）。
+        #    必须在行尾 addStretch(1) 显式声明：剩余空间全归右边距，
+        #    tag / combo / ⋯ 三者按 sizeHint 紧凑靠左、6px 间距。
+        self._session_combo.setSizePolicy(
+            QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
         self._session_combo.currentIndexChanged.connect(self._on_session_changed)
-        session_row.addWidget(self._session_combo, 1)
-        # 管理按钮：新建 / 重命名 / 删除（替代 ⋯ 菜单；重命名/删除仅非默认会话）
-        self._session_new_btn = QPushButton("新建")
-        self._session_new_btn.setObjectName("ghostBtn")
-        self._session_new_btn.clicked.connect(self._create_session)
-        session_row.addWidget(self._session_new_btn)
-        self._session_rename_btn = QPushButton("重命名")
-        self._session_rename_btn.setObjectName("ghostBtn")
-        self._session_rename_btn.clicked.connect(self._rename_current_session)
-        session_row.addWidget(self._session_rename_btn)
-        self._session_delete_btn = QPushButton("删除")
-        self._session_delete_btn.setObjectName("ghostBtn")
-        self._session_delete_btn.clicked.connect(self._delete_current_session)
-        session_row.addWidget(self._session_delete_btn)
-        self._update_session_buttons()
+        session_row.addWidget(self._session_combo)
+        # ⋯ 管理菜单按钮（QSS sessionMenuBtn：圆形省略号；重命名/删除
+        # 仅对非默认会话可用，在菜单内 disable——见 _show_session_menu）
+        self._session_menu_btn = QPushButton("⋯")
+        self._session_menu_btn.setObjectName("sessionMenuBtn")
+        self._session_menu_btn.setFixedSize(30, 30)
+        self._session_menu_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._session_menu_btn.clicked.connect(self._show_session_menu)
+        session_row.addWidget(self._session_menu_btn)
+        # 剩余空间全给行尾（页面右边距），禁止摊进 spacing 造成控件间留白
+        session_row.addStretch(1)
+        # 会话创建时间（次要灰，靠右）—— 填充 ⋯ 按钮右侧留白（用户指定）
+        self._session_created_label = QLabel("")
+        self._session_created_label.setObjectName("sessionCreated")
+        self._session_created_label.setSizePolicy(
+            QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+        session_row.addWidget(self._session_created_label)
         layout.addLayout(session_row)
 
         layout.addWidget(self._type_tabs)
@@ -678,6 +767,7 @@ class HistoryView(QWidget):
         if self._session_service is None or self._engine is None:
             return
         sessions = self._session_service.list_sessions(self._engine)
+        self._sessions_meta = {s["id"]: s["created_at"] for s in sessions}
         self._session_combo.blockSignals(True)
         self._session_combo.clear()
         for s in sessions:
@@ -685,11 +775,36 @@ class HistoryView(QWidget):
         idx = self._session_combo.findData(active_id)
         self._session_combo.setCurrentIndex(max(0, idx))
         self._session_combo.blockSignals(False)
+        self._update_popup_width()
+        self._update_created_label()
         self.load_session(active_id)
+
+    def _update_popup_width(self) -> None:
+        """下拉弹层随最宽会话名加宽（按钮仍被 maxWidth 170 限制，popup 独立）。
+
+        QComboBox 的 popup 默认宽 = 按钮宽，长会话名会被裁掉末尾（实测
+        「条」字显示不出）。用 view().setMinimumWidth 让弹层 ≥ 最宽项文本，
+        但封顶避免超窗口。短名会话时按短名自适应，不会一直很宽。
+        """
+        cb = self._session_combo
+        fm = QFontMetrics(cb.font())
+        widest = max((fm.horizontalAdvance(cb.itemText(i))
+                      for i in range(cb.count())), default=0)
+        # +38 覆盖 QSS 内边距(4×2) + 下拉箭头 + 滚动条余量；封顶 320 防超窗
+        #（combo 在 x≈76，右侧可用 344px，minWidth 320 → popup 实宽 ~340）
+        cb.view().setMinimumWidth(min(widest + 38, 320))
+
+    def _update_created_label(self) -> None:
+        """右侧「创建于」标签：取当前选中会话的 created_at 显示（次要灰靠右）。"""
+        sid = self._session_combo.currentData()
+        created = self._sessions_meta.get(sid) if self._sessions_meta else None
+        self._session_created_label.setText(
+            f"创建于 {created:%m-%d %H:%M}" if created else "")
 
     def load_session(self, session_id: int) -> None:
         """切换到指定会话视图（delegate 标签状态 + 从数据库加载）。"""
         self._view_session_id = session_id
+        self._search_query = ""
         self._delegate.set_view_session_id(session_id)
         if self._engine is not None:
             from services import history_service
@@ -714,6 +829,7 @@ class HistoryView(QWidget):
             return
         current_id = self._session_combo.currentData()
         sessions = self._session_service.list_sessions(self._engine)
+        self._sessions_meta = {s["id"]: s["created_at"] for s in sessions}
         self._session_combo.blockSignals(True)
         self._session_combo.clear()
         for s in sessions:
@@ -721,41 +837,27 @@ class HistoryView(QWidget):
         idx = self._session_combo.findData(current_id)
         self._session_combo.setCurrentIndex(max(0, idx))
         self._session_combo.blockSignals(False)
+        self._update_popup_width()
+        self._update_created_label()
 
     def set_view_session_id(self, session_id: int | None) -> None:
-        """设置视图会话（不影响数据，只控制 [会话名] 标签显示）。"""
+        """设置视图会话（不影响数据，只控制 [会话名] 标签显示）。
+        切换到具体会话即退出搜索态，清空搜索词（否则空态文案残留旧查询）。"""
         self._view_session_id = session_id
+        if session_id is not None:
+            self._search_query = ""
         self._delegate.set_view_session_id(session_id)
 
     def _on_session_changed(self, row: int) -> None:
         sid = self._session_combo.itemData(row)
         if sid is None or sid == self._view_session_id:
-            self._update_session_buttons()
             return
         self.load_session(sid)
+        self._update_created_label()
         if self._on_active_changed is not None:
             self._on_active_changed(sid)  # bootstrap：持久化 + 主窗口同步
-        self._update_session_buttons()
 
-    # ---- 会话管理按钮（⋯ 菜单展开为独立按钮）----
-
-    def _update_session_buttons(self) -> None:
-        """重命名/删除仅对非默认会话可用（默认会话 id=1）。"""
-        sid = self._session_combo.currentData()
-        enabled = sid is not None and sid != 1
-        self._session_rename_btn.setEnabled(enabled)
-        self._session_delete_btn.setEnabled(enabled)
-
-    def _rename_current_session(self) -> None:
-        sid = self._session_combo.currentData()
-        if sid is not None and sid != 1:
-            self._rename_session(sid)
-
-    def _delete_current_session(self) -> None:
-        sid = self._session_combo.currentData()
-        if sid is not None and sid != 1:
-            self._delete_session(sid)
-        self.feedback.emit("已切换到会话")
+    # ---- 会话管理菜单（⋯ 按钮 → _show_session_menu）----
 
     def _show_session_menu(self) -> None:
         """会话管理菜单：新建 / 重命名当前 / 删除当前。"""
@@ -773,13 +875,31 @@ class HistoryView(QWidget):
         menu.exec(self._session_menu_btn.mapToGlobal(
             self._session_menu_btn.rect().bottomLeft()))
 
+    def _session_validate_name(self, name: str,
+                               exclude_id: int | None = None) -> str | None:
+        """会话名查重（NameDialog validate）：返回错误消息或 None（合法）。
+
+        重命名时排除自身（exclude_id）：保持原名保存不误报。
+        """
+        name = (name or "").strip()
+        if not name:
+            return "名称不能为空"
+        if self._session_service is None or self._engine is None:
+            return None
+        for s in self._session_service.list_sessions(self._engine):
+            if s["name"] == name and s["id"] != exclude_id:
+                logger.info("会话名查重拦截（对话框内红字）: %s", name)
+                return f"「{name}」已存在，请换一个名称"
+        return None
+
     def _create_session(self) -> None:
         if self._session_service is None:
             return
         from ui.dialogs import NameDialog
 
         dialog = NameDialog("新建会话", "名称：", placeholder="如：论文写作优化",
-                            confirm_text="创建")
+                            confirm_text="创建",
+                            validate=self._session_validate_name)
         if dialog.exec() == QDialog.DialogCode.Accepted and dialog.text():
             sid = self._session_service.create_session(self._engine, dialog.text())
             if sid:
@@ -787,21 +907,26 @@ class HistoryView(QWidget):
                 if self._on_active_changed is not None:
                     self._on_active_changed(sid)
                 self.feedback.emit(f"已切换到「{dialog.text()}」")
-                # 重命名/删除按钮按当前会话刷新（reload 可能未触发
-                # currentIndexChanged——实测新增后按钮仍禁用）
-                self._update_session_buttons()
+            else:
+                # 竞态兜底（同名通常已被对话框内校验拦截）
+                self.feedback.emit(f"「{dialog.text()}」已存在，请换一个名称")
 
     def _rename_session(self, session_id: int) -> None:
         if self._session_service is None:
             return
         from ui.dialogs import NameDialog
 
-        dialog = NameDialog("重命名会话", "名称：", confirm_text="保存")
+        dialog = NameDialog("重命名会话", "名称：", confirm_text="保存",
+                            validate=lambda n: self._session_validate_name(
+                                n, exclude_id=session_id))
         if dialog.exec() == QDialog.DialogCode.Accepted and dialog.text():
-            self._session_service.rename_session(self._engine, session_id,
-                                                 dialog.text())
-            self.reload_sessions(self._view_session_id or 1)
-            self._update_session_buttons()
+            ok = self._session_service.rename_session(
+                self._engine, session_id, dialog.text())
+            if ok:
+                self.reload_sessions(self._view_session_id or 1)
+            else:
+                self.feedback.emit(
+                    f"「{dialog.text()}」已存在，请换一个名称")
 
     def _delete_session(self, session_id: int) -> None:
         if self._session_service is None:
@@ -835,7 +960,6 @@ class HistoryView(QWidget):
                 self.feedback.emit(
                     "会话已删除" + ("，内容已移回「普通」"
                                   if self._delete_policy == "move" else ""))
-                self._update_session_buttons()  # 回到默认会话 → 按钮禁用
 
     # ---- 点击 ----
 
@@ -1068,6 +1192,7 @@ class HistoryView(QWidget):
                 1 for it in self._all_items[:pos]
                 if not self._filter_type or it.type == self._filter_type)
             self._model.insertRow(visible_before, self._make_row(clipboard_item))
+            self._update_list_empty()  # 有内容了 → 收起空态提示
 
     # ---- 类型筛选 ----
 
@@ -1081,6 +1206,25 @@ class HistoryView(QWidget):
         for item in self._all_items:
             if not self._filter_type or item.type == self._filter_type:
                 self._model.appendRow(self._make_row(item))
+        self._update_list_empty()
+
+    def _update_list_empty(self) -> None:
+        """列表空态：有行隐藏；否则按上下文显示提示（搜索无匹配/会话为空/筛选滤空）。"""
+        if self._model.rowCount() > 0:
+            self._list_empty.hide()
+            return
+        if self._filter_type and self._all_items:
+            self._list_empty.setText("当前类型筛选下暂无内容")
+        elif self._view_session_id is None:
+            self._list_empty.setText(f"未匹配到「{self._search_query or '…'}」的内容")
+        else:
+            self._list_empty.setText("该会话暂无内容")
+        self._list_empty.setGeometry(self._list.viewport().rect())
+        self._list_empty.show()
+
+    def set_search_query(self, query: str) -> None:
+        """主窗口搜索时注入关键词（空态「未匹配到…」文案用）。"""
+        self._search_query = query
 
     def mark_duplicate(self, clipboard_item) -> None:
         """重复内容：不新增，仅刷新状态栏（列表不动）。"""
