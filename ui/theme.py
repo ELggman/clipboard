@@ -71,26 +71,12 @@ QWidget { color: $text; }
 /* ⚠️ 不要加 QWidget { outline: none; }：实测会干扰 QListView::item:selected
    的背景绘制（选中态渲染成浅色 tint），详见 git 历史 commit 说明 */
 
-/* 顶部导航：水平分段式（Apple 工具栏风格）
-   ⚠️ 选择器必须用 QListView#id（实测 Qt 6.11 macOS 风格忽略
-   QListWidget#id::item:selected，选中背景不生效） */
+/* 顶部导航（Raycast 风格）：透明无边框，项由自绘 delegate 画——
+   默认 16px 次要色；选中 = 蓝胶囊 #007AFF 白字 10px 圆角（设计规范） */
 QListView#topnav {
-    background: $sidebar;
+    background: transparent;
     border: none;
-    border-bottom: 1px solid $separator;
-    font-size: 13px;
-    padding: 4px 8px;
-}
-QListView#topnav::item {
-    height: 28px;
-    padding: 0 14px;
-    margin: 0 2px;
-    border-radius: 6px;
-}
-QListView#topnav::item:hover { background: $hover; }
-QListView#topnav::item:selected {
-    background: $accent;
-    color: $accent_text;
+    font-size: 16px;
 }
 
 /* 类型筛选条（历史页 全部/文本/URL…）：同款配色，四周圆角。
@@ -335,6 +321,96 @@ QLabel#collectionTrigger {
 }
 QLabel#collectionTrigger:hover { background: $scrollbar_hover; }
 
+/* 模板页三栏卡片（设计规范：白色卡片 16px 圆角、大量留白） */
+QFrame#templateCard {
+    background: $window;
+    border: 1px solid $separator;
+    border-radius: 16px;
+}
+QLabel#cardTitle {
+    color: $text;
+    font-size: 15px;
+    font-weight: 600;
+}
+QLabel#fieldLabel {
+    color: $secondary;
+    font-size: 13px;
+}
+QLabel#emptyHint {
+    color: $secondary;
+    font-size: 13px;
+}
+QPushButton#ghostBtn {
+    background: $search_bg;
+    border: none;
+    border-radius: 8px;
+    padding: 4px 10px;
+    color: $secondary;
+    font-size: 13px;
+}
+QPushButton#ghostBtn:hover { background: $hover; }
+QListView#sourceList, QListView#templateList {
+    background: transparent;
+    border: none;
+}
+/* 触发方式分段控件（胶囊容器 + 选中 accent） */
+QFrame#segGroup {
+    background: $search_bg;
+    border-radius: 10px;
+}
+QPushButton#segBtn {
+    background: transparent;
+    border: none;
+    border-radius: 8px;
+    padding: 6px 14px;
+    color: $secondary;
+    font-size: 13px;
+}
+QPushButton#segBtn:hover { background: $hover; }
+QPushButton#segBtn:checked {
+    background: $accent;
+    color: $accent_text;
+}
+/* 变量胶囊（点击插入编辑器）：11px/8px 内边距——太宽会把折叠态也挤折行，
+   新增按钮掉到第二行（实测 y=28 错位） */
+QPushButton#varTag {
+    background: $search_bg;
+    border: none;
+    border-radius: 999px;
+    padding: 4px 8px;
+    color: $text;
+    font-size: 11px;
+    font-family: Menlo, Monaco, monospace;
+}
+QPushButton#varTag:hover { background: $hover; color: $accent; }
+/* 变量区滚动容器：透明无边框（viewport 也需透明，否则白底矩形） */
+QScrollArea#varScroll {
+    background: transparent;
+    border: none;
+}
+QScrollArea#varScroll > QWidget > QWidget {
+    background: transparent;
+}
+
+/* 模板代码编辑器（等宽 + Pygments 高亮） */
+QPlainTextEdit#templateEditor {
+    background: $content;
+    border: 1px solid $separator;
+    border-radius: 10px;
+    padding: 8px;
+    font-family: Menlo, Monaco, monospace;
+    font-size: 13px;
+}
+QPushButton#dangerBtn {
+    background: transparent;
+    border: none;
+    border-radius: 8px;
+    padding: 6px 12px;
+    color: #FF3B30;
+    font-size: 13px;
+}
+QPushButton#dangerBtn:hover { background: $hover; }
+
 /* 收藏夹浮层面板：悬浮覆盖在条目区上方 */
 QFrame#collectionPanel {
     background: $window;
@@ -376,6 +452,8 @@ def _build_palette(p: dict) -> QPalette:
     # 选中高亮用独立的 selection 色（列表条目浅蓝 + 深字，macOS 原生风格）
     pal.setColor(QPalette.ColorRole.Highlight, QColor(p["selection_bg"]))
     pal.setColor(QPalette.ColorRole.HighlightedText, QColor(p["selection_text"]))
+    # Link 角色承载强调色（导航胶囊选中态等自绘控件取色用）
+    pal.setColor(QPalette.ColorRole.Link, QColor(p["accent"]))
     return pal
 
 

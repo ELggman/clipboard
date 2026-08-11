@@ -100,11 +100,15 @@ def test_history_scale_responsive(tmp_path):
     base_img = _size_hint(view, 1).height()  # 图片在行 1（text 后加）
     base_txt = _size_hint(view, 0).height()
 
-    view.resize(760, 500)  # 2 倍宽
+    view.resize(456, 500)  # 1.2 倍宽（封顶内）
     pytest_app.processEvents()
-    assert view._delegate._scale == 2.0
-    assert _size_hint(view, 1).height() == base_img * 2
-    assert _size_hint(view, 0).height() == base_txt * 2
+    assert view._delegate._scale == 1.2
+    assert _size_hint(view, 0).height() == round(base_txt * 1.2)
+
+    view.resize(1000, 500)  # 宽屏 → 缩放封顶 1.35（1000/380=2.63 不可用）
+    pytest_app.processEvents()
+    assert view._delegate._scale == 1.35
+    assert _size_hint(view, 0).height() == round(base_txt * 1.35)
     view.close()
 
 
@@ -398,37 +402,44 @@ def test_history_item_clicked_signal(tmp_path):
 
 
 def test_templates_view_save_and_validate(tmp_path):
-    """模板页：新建保存 → 列表出现；shortcut 冲突/变量错误提示。"""
+    """模板页：编辑弹窗新建保存 → 列表出现；shortcut 冲突/变量错误提示。"""
     from database.engine import create_db_engine
     from database.migrations import migrate
-    from ui.templates_view import TemplatesView
+    from services.template_service import TemplateService
+    from ui.templates_view import TemplateEditorDialog, TemplatesView
 
     engine = create_db_engine(tmp_path / "s.db")
     migrate(engine)
+    svc = TemplateService(engine)
     view = TemplatesView()
-    warnings = []
-    view._warn = lambda msg: warnings.append(msg)  # 模态框换记录（测试）
     view.set_context(engine)
     base_count = view._list.count()
     assert base_count == 4  # 默认模板（§101）
 
-    # 新建 + 保存（含 shortcut/文件夹/触发方式）
-    view._new_template()
-    view._name.setText("日期")
-    view._shortcut.setText("today2")
-    view._content.setPlainText("今天：{{date}}")
-    view._save()
+    # 新建弹窗 + 保存（含 shortcut/文件夹/触发方式）→ accept 后视图 reload
+    dlg = TemplateEditorDialog(view, svc, None)
+    warnings = []
+    dlg._warn = lambda msg: warnings.append(msg)  # 模态框换记录（测试）
+    dlg._name.setText("日期")
+    dlg._shortcut.setText("today2")
+    dlg._content.setPlainText("今天：{{date}}")
+    dlg._save()
+    assert dlg.result() == QDialog.DialogCode.Accepted
+    view.reload()
     assert view._list.count() == base_count + 1
     row = next(r for r in range(view._list.count())
                if "today2" in view._list.item(r).text())
     assert view._list.item(row).text().startswith("日期")
 
     # 无效模板变量：保存被拒（validate_template 提示，不落库）
-    view._new_template()
-    view._name.setText("Bad")
-    view._shortcut.setText("badx")
-    view._content.setPlainText("Hello {{unknown}}")
-    view._save()
+    dlg2 = TemplateEditorDialog(view, svc, None)
+    dlg2._warn = lambda msg: warnings.append(msg)
+    dlg2._name.setText("Bad")
+    dlg2._shortcut.setText("badx")
+    dlg2._content.setPlainText("Hello {{unknown}}")
+    dlg2._save()
+    assert dlg2.result() != QDialog.DialogCode.Accepted  # 未保存
+    view.reload()
     assert view._list.count() == base_count + 1  # 未新增
     assert warnings and "未知变量" in warnings[-1]  # 错误提示（§66）
     view.close()
@@ -466,6 +477,122 @@ def test_templates_view_folder_filter(tmp_path):
     assert any(view._list.item(r).text().startswith("★")
                for r in range(view._list.count()))
     view.close()
+
+
+def test_templates_two_column_cards(tmp_path):
+    """模板页两栏布局：左分类 / 中列表两张 templateCard（编辑器已弹窗化）。"""
+    from PySide6.QtWidgets import QFrame
+
+    from ui.templates_view import TemplatesView
+
+    view = TemplatesView()
+    cards = [c for c in view.findChildren(QFrame)
+             if c.objectName() == "templateCard"]
+    assert len(cards) == 2
+    view.close()
+
+
+def test_templates_variable_tag_inserts(tmp_path):
+    """变量胶囊点击 → 插入内容区光标处（组件化：变量系统扩展挂载点）。"""
+    from database.engine import create_db_engine
+    from database.migrations import migrate
+    from services.template_service import TemplateService
+    from ui.templates_view import TemplateEditorDialog
+
+    engine = create_db_engine(tmp_path / "vt.db")
+    migrate(engine)
+    dlg = TemplateEditorDialog(None, TemplateService(engine), None)
+    dlg._var_tags.variable_clicked.emit("{{date}}")
+    dlg._var_tags.variable_clicked.emit("{{uuid}}")
+    assert dlg._content.toPlainText() == "{{date}}{{uuid}}"
+    dlg.close()
+
+
+def test_variable_tag_bar_collapse_and_add():
+    """变量条：超阈值折叠/展开；add_variable 追加、remove_variable 删除。"""
+    from ui.template_components import VariableTagBar
+
+    bar = VariableTagBar(variables=list(VariableTagBar.DEFAULT_VARIABLES))
+    assert len(bar.variables()) == 7
+    assert bar.needs_collapse()  # 7 > 3 → 外部显示「展开全部」
+    # 折叠态：第 4-7 个隐藏（隐藏控件不占布局；400px 弹窗胶囊区放 3 个）
+    assert bar._pills[3].isHidden() and bar._pills[6].isHidden()
+    assert not bar._pills[0].isHidden()
+    # 展开
+    bar.set_expanded(True)
+    assert not bar._pills[3].isHidden() and not bar._pills[6].isHidden()
+    assert bar.is_expanded()
+    # 追加自定义变量（按序排入胶囊区）
+    bar.add_variable("{{myvar}}")
+    assert "{{myvar}}" in bar.variables()
+    assert bar._pills[-1].text() == "{{myvar}}"  # 排在其他胶囊之后
+    # 删除
+    bar.remove_variable("{{myvar}}")
+    assert "{{myvar}}" not in bar.variables()
+    bar.close()
+
+
+def test_templates_trigger_segmented_save(tmp_path):
+    """分段控件：选中「自动触发」保存 → trigger_mode=automatic。"""
+    from database.engine import create_db_engine
+    from database.migrations import migrate
+    from services.template_service import TemplateService
+    from ui.templates_view import TemplateEditorDialog
+
+    engine = create_db_engine(tmp_path / "seg.db")
+    migrate(engine)
+    svc = TemplateService(engine)
+    dlg = TemplateEditorDialog(None, svc, None)
+    dlg._name.setText("Seg")
+    dlg._shortcut.setText("segx")
+    dlg._content.setPlainText("x")
+    dlg._trigger_auto.setChecked(True)  # 分段控件 → automatic
+    dlg._save()
+    assert svc.find_by_shortcut("segx")["trigger_mode"] == "automatic"
+    dlg.close()
+
+
+def test_templates_star_zone_toggles_favorite(tmp_path):
+    """模板行尾 ★ 点击区 → 切换收藏（不触发行选中）。"""
+    from PySide6.QtTest import QTest
+
+    from database.engine import create_db_engine
+    from database.migrations import migrate
+    from services.template_service import TemplateService
+    from ui.templates_view import TemplatesView
+
+    engine = create_db_engine(tmp_path / "star.db")
+    migrate(engine)
+    svc = TemplateService(engine)
+    view = TemplatesView()
+    view.set_context(engine)
+    view.show()
+    pytest_app.processEvents()
+    t = view._templates[0]  # 第一行模板（默认顺序 quote 在前）
+    before = t["favorite"]
+    rect = view._list.visualItemRect(view._list.item(0))
+    pos = rect.center()
+    pos.setX(rect.right() - 8)  # 行尾 ★ 区
+    pos.setY(rect.top() + 10)
+    QTest.mouseClick(view._list.viewport(), Qt.MouseButton.LeftButton, pos=pos)
+    after = svc.get_template(t["id"])["favorite"]
+    assert after == (1 - before)  # 收藏状态翻转
+    view.close()
+
+
+def test_template_highlighter_var_format(tmp_path):
+    """TemplateHighlighter：{{变量}} 用 accent 格式（Pygments 之上覆盖）。"""
+    from PySide6.QtGui import QTextDocument
+    from PySide6.QtWidgets import QApplication
+
+    from ui.template_components import TemplateHighlighter
+
+    doc = QTextDocument("def f():\n    return {{date}}")
+    TemplateHighlighter(doc, "python")
+    block = doc.findBlockByNumber(1)  # {{date}} 在第二行
+    accent = QApplication.palette().link().color().name()
+    fmts = block.layout().formats()  # FormatRange 对象（start/length/format）
+    assert any(fr.format.foreground().color().name() == accent for fr in fmts)
 
 
 def test_collections_view_create_and_items(tmp_path):
@@ -1435,53 +1562,53 @@ def test_refresh_session_counts_updates_combo(tmp_path):
     view.close()
 
 
-def test_main_window_initial_size_660():
-    """初始/最小窗口高度 660（顶部会话行 + 类型筛选 + 列表不挤压）。"""
+def test_main_window_initial_size():
+    """窗口尺寸以用户手动设置为准（当前 420×700，无最小尺寸约束）。"""
     from ui.main_window import MainWindow
 
     w = MainWindow()
-    assert w.minimumHeight() == 660
-    assert w.height() == 660
+    assert w.width() == 420
+    assert w.height() == 700
     w.close()
 
 
 def test_search_scope_toggle_button():
-    """搜索范围：点按切换按钮（全部会话 ↔ 本会话），无弹层（回归）。"""
+    """搜索范围：分段控件（全部会话 ↔ 本会话，与模板页触发方式同款）。"""
     from ui.main_window import MainWindow
 
     w = MainWindow()
-    assert w._search_scope_btn.text() == "全部会话"
+    assert w._scope_all_btn.isChecked()
     assert w._scope_current is None
-    w._search_scope_btn.click()
-    assert w._search_scope_btn.text() == "本会话"
+    w._scope_current_btn.click()
+    assert w._scope_current_btn.isChecked()
     assert w._scope_current == "current"
-    w._search_scope_btn.click()
-    assert w._search_scope_btn.text() == "全部会话"
+    w._scope_all_btn.click()
+    assert w._scope_all_btn.isChecked()
     assert w._scope_current is None
     w.close()
 
 
 def test_page_specific_search_row_controls():
-    """搜索行（搜索框+范围按钮）仅历史页显示；📁 在收藏夹页内。"""
+    """搜索行（搜索框+范围分段控件）仅历史页显示；📁 在收藏夹页内。"""
     from ui.main_window import MainWindow
 
     w = MainWindow()
     w.show()
     pytest_app.processEvents()
-    assert w._search_scope_btn.isVisible()          # 默认历史页
+    assert w._scope_all_btn.isVisible()             # 默认历史页
     cv = w._pages.widget(1)
     for row in (2, 3, 4):  # 非历史页：搜索行隐藏（不留空白带）
         w._nav.setCurrentRow(row)
         pytest_app.processEvents()
-        assert not w._search_scope_btn.isVisible(), f"row={row} 范围按钮应隐藏"
+        assert not w._scope_all_btn.isVisible(), f"row={row} 范围控件应隐藏"
         assert not w._search.isVisible(), f"row={row} 搜索框应隐藏"
     w._nav.setCurrentRow(1)  # 收藏夹页
     pytest_app.processEvents()
-    assert not w._search_scope_btn.isVisible()  # 历史搜索行隐藏
+    assert not w._scope_all_btn.isVisible()  # 历史搜索行隐藏
     assert cv._collections_trigger.isVisible()  # 📁 在收藏夹页内
     w._nav.setCurrentRow(0)  # 回历史
     pytest_app.processEvents()
-    assert w._search_scope_btn.isVisible()
+    assert w._scope_all_btn.isVisible()
     w.close()
 
 

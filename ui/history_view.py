@@ -481,8 +481,8 @@ class HistoryView(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # 会话行：标注 + 下拉（显示名 · 条数）+ ⋯ 管理菜单
-        # 独立区域：底部留 8px 与类型筛选条分隔（靠太近视觉粘连，实测）
+        # 会话行：标注 + 下拉 + 三个独立管理按钮（⋯ 菜单已展开为按钮，
+        # Apple 风格；下拉限宽防长会话名撑爆整行）
         session_row = QHBoxLayout()
         session_row.setContentsMargins(8, 2, 8, 2)
         session_row.setSpacing(4)
@@ -495,22 +495,36 @@ class HistoryView(QWidget):
         # 默认跟随按钮会裁切，固定 min-width 又过宽（实测）
         self._session_combo.view().setSizeAdjustPolicy(
             QAbstractScrollArea.SizeAdjustPolicy.AdjustToContents)
+        self._session_combo.setMaximumWidth(170)  # 按钮超长自动省略号（Apple 风格）
         self._session_combo.currentIndexChanged.connect(self._on_session_changed)
         session_row.addWidget(self._session_combo, 1)
-        self._session_menu_btn = QPushButton("⋯")
-        self._session_menu_btn.setObjectName("sessionMenuBtn")
-        self._session_menu_btn.setFixedWidth(28)
-        self._session_menu_btn.clicked.connect(self._show_session_menu)
-        session_row.addWidget(self._session_menu_btn)
+        # 管理按钮：新建 / 重命名 / 删除（替代 ⋯ 菜单；重命名/删除仅非默认会话）
+        self._session_new_btn = QPushButton("新建")
+        self._session_new_btn.setObjectName("ghostBtn")
+        self._session_new_btn.clicked.connect(self._create_session)
+        session_row.addWidget(self._session_new_btn)
+        self._session_rename_btn = QPushButton("重命名")
+        self._session_rename_btn.setObjectName("ghostBtn")
+        self._session_rename_btn.clicked.connect(self._rename_current_session)
+        session_row.addWidget(self._session_rename_btn)
+        self._session_delete_btn = QPushButton("删除")
+        self._session_delete_btn.setObjectName("ghostBtn")
+        self._session_delete_btn.clicked.connect(self._delete_current_session)
+        session_row.addWidget(self._session_delete_btn)
+        self._update_session_buttons()
         layout.addLayout(session_row)
 
         layout.addWidget(self._type_tabs)
         layout.addWidget(self._list)
 
     def resizeEvent(self, event) -> None:
-        """窗口放大 → 内容等比例放大（基准宽度 BASE_WIDTH）。"""
+        """窗口放大 → 内容等比例放大（基准宽度 BASE_WIDTH）。
+
+        ⚠️ 缩放封顶 1.35：窗口加宽到 1000px 后 1000/380=2.63 倍会把
+        行高/字号放得不可用（行 116px 字 37px），封顶后宽屏只增加留白。
+        """
         super().resizeEvent(event)
-        scale = event.size().width() / BASE_WIDTH
+        scale = min(event.size().width() / BASE_WIDTH, 1.35)
         self._delegate.set_scale(scale)
         self._list.setSpacing(max(2, round(4 * scale)))  # 条目间隔随缩放
         self._list.doItemsLayout()  # 行高随 scale 变化，重新布局
@@ -716,10 +730,31 @@ class HistoryView(QWidget):
     def _on_session_changed(self, row: int) -> None:
         sid = self._session_combo.itemData(row)
         if sid is None or sid == self._view_session_id:
+            self._update_session_buttons()
             return
         self.load_session(sid)
         if self._on_active_changed is not None:
             self._on_active_changed(sid)  # bootstrap：持久化 + 主窗口同步
+        self._update_session_buttons()
+
+    # ---- 会话管理按钮（⋯ 菜单展开为独立按钮）----
+
+    def _update_session_buttons(self) -> None:
+        """重命名/删除仅对非默认会话可用（默认会话 id=1）。"""
+        sid = self._session_combo.currentData()
+        enabled = sid is not None and sid != 1
+        self._session_rename_btn.setEnabled(enabled)
+        self._session_delete_btn.setEnabled(enabled)
+
+    def _rename_current_session(self) -> None:
+        sid = self._session_combo.currentData()
+        if sid is not None and sid != 1:
+            self._rename_session(sid)
+
+    def _delete_current_session(self) -> None:
+        sid = self._session_combo.currentData()
+        if sid is not None and sid != 1:
+            self._delete_session(sid)
         self.feedback.emit("已切换到会话")
 
     def _show_session_menu(self) -> None:
@@ -752,6 +787,9 @@ class HistoryView(QWidget):
                 if self._on_active_changed is not None:
                     self._on_active_changed(sid)
                 self.feedback.emit(f"已切换到「{dialog.text()}」")
+                # 重命名/删除按钮按当前会话刷新（reload 可能未触发
+                # currentIndexChanged——实测新增后按钮仍禁用）
+                self._update_session_buttons()
 
     def _rename_session(self, session_id: int) -> None:
         if self._session_service is None:
@@ -763,6 +801,7 @@ class HistoryView(QWidget):
             self._session_service.rename_session(self._engine, session_id,
                                                  dialog.text())
             self.reload_sessions(self._view_session_id or 1)
+            self._update_session_buttons()
 
     def _delete_session(self, session_id: int) -> None:
         if self._session_service is None:
@@ -796,6 +835,7 @@ class HistoryView(QWidget):
                 self.feedback.emit(
                     "会话已删除" + ("，内容已移回「普通」"
                                   if self._delete_policy == "move" else ""))
+                self._update_session_buttons()  # 回到默认会话 → 按钮禁用
 
     # ---- 点击 ----
 

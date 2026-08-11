@@ -347,6 +347,35 @@ def load_actions(extra_dirs: list[Path] = ()) -> list[ClipboardAction]:
 
 ## 4. 应用形态与 macOS 集成
 
+### 4.0 UI 设计语言（Raycast / macOS Sonoma 风格，用户确认规范）
+
+- **整体**：简洁 / 高级 / 大量留白 / 卡片化（白色卡片 16px 圆角）/ 轻量阴影
+  （Qt QSS 无 box-shadow，用 1px separator 描边 + 背景对比，Sonoma 同款）/
+  蓝色主操作色（#007AFF 浅 / #0A84FF 深，accent）
+- **顶部导航**：品牌行「Clipboard Workspace」+ 胶囊标签行。默认 16px #666
+  （次要色）；**选中 = 蓝胶囊** #007AFF 白字 10px 圆角 padding 8px 22px；
+  图标 🕐/⭐/📋/📈/⚙️ 由 `NavItemDelegate` QPainter 自绘（emoji 字形
+  可靠路径；QPushButton 图标/emoji 会空白——本会话血泪史）
+- **窗口**：默认 760×700，最小 640×560（编辑器弹窗化后模板页只需两栏）。
+  ⚠️ HistoryView 缩放封顶 `min(width/380, 1.35)`——宽屏下 1000/380=2.63 倍
+  会把行高/字号放得不可用，封顶后宽屏只增加留白
+- **模板页两栏卡片 + 编辑弹窗**（`templates_view.py` +
+  `ui/template_components.py`）：左分类（source-list 计数右对齐）/ 中列表
+  （搜索 + 两行卡片行：名称+★ 行尾 ★ 点击区=收藏切换，shortcut 钥匙片 +
+  触发方式）。**编辑器 TemplateEditorDialog 不常驻**——点击模板行/新建时
+  弹出（保存/删除成功 accept → 视图 reload），页面整体更窄。弹窗内：
+  名称 Shortcut 分类 触发方式分段控件 变量 Tag Pygments 高亮代码编辑器
+  保存/删除/取消。组件化：TemplateCardDelegate / FolderSourceDelegate /
+  VariableTagBar / TemplateHighlighter（CodeHighlighter 子类：{{变量}}
+  accent 覆盖在 Pygments 之上）
+- **变量 Tag 条**（VariableTagBar）：预设 7 个变量 + 用户自定义
+  （`config template.extra_variables` 持久化，编辑弹窗「＋ 新增变量」追加，
+  输入自动补 {{}}，重复提示）；**超 5 个折叠显示前 5 个 + 「展开全部（N）/
+  收起」切换**（隐藏控件不占布局空间）
+- **调色板取色**：自绘 delegate 用 `option.palette`（accent 走 Link 角色，
+  深浅主题自适应）；**QImage.constBits() 是 BGRA 字节序**——像素分析
+  脚本按 RGBA 读会 R/B 反转（调试血泪）
+
 ### 4.1 单实例与常驻
 
 - 菜单栏常驻（需求要求开机启动）→ **accessory 应用**：`Info.plist` 设 `LSUIElement=1`
