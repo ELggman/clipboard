@@ -530,3 +530,68 @@ def test_matcher_word_boundary_clears():
         matcher.feed(ch)
     assert matcher.feed("r") is False  # boundary（兼容自动）：输完挂起
     assert matcher.confirm_pending() is True  # 确认触发
+
+
+# ---- AxShortcutMatcher（中文 AX 文本匹配，独立于英文缓冲引擎）----
+
+def test_ax_matcher_chinese_tab():
+    """中文 shortcut：文本末尾匹配即触发（tab 模式）。"""
+    from services.template.ax_matcher import AxShortcutMatcher
+
+    triggered = []
+    matcher = AxShortcutMatcher(
+        _FakeService([_mk_tmpl("问候")]),
+        on_trigger=lambda t, n, c: triggered.append((n, c)))
+    assert matcher.match_text("你好问候") is True
+    assert triggered == [(2, False)]  # 删除 2 字符；中文已上屏无需取消组合
+
+
+def test_ax_matcher_english_never_matches():
+    """独立性契约：英文 shortcut 永不被 AX 文本路径匹配（只走缓冲）。"""
+    from services.template.ax_matcher import AxShortcutMatcher
+
+    triggered = []
+    matcher = AxShortcutMatcher(
+        _FakeService([_mk_tmpl("sig")]),
+        on_trigger=lambda t, n, c: triggered.append(n))
+    assert matcher.match_text("hi sig") is False
+    assert matcher.match_text("sig") is False
+    assert triggered == []
+
+
+def test_ax_matcher_mode_filter():
+    """mode 过滤：tab 路径只匹配 tab 模板，automatic 路径只匹配 automatic。"""
+    from services.template.ax_matcher import AxShortcutMatcher
+
+    triggered = []
+    matcher = AxShortcutMatcher(
+        _FakeService([_mk_tmpl("问候", mode="automatic"), _mk_tmpl("你好")]),
+        on_trigger=lambda t, n, c: triggered.append(t["shortcut"]))
+    # tab 路径：只匹配 tab 模板「你好」
+    assert matcher.match_text("abc你好") is True
+    assert triggered == ["你好"]
+    # automatic 路径：只匹配 automatic 模板「问候」；tab 模板不匹配
+    assert matcher.match_text("abc问候", mode="automatic") is True
+    assert triggered == ["你好", "问候"]
+    assert matcher.match_text("abc你好", mode="automatic") is False
+    assert triggered == ["你好", "问候"]
+
+
+def test_ax_matcher_empty_text():
+    """空文本：返回 False 不触发。"""
+    from services.template.ax_matcher import AxShortcutMatcher
+
+    matcher = AxShortcutMatcher(_FakeService([_mk_tmpl("问候")]))
+    assert matcher.match_text("") is False
+
+
+def test_ax_matcher_miss_no_trigger():
+    """文本不以 shortcut 结尾：返回 False 不触发。"""
+    from services.template.ax_matcher import AxShortcutMatcher
+
+    triggered = []
+    matcher = AxShortcutMatcher(
+        _FakeService([_mk_tmpl("问候")]),
+        on_trigger=lambda t, n, c: triggered.append(n))
+    assert matcher.match_text("问候你") is False  # 不以「问候」结尾
+    assert triggered == []

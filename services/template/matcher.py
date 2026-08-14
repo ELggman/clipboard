@@ -1,4 +1,9 @@
-"""Shortcut 匹配器：输入缓冲 → shortcut 触发（文档 §7/§84）。
+"""Shortcut 匹配器（**英文**缓冲引擎）：输入缓冲 → shortcut 触发（文档 §7/§84）。
+
+⚠️ 本模块只处理**英文（ASCII）shortcut 的键盘缓冲触发**。中文 shortcut
+触发完全独立在 ax_matcher.py（AxShortcutMatcher，AX 文本匹配）——中英
+彻底分离（用户决策）：英文走按键缓冲不依赖 AX；中文走焦点文本匹配。
+改中文触发逻辑不要动这里，改这里也不影响中文。
 
 主线程维护输入缓冲（滑动窗口），按 trigger_mode 响应：
 - tab 模式：缓冲末尾完整词 + Tab 键触发
@@ -21,6 +26,8 @@ _BACKSPACES = ("\x7f", "\x08", "\b")
 
 
 class ShortcutMatcher:
+    """英文（ASCII）shortcut 缓冲匹配器。中文 shortcut 见 AxShortcutMatcher。"""
+
     def __init__(self, template_service, on_trigger=None, composing_check=None,
                  chinese_ime_check=None):
         """on_trigger(template, delete_count, cancel_ime)：匹配命中后的回调。
@@ -39,6 +46,9 @@ class ShortcutMatcher:
           此时正在提交组合）keyDown 时触发——事件顺序保证 ⌥⌫ 落在已
           提交的文本上；Tab 触发用 cancel_ime=True（Escape 取消组合）
         - cancel_ime=True：插入层发送 Escape 取消组合而非 ⌥⌫ 删除
+
+        中文输入法下的这些分支是为了**安全触发英文 shortcut**（何时触发），
+        不含任何中文 shortcut 匹配逻辑（匹配的是缓冲里的英文字母）。
         """
         self._service = template_service
         self._on_trigger = on_trigger
@@ -172,63 +182,6 @@ class ShortcutMatcher:
                 continue
             if item["shortcut"] and text.endswith(item["shortcut"].lower()):
                 return True
-        return False
-
-    def match_text(self, text: str, mode: str = "tab",
-                   skip_ascii: bool = False) -> bool:
-        """从**焦点输入框文本**末尾匹配 shortcut（含中文）。
-
-        背景（中文 shortcut 触发）：CGEventTap 只能看到拼音按键
-        （wenhou），看不到输入法**上屏的汉字**（选字不产生按键事件）——
-        通过辅助功能 API 读取焦点文本，从末尾匹配 shortcut。
-        - mode="tab"：Tab 触发路径（仅 tab 模式模板）
-        - mode="automatic"：焦点文本轮询路径（automatic/boundary 模式——
-          中文上屏后自动展开，不需要 Tab）
-        - skip_ascii=True：只匹配中文 shortcut——焦点文本轮询固定开启。
-          英文 shortcut 由按键路径覆盖（英文即时/中文提交键）；组合中
-          AX 值可能含未上屏拼音，且英文 shortcut 有 prefix 误触风险
-          （signature 的 sig），轮询里排除
-        - 英文 shortcut：要求前面是词边界（空格/行首/标点），防误触
-        - 中文 shortcut：直接匹配末尾（输入法上屏的中文词即完整词）
-        命中触发（delete_count = 匹配的 shortcut 字符数）。
-        """
-        if not text:
-            return False
-        return self._match_text_local(text, mode, skip_ascii)
-
-    # ---- 内部 ----
-
-    def _match_text_local(self, text: str, mode: str,
-                          skip_ascii: bool = False) -> bool:
-        """文本/缓冲末尾匹配（公共逻辑）。mode: tab/automatic/all。"""
-        if not text:
-            return False
-        for item in self._service.list_shortcuts():
-            sc = item["shortcut"]
-            if not sc:
-                continue
-            if skip_ascii and sc.isascii():
-                continue
-            trigger_mode = item["trigger_mode"]
-            if mode == "tab" and trigger_mode != "tab":
-                continue
-            if mode == "automatic" and trigger_mode not in (
-                    "automatic", "boundary"):
-                continue
-            if not text.endswith(sc):
-                continue
-            # 词边界检查（仅英文/数字 shortcut）：前面是词字符则不触发
-            before = text[:len(text) - len(sc)]
-            if sc.isascii() and before and (
-                    before[-1].isalnum() or before[-1] in ("_", "-")):
-                continue
-            template = self._service.find_by_shortcut(sc)
-            if template is None:
-                continue
-            self._buffer.clear()
-            if self._on_trigger is not None:
-                self._on_trigger(template, len(sc), False)
-            return True
         return False
 
     # ---- 内部 ----

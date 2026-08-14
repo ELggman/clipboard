@@ -4,6 +4,7 @@ V1 核心闭环已打通：ClipboardWatcher 解析 → history_service 去重落
 → MainWindow.refresh_history 刷新列表与状态栏。
 """
 import logging
+import os
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal
@@ -318,7 +319,7 @@ def start_workspace(app: QApplication) -> None:
 
                 cancel_composition()
             else:
-                delete_backspaces(delete_count)
+                delete_backspaces(delete_count, template["shortcut"])
         content = template["content"]
         text, _cursor, inputs = template_service.render_template(content)
         if inputs:
@@ -342,11 +343,63 @@ def start_workspace(app: QApplication) -> None:
             logger.error("模板插入失败: shortcut=%s", template["shortcut"])
 
     from services.template.ax_text import is_ime_composing
+    from services.template.ax_text import ensure_ax_enabled
+    from services.template.ax_text import _frontmost_pid
     from services.template.ime import is_chinese_ime
 
+    # 中英触发彻底分离（用户决策）：英文走缓冲引擎 ShortcutMatcher
+    # （feed，不依赖 AX）；中文走 AX 引擎 AxShortcutMatcher（match_text，
+    # 读焦点文本）。改动互不牵连。
     matcher = ShortcutMatcher(template_service, on_trigger=render_and_insert,
                               composing_check=is_ime_composing,
                               chinese_ime_check=is_chinese_ime)
+
+    def _text_trigger(template, delete_count, cancel_ime) -> None:
+        """AX 焦点文本末尾匹配命中（中文，或英文 tab 兜底）：先清空英文
+        缓冲，再走统一渲染插入。
+
+        清缓冲：文本匹配前的按键还留在缓冲里（缓冲引擎不感知 AX 文本匹
+        配），不清会让残留字母在后续 Tab/自动触发时误匹配英文 shortcut。
+        """
+        matcher.reset()
+        render_and_insert(template, delete_count, cancel_ime)
+
+    from services.template.ax_matcher import AxShortcutMatcher
+    from services.template.ax_matcher import is_delete_reveal
+
+    chinese_matcher = AxShortcutMatcher(template_service,
+                                        on_trigger=_text_trigger)
+
+    def _has_english_tab_shortcut() -> bool:
+        """是否存在已启用的英文 tab 模式 shortcut（Tab 兜底需要）。
+
+        Tab 兜底（_on_raw_key）：中文输入法下英文 shortcut 需提交键上屏，
+        提交键清掉英文缓冲，随后 Tab 只能从已上屏文本末尾匹配——需要 AX。
+        """
+        return any(item["shortcut"].isascii() and item["trigger_mode"] == "tab"
+                   for item in template_service.list_shortcuts())
+
+    def _ensure_ax_if_needed() -> bool:
+        """需要 AX 文本匹配时才为前台应用强制开启 AX 树（Electron 默认无
+        AX 树，read_focused_text 恒 None → 文本匹配全死，实测）。
+
+        场景：
+        1. 有中文 shortcut（任意模式）：中文 AX 匹配（轮询/Tab）依赖读文本
+        2. 中文输入法激活且有英文 tab shortcut：Tab 兜底——中文输入法下
+           英文 shortcut 必须先按提交键（回车/空格）上屏，提交键清掉英文
+           缓冲（tab 模式不自动触发），随后 Tab 只能从已上屏文本末尾匹配
+        纯英文输入法下英文走键盘缓冲即可，不需要 AX——不强制开，避免给
+        用户的编辑器（Chromium 应用）带来 accessibility 树的额外开销。
+        ensure_ax_enabled 内部按前台 pid 缓存，同 pid 只 SET 一次。
+        返回是否需要 AX 文本匹配。
+        """
+        if template_service.has_chinese_shortcut():
+            ensure_ax_enabled()
+            return True
+        if is_chinese_ime() and _has_english_tab_shortcut():
+            ensure_ax_enabled()
+            return True
+        return False
 
     # 自动触发延迟确认（防 prefix 误触：signature 的 sig 不触发）：
     # matcher 命中 automatic shortcut 后挂起 pending（缓冲保留），
@@ -360,17 +413,38 @@ def start_workspace(app: QApplication) -> None:
     _auto_timer.timeout.connect(matcher.confirm_pending)
 
     def _on_raw_key(vk: int, ch: str) -> None:
+        # 前台是自己的进程：模板触发只服务其他应用，app 自己 UI 里的按键
+        # （搜索框/编辑面板输入）不喂缓冲、不匹配——否则在搜索框打英文
+        # shortcut 会误触发（实测搜「id」触发 automatic 模板，搜索词被删）。
+        # reset 同时清掉可能残留的英文缓冲/挂起触发（切回 app 后不应在
+        # 自己的 UI 里展开）。
+        if _frontmost_pid() == os.getpid():
+            matcher.reset()
+            return
         if ch == "\t":
-            # Tab 触发：先按键缓冲（英文 shortcut），再 AX 焦点文本
-            # 末尾匹配（中文 shortcut——输入法上屏的汉字无按键事件，
-            # CGEventTap 只能看到拼音，必须在文本层匹配）
+            # Tab 触发：英文走缓冲（matcher.feed），中文走 AX 焦点文本
+            # 末尾匹配（chinese_matcher——输入法上屏的汉字无按键事件，
+            # CGEventTap 只能看到拼音，必须在文本层匹配）。
+            # 英文缓冲未命中时（**中文输入法下提交键会清掉缓冲**，实测：
+            # 输英文 shortcut 需回车/空格先上屏，提交键走 feed 的 else 分支
+            # 清空缓冲，随后 Tab 缓冲为空）→ AX 兜底：从**已上屏的焦点
+            # 文本末尾**匹配英文 tab shortcut（include_ascii=True）。
             from services.template.ax_text import read_focused_text
 
             if matcher.feed(ch):
                 return
             try:
-                if matcher.match_text(read_focused_text()):
-                    logger.info("Tab 触发：AX 焦点文本末尾匹配成功")
+                # AX 兜底依赖读焦点文本：Electron 应用默认无 AX 树，需先
+                # 强制开启（有中文 shortcut，或中文输入法下有英文 tab
+                # shortcut 时才需要；见 _ensure_ax_if_needed）
+                if not _ensure_ax_if_needed():
+                    return
+                text = read_focused_text()
+                if chinese_matcher.match_text(text):
+                    logger.info("Tab 触发：AX 焦点文本末尾匹配中文 shortcut")
+                elif chinese_matcher.match_text(text, include_ascii=True):
+                    logger.info("Tab 触发：AX 焦点文本末尾匹配英文 tab"
+                                " shortcut（提交键清缓冲后的兜底）")
             except Exception:
                 pass
         else:
@@ -385,33 +459,82 @@ def start_workspace(app: QApplication) -> None:
 
     # 焦点文本轮询（中文 shortcut 触发）：输入法上屏的汉字不产生按键
     # 事件，且中文 IME 下 Tab 可能被输入法吞掉——定时读焦点文本、
-    # 末尾匹配 automatic 模式 shortcut，文本变化才匹配。
+    # 末尾匹配 automatic 模式中文 shortcut，文本变化才匹配。
     #
-    # **skip_ascii=True（只匹配中文 shortcut）**：英文 shortcut 一律由
-    # 按键路径覆盖（英文输入法：延迟确认；中文输入法：提交键）——轮询
-    # 里的英文 shortcut 有两个问题：1) 组合中 AX 值可能含未上屏拼音
-    # （部分应用读不到 marked range），会提前触发（用户实测：uuid 未按
-    # 回车就触发）；2) prefix 误触风险（signature 的 sig）。中文 shortcut
-    # 组合中显示的是拼音，天然不会误匹配。
+    # **只匹配中文（AxShortcutMatcher 内 sc.isascii() 直接跳过）**：英文
+    # shortcut 一律由缓冲引擎覆盖（英文输入法：延迟确认；中文输入法：
+    # 提交键）——轮询里的英文 shortcut 有两个问题：1) 组合中 AX 值可能
+    # 含未上屏拼音（部分应用读不到 marked range），会提前触发（用户实测：
+    # uuid 未按回车就触发）；2) prefix 误触风险（signature 的 sig）。
+    # 中文 shortcut 组合中显示的是拼音，天然不会误匹配。
     #
     # 组合守卫：输入法组合中跳过匹配，**且不更新缓存**——组合上屏后
     # 文本变化才能触发（否则组合文本被缓存，上屏后文本未变，永不触发）。
+    # ⚠️ VS Code 等读不到 marked range，组合守卫失效——轮询会读到拼音
+    # 中间态（'wen h'）→ 上屏「问候」是替换。判定只能挡**尾部删除**
+    # （新文本是旧文本严格前缀），替换/追加都放行给末尾匹配决定。
+    #
+    # **删除判定（防删除误触发）**：轮询只看文本状态变化，删除也能把
+    # 文本变成以 shortcut 结尾（实测「问候你」删「你」→「问候」→ 误触
+    # 发）。只挡 is_delete_reveal（尾部纯删除）；文本被清空/全空白时
+    # 重置缓存为空串（否则清行后重输 shortcut 会被判非输入而不触发）。
+    #
+    # **上下文守卫（防既有文本误触发）**：自动触发只在用户**输入**时
+    # 有意义——切到已有 shortcut 文本的上下文不该触发（实测：切到
+    # Typora 光标落在「问候」后误触发；编辑面板名称「问候」被误删；
+    # 搜索框搜英文 shortcut「id」触发 automatic 模板、搜索词被删）。
+    # 触发只服务其他应用，且**上下文切换即重置触发状态**（中英两套）：
+    # 1. 前台是自己的进程 → 永不触发（_on_raw_key 也同规则，英文缓冲
+    #    不喂自己的键）——搜索框/编辑面板等 UI 一律不展开模板
+    # 2. 前台应用 pid 变化 → 中文文本缓存置 None + 英文缓冲 reset：
+    #    新上下文的既有文本不是用户输入，切换后继续输入才可能触发
     from PySide6.QtCore import QTimer
 
     from services.template.ax_text import read_focused_text
 
-    _focused_last = {"text": None}
+    _focused_last = {"text": None, "pid": None}
 
     def _poll_focused_text() -> None:
         try:
+            # 中文 shortcut 依赖 AX 读文本：确保前台应用 AX 树已开启
+            # （Electron 应用默认无）。无中文 shortcut → 轮询无意义
+            # （AxShortcutMatcher 只匹配中文），直接跳过。
+            if not _ensure_ax_if_needed():
+                return
             if is_ime_composing():
                 return  # 组合未上屏：跳过且不更新缓存
+            # 前台是自己的进程：模板触发只服务其他应用，自己 UI（编辑面板
+            # 名称/搜索框等）永不触发——实测编辑面板名称「问候」被误触发删掉；
+            # 同时清掉英文缓冲/挂起触发（切回 app 后不应在 UI 里展开）。
+            pid = _frontmost_pid()
+            if pid is None:
+                return
+            if pid == os.getpid():
+                matcher.reset()
+                return
+            # 前台应用切换：重置触发基线——中文文本缓存置 None（新上下文的
+            # 既有文本不是用户输入，实测切到 Typora 光标落在「问候」后误触
+            # 发），英文缓冲同样清空（防跨应用残留缓冲/挂起触发在错误应用
+            # 触发）。切换后继续输入的文本变化才可能触发（下一轮 prev=None
+            # 建立中文基线）。
+            if pid != _focused_last["pid"]:
+                _focused_last["pid"] = pid
+                _focused_last["text"] = None
+                matcher.reset()
+                return
             text = read_focused_text()
-            if not text or text == _focused_last["text"]:
+            if text is None or text == _focused_last["text"]:
                 return  # 文本未变化（防重复触发）
-            _focused_last["text"] = text
-            if matcher.match_text(text, mode="automatic", skip_ascii=True):
-                logger.info("焦点文本轮询触发：末尾匹配 shortcut")
+            if not text.strip():
+                _focused_last["text"] = ""  # 清空/全空白：重置缓存
+                return
+            prev, _focused_last["text"] = _focused_last["text"], text
+            if prev is None:
+                return  # 首次观测（切换后的基线轮）：不触发既有文本
+            if is_delete_reveal(prev, text):
+                return  # 删除尾部露出 shortcut：不是用户输入，不触发
+            if chinese_matcher.match_text(text, mode="automatic"):
+                logger.info("焦点文本轮询触发：末尾匹配中文 shortcut")
         except Exception:
             pass
 

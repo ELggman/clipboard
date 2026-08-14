@@ -282,101 +282,324 @@ def test_matcher_tab_after_boundary_miss_ok(tmp_path):
     assert triggered and triggered[-1]["shortcut"] == "quote"
 
 
-# ---- 中文 shortcut 触发（AX 文本末尾匹配）----
+# ---- 中文 shortcut 触发（AX 文本末尾匹配，AxShortcutMatcher 独立于英文缓冲）----
 
-def test_matcher_match_text_chinese_shortcut(tmp_path):
+def test_ax_matcher_chinese_shortcut(tmp_path):
     """中文 shortcut：焦点文本末尾匹配即触发（输入法上屏的汉字无按键事件）。"""
     from database.engine import create_db_engine
     from database.migrations import migrate
-    from services.template.matcher import ShortcutMatcher
+    from services.template.ax_matcher import AxShortcutMatcher
 
     eng = create_db_engine(tmp_path / "zh.db")
     migrate(eng)
     svc = TemplateService(eng)
     triggered = []
-    matcher = ShortcutMatcher(svc, on_trigger=lambda t, n, c: triggered.append((t, n)))
+    matcher = AxShortcutMatcher(
+        svc, on_trigger=lambda t, n, c: triggered.append((t, n, c)))
     svc.create_template("问候", "问候", "你好！", trigger_mode="tab")
 
     # 输入「你好问候」后按 Tab → 末尾匹配「问候」→ 触发
     assert matcher.match_text("你好问候") is True
     assert triggered and triggered[-1][0]["shortcut"] == "问候"
     assert triggered[-1][1] == 2  # 删除 2 个字符（问候）
+    assert triggered[-1][2] is False  # 中文已上屏，⌥⌫ 删除即可，无需取消组合
 
 
-def test_matcher_match_text_english_word_boundary(tmp_path):
-    """英文 shortcut：文本末尾匹配要求词边界（防 design 中间的 sig）。"""
+def test_ax_matcher_skips_english(tmp_path):
+    """独立性契约：AxShortcutMatcher 只匹配中文——英文 shortcut 永不走 AX。
+
+    英文触发完全由缓冲引擎（ShortcutMatcher.feed）负责；本类英文一律
+    sc.isascii() 跳过，防止中文路径与英文路径抢同一文本。
+    """
     from database.engine import create_db_engine
     from database.migrations import migrate
-    from services.template.matcher import ShortcutMatcher
+    from services.template.ax_matcher import AxShortcutMatcher
 
     eng = create_db_engine(tmp_path / "en.db")
     migrate(eng)
     svc = TemplateService(eng)
     triggered = []
-    matcher = ShortcutMatcher(svc, on_trigger=lambda t, n, c: triggered.append(t))
+    matcher = AxShortcutMatcher(
+        svc, on_trigger=lambda t, n, c: triggered.append(t))
     svc.create_template("Sig", "sig", "S", trigger_mode="tab")
 
-    assert matcher.match_text("design") is False  # sig 前是 n → 不触发
-    assert matcher.match_text("hi sig") is True   # 空格后独立词 → 触发
-    assert matcher.match_text("sig") is True      # 行首 → 触发
-    assert triggered and triggered[-1]["shortcut"] == "sig"
+    assert matcher.match_text("hi sig") is False  # 英文 shortcut → 不触发
+    assert matcher.match_text("sig") is False     # 行首也不行
+    assert triggered == []
 
 
-def test_matcher_match_text_only_tab_mode(tmp_path):
-    """文本匹配仅对 tab 模式模板生效（automatic 由输完自动触发）。"""
+def test_ax_matcher_mode_tab_only(tmp_path):
+    """Tab 路径仅匹配 tab 模式中文模板（automatic 由轮询触发）。"""
     from database.engine import create_db_engine
     from database.migrations import migrate
-    from services.template.matcher import ShortcutMatcher
+    from services.template.ax_matcher import AxShortcutMatcher
 
     eng = create_db_engine(tmp_path / "mode.db")
     migrate(eng)
     svc = TemplateService(eng)
     triggered = []
-    matcher = ShortcutMatcher(svc, on_trigger=lambda t, n, c: triggered.append(t))
-    svc.create_template("Auto", "auto", "A", trigger_mode="automatic")
+    matcher = AxShortcutMatcher(
+        svc, on_trigger=lambda t, n, c: triggered.append(t))
+    svc.create_template("问候", "问候", "你好！", trigger_mode="automatic")
 
-    assert matcher.match_text("xauto") is False  # automatic 不走文本 Tab 匹配
+    assert matcher.match_text("你好问候") is False  # automatic 不走文本 Tab 匹配
     assert triggered == []
 
 
-def test_matcher_match_text_automatic_mode(tmp_path):
-    """焦点文本轮询：automatic 模式的中文/英文 shortcut 匹配（轮询路径）。"""
+def test_ax_matcher_automatic_mode(tmp_path):
+    """焦点文本轮询：automatic 模式的中文 shortcut 末尾匹配。"""
     from database.engine import create_db_engine
     from database.migrations import migrate
-    from services.template.matcher import ShortcutMatcher
+    from services.template.ax_matcher import AxShortcutMatcher
 
     eng = create_db_engine(tmp_path / "auto_zh.db")
     migrate(eng)
     svc = TemplateService(eng)
     triggered = []
-    matcher = ShortcutMatcher(svc, on_trigger=lambda t, n, c: triggered.append((t, n)))
+    matcher = AxShortcutMatcher(
+        svc, on_trigger=lambda t, n, c: triggered.append((t, n)))
     svc.create_template("问候", "问候", "你好！", trigger_mode="automatic")
-    svc.create_template("Q2", "q2", "Q", trigger_mode="automatic")
+    svc.create_template("你好", "你好", "H", trigger_mode="tab")
 
-    # automatic 模式：文本末尾匹配
     assert matcher.match_text("你好问候", mode="automatic") is True
     assert triggered[-1][0]["shortcut"] == "问候"
-    # tab 模式不走 automatic 轮询
-    matcher.reset()
-    assert matcher.match_text("xq2", mode="automatic") is False
+    # automatic 轮询不匹配 tab 模式模板（即使文本以它结尾）
+    assert matcher.match_text("你好", mode="automatic") is False
 
 
-def test_matcher_match_text_skip_ascii(tmp_path):
-    """轮询 skip_ascii=True：只匹配中文 shortcut（英文由按键路径覆盖）。"""
+def test_ax_matcher_empty_or_miss(tmp_path):
+    """空文本/无匹配：返回 False 不触发。"""
     from database.engine import create_db_engine
     from database.migrations import migrate
-    from services.template.matcher import ShortcutMatcher
+    from services.template.ax_matcher import AxShortcutMatcher
 
-    eng = create_db_engine(tmp_path / "skip_ascii.db")
+    eng = create_db_engine(tmp_path / "miss.db")
     migrate(eng)
     svc = TemplateService(eng)
     triggered = []
-    matcher = ShortcutMatcher(svc, on_trigger=lambda t, n, c: triggered.append(t))
-    svc.create_template("问候", "问候", "你好！", trigger_mode="automatic")
-    svc.create_template("Q2", "q2", "Q", trigger_mode="automatic")
+    matcher = AxShortcutMatcher(
+        svc, on_trigger=lambda t, n, c: triggered.append(t))
+    svc.create_template("问候", "问候", "你好！", trigger_mode="tab")
 
-    # 中文 shortcut：skip_ascii 下仍匹配
-    assert matcher.match_text("你好问候", mode="automatic", skip_ascii=True) is True
-    assert triggered[-1]["shortcut"] == "问候"
-    # 英文 shortcut：skip_ascii 下不匹配（组合中拼音/prefix 误触来源）
-    assert matcher.match_text("hi q2", mode="automatic", skip_ascii=True) is False
+    assert matcher.match_text("") is False
+    assert matcher.match_text("你好世界") is False  # 不以「问候」结尾
+    assert triggered == []
+
+
+def test_ax_matcher_strips_trailing_newlines(tmp_path):
+    """编辑器块文本尾随换行剥离后再匹配（实测 Typora value='问候\\n\\n'）。
+
+    回归：不剥离则 endswith 永远匹配不上——Typora 是块级模型，每个段落
+    的 AXTextArea value 尾部固定带段落换行伪影。
+    """
+    from database.engine import create_db_engine
+    from database.migrations import migrate
+    from services.template.ax_matcher import AxShortcutMatcher
+
+    eng = create_db_engine(tmp_path / "typora.db")
+    migrate(eng)
+    svc = TemplateService(eng)
+    triggered = []
+    matcher = AxShortcutMatcher(
+        svc, on_trigger=lambda t, n, c: triggered.append((t, n)))
+    svc.create_template("问候", "问候", "你好！", trigger_mode="automatic")
+
+    # Typora 实测：value 尾部带两个换行
+    assert matcher.match_text("问候\n\n", mode="automatic") is True
+    assert triggered[-1][0]["shortcut"] == "问候"
+    assert triggered[-1][1] == 2  # 删除 2 个字符（问候）
+
+    # 段落中匹配 + 尾随换行；换行前的空格也可剥离
+    assert matcher.match_text("今天天气好 问候\n", mode="automatic") is True
+    assert triggered[-1][0]["shortcut"] == "问候"
+
+    # 全空白文本：剥离后无可匹配 → False 不触发
+    assert matcher.match_text("\n\n", mode="automatic") is False
+
+
+def test_is_delete_reveal():
+    """删除判定：只把「删尾部露出 shortcut」当非输入，追加/替换放行。
+
+    回归 1：automatic 轮询实测「问候你」删掉「你」后文本变「问候」，
+    末尾匹配会误触发——删除判定挡掉。
+    回归 2：VS Code 读不到 marked range，组合守卫失效，轮询会读到拼音
+    中间态（'wen h'）→ 上屏「问候」是**替换**不是追加——若按追加判定
+    会误判为非输入导致无法触发（实测）。替换应放行给末尾匹配。
+    """
+    from services.template.ax_matcher import is_delete_reveal
+
+    # 删除尾部露出 shortcut → True（应挡）
+    assert is_delete_reveal("问候你", "问候") is True           # ⌫
+    assert is_delete_reveal("问候你\n\n", "问候\n\n") is True   # Typora 块尾换行
+    assert is_delete_reveal("abc问候你", "abc问候") is True     # 段中删尾
+
+    # 追加/替换/改写/空 → False（放行匹配尝试）
+    assert is_delete_reveal("", "问候\n\n") is False            # 空 → 输入
+    assert is_delete_reveal("问候", "问候你") is False          # 追加字符
+    assert is_delete_reveal("问候\n\n", "问候你\n\n") is False  # 追加（换行移位）
+    assert is_delete_reveal("... wen h", "... 问候") is False   # 拼音→上屏（回归2）
+    assert is_delete_reveal("abc问候", "xabc问候") is False     # 改写
+
+
+def test_ax_matcher_no_delete_trigger(tmp_path):
+    """automatic 轮询完整序列：删除使文本以 shortcut 结尾 → 不触发。
+
+    模拟 _poll_focused_text 的状态迁移逻辑（缓存 + 删除判定 + 匹配）：
+    「问候你」→ 删「你」→ 文本「问候」，末尾匹配会误触发；删除判定
+    挡掉。同时验证正常输入仍触发、清行重置后可重新触发、拼音→上屏
+    （VS Code 组合守卫失效的场景）也能触发、首次观测（切换上下文后
+    的基线轮）既有文本不触发。
+    """
+    from database.engine import create_db_engine
+    from database.migrations import migrate
+    from services.template.ax_matcher import AxShortcutMatcher
+    from services.template.ax_matcher import is_delete_reveal
+
+    eng = create_db_engine(tmp_path / "del.db")
+    migrate(eng)
+    svc = TemplateService(eng)
+    triggered = []
+    matcher = AxShortcutMatcher(
+        svc, on_trigger=lambda t, n, c: triggered.append(t["shortcut"]))
+    svc.create_template("问候", "问候", "你好！", trigger_mode="automatic")
+
+    cache = None
+
+    def poll(text):  # 与 bootstrap._poll_focused_text 同构
+        nonlocal cache
+        if text is None or text == cache:
+            return
+        if not text.strip():
+            cache = ""
+            return
+        prev, cache = cache, text
+        if prev is None:
+            return  # 首次观测
+        if is_delete_reveal(prev, text):
+            return  # 删除尾部露出 shortcut
+        matcher.match_text(text, mode="automatic")
+
+    # 首次观测（切换上下文后的基线轮，prev=None）：既有文本不触发
+    # （对应 bootstrap：前台 pid 变化 → 重置缓存，下一轮 prev=None 建立基线）
+    poll("问候\n\n")
+    assert triggered == []
+
+    # 空行 → 输入「问候」→ 触发
+    poll("")
+    poll("问候\n\n")
+    assert triggered == ["问候"]
+
+    # 追加「你」→ 不触发（不是 shortcut）
+    poll("问候你\n\n")
+    assert triggered == ["问候"]
+
+    # 删掉「你」→ 文本变「问候」，但是删除 → 不触发（回归1）
+    poll("问候\n\n")
+    assert triggered == ["问候"]
+
+    # 清行重置 → 重输「问候」→ 重新触发（缓存不卡死）
+    poll("")         # 清空 → 重置缓存
+    poll("问候\n\n")  # 重输
+    assert triggered == ["问候", "问候"]
+
+    # 拼音中间态 → 上屏「问候」（VS Code 组合守卫失效）→ 触发（回归2）
+    poll("问候 输入 wen h")   # 拼音，ASCII，不匹配
+    poll("问候 输入 问候")     # 上屏：替换不是删除 → 放行 → 触发
+    assert triggered == ["问候", "问候", "问候"]
+
+
+# ---- has_chinese_shortcut（决定是否强制开启前台 AX 树）----
+
+def test_has_chinese_shortcut(tmp_path):
+    """有非 ASCII（中文）shortcut 才返回 True——决定是否强制开 AX。"""
+    from database.engine import create_db_engine
+    from database.migrations import migrate
+
+    eng = create_db_engine(tmp_path / "zh_flag.db")
+    migrate(eng)
+    svc = TemplateService(eng)
+
+    svc.create_template("Email", "email", "hello")  # 只有英文
+    assert svc.has_chinese_shortcut() is False
+
+    svc.create_template("问候", "问候", "你好！", trigger_mode="tab")  # 加中文
+    assert svc.has_chinese_shortcut() is True
+
+
+def test_has_chinese_shortcut_disabled_ignored(tmp_path):
+    """只统计已启用 shortcut（禁用的中文不算——触发不了无需开 AX）。"""
+    from database.engine import create_db_engine
+    from database.migrations import migrate
+
+    eng = create_db_engine(tmp_path / "zh_flag2.db")
+    migrate(eng)
+    svc = TemplateService(eng)
+
+    tid = svc.create_template("问候", "问候", "你好！", trigger_mode="tab")
+    assert svc.has_chinese_shortcut() is True
+    svc.toggle_enabled(tid)  # 禁用
+    assert svc.has_chinese_shortcut() is False
+
+
+# ---- Tab 兜底：中文输入法提交键清缓冲后，从已上屏文本末尾匹配英文 ----
+
+def test_ax_matcher_ascii_tab_fallback(tmp_path):
+    """include_ascii=True：匹配英文 tab shortcut；默认（False）仍跳过英文。
+
+    回归场景（用户实测）：中文输入法下输英文 shortcut 必须先按提交键
+    （回车/空格）上屏，提交键清掉英文缓冲（tab 模式不自动触发，缓冲被
+    清），随后 Tab 时缓冲为空——只能从**已上屏的焦点文本末尾**匹配英文
+    tab shortcut（bootstrap._on_raw_key 的 AX 兜底）。命中 cancel_ime
+    恒 False（文本已上屏，⌥⌫ 删即可）。
+    """
+    from database.engine import create_db_engine
+    from database.migrations import migrate
+    from services.template.ax_matcher import AxShortcutMatcher
+
+    eng = create_db_engine(tmp_path / "en_tab.db")
+    migrate(eng)
+    svc = TemplateService(eng)
+    triggered = []
+    matcher = AxShortcutMatcher(
+        svc, on_trigger=lambda t, n, c: triggered.append((t, n, c)))
+    svc.create_template("Now", "now", "此刻", trigger_mode="tab")
+    svc.create_template("Auto", "auto1", "X", trigger_mode="automatic")
+
+    # 默认 include_ascii=False：英文被跳过（主路径契约不变）
+    assert matcher.match_text("hello now") is False
+    assert triggered == []
+
+    # include_ascii=True：匹配英文 tab shortcut
+    assert matcher.match_text("hello now", include_ascii=True) is True
+    assert triggered[-1][0]["shortcut"] == "now"
+    assert triggered[-1][1] == 3
+    assert triggered[-1][2] is False  # 已上屏 → ⌥⌫，无需取消组合
+
+    # 模式过滤：automatic 不参与 Tab 兜底（Tab 只触发 tab 模式）
+    assert matcher.match_text("x auto1", include_ascii=True) is False
+    assert len(triggered) == 1
+
+
+def test_ax_matcher_include_ascii_still_matches_chinese(tmp_path):
+    """include_ascii=True 是「中文+英文」合一次扫描：中文仍匹配。
+
+    Tab 兜底覆盖中英两套——中文输入法下无论中英文 shortcut，提交上屏后
+    Tab 都能从文本末尾触发。
+    """
+    from database.engine import create_db_engine
+    from database.migrations import migrate
+    from services.template.ax_matcher import AxShortcutMatcher
+
+    eng = create_db_engine(tmp_path / "mix_tab.db")
+    migrate(eng)
+    svc = TemplateService(eng)
+    triggered = []
+    matcher = AxShortcutMatcher(
+        svc, on_trigger=lambda t, n, c: triggered.append(t["shortcut"]))
+    svc.create_template("问候", "问候", "你好！", trigger_mode="tab")
+    svc.create_template("Now", "now", "此刻", trigger_mode="tab")
+
+    assert matcher.match_text("你好问候", include_ascii=True) is True
+    assert triggered[-1] == "问候"
+    assert matcher.match_text("hello now", include_ascii=True) is True
+    assert triggered[-1] == "now"

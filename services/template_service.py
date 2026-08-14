@@ -156,6 +156,16 @@ class TemplateService:
         return [{"shortcut": r.shortcut, "trigger_mode": r.trigger_mode,
                  "id": r.id} for r in rows]
 
+    def has_chinese_shortcut(self) -> bool:
+        """是否存在非 ASCII（中文）shortcut。
+
+        决定是否强制开启前台应用的 AX 树（bootstrap 调用）：中文 shortcut
+        触发依赖 AX 读取上屏汉字；纯英文 shortcut 走键盘缓冲不需要 AX——
+        不强制开，避免给用户的编辑器（Electron 应用）带来 Chromium AX 开销。
+        """
+        return any(not item["shortcut"].isascii()
+                   for item in self.list_shortcuts())
+
     def toggle_enabled(self, template_id: int) -> bool:
         with make_session_factory(self._engine)() as session:
             row = session.get(Snippet, template_id)
