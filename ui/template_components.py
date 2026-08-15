@@ -15,7 +15,7 @@
 import logging
 import re
 
-from PySide6.QtCore import QRect, QSize, Qt, QPoint, Signal
+from PySide6.QtCore import QRect, QSize, Qt, QPoint, QTimer, Signal
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -25,16 +25,28 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QApplication,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QLayout,
     QPushButton,
+    QScrollArea,
     QStyledItemDelegate,
     QStyle,
+    QVBoxLayout,
     QWidget,
 )
 
 from ui.code_highlighter import CodeHighlighter
+from services.template.registry import (
+    CAT_CUSTOM,
+    PRESET_VARIABLES,
+    VariableMeta,
+    custom_default_tooltip,
+    group_by_category,
+    is_preset,
+    meta_for,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +71,55 @@ _RADIUS = 8               # 行圆角
 # 星标金（macOS 星标色，深浅主题通用）
 _STAR_GOLD = QColor("#FFD60A")
 _STAR_DIM = QColor("#B0B0B6")
+
+
+# ---- 变量配置持久化（config template 段；胶囊区/变量库/自动补全共用）----
+
+def load_extra_variables() -> list[str]:
+    """用户自定义变量（config template.extra_variables）。"""
+    try:
+        from app.config import load_config
+
+        config = load_config()
+        return list(config.get("template", {}).get("extra_variables", []))
+    except Exception:
+        return []
+
+
+def save_extra_variables(vars_list: list[str]) -> None:
+    """持久化用户自定义变量。"""
+    try:
+        from app.config import save_user_config
+
+        save_user_config({"template": {"extra_variables": list(vars_list)}})
+    except Exception:
+        pass
+
+
+def load_favorite_variables() -> list[str]:
+    """常用变量（config template.favorite_variables）；null/空 → 全部预设。
+
+    ⚠️ 返回值（预设列表）随注册表增长自动更新——null 语义 = 「全部预设」，
+    不落盘硬编码副本。
+    """
+    try:
+        from app.config import load_config
+
+        config = load_config()
+        favs = config.get("template", {}).get("favorite_variables")
+        return list(favs) if favs else [m.insert for m in PRESET_VARIABLES]
+    except Exception:
+        return [m.insert for m in PRESET_VARIABLES]
+
+
+def save_favorite_variables(favs: list[str]) -> None:
+    """持久化常用变量。"""
+    try:
+        from app.config import save_user_config
+
+        save_user_config({"template": {"favorite_variables": list(favs)}})
+    except Exception:
+        pass
 
 
 def _rounded_path(rect: QRect, radius: int) -> QPainterPath:
@@ -277,9 +338,9 @@ class VariableTagBar(QWidget):
     variable_clicked = Signal(str)
     remove_requested = Signal(str)
 
-    # 预设变量（按使用频率）
-    DEFAULT_VARIABLES = ("{{date}}", "{{time}}", "{{datetime}}", "{{uuid}}",
-                         "{{clipboard}}", "{{input:name}}", "{{cursor}}")
+    # 预设变量（唯一事实源 = 变量注册表 registry；顺序同注册表：
+    # date/time/datetime/uuid/clipboard/selection/input/cursor）
+    DEFAULT_VARIABLES = tuple(m.insert for m in PRESET_VARIABLES)
     # 折叠时最多显示的胶囊数（400px 弹窗胶囊区 ≈ 280px 放 3 个）
     _MAX_COLLAPSED = 3
 
@@ -307,6 +368,15 @@ class VariableTagBar(QWidget):
         btn.setObjectName("varTag")
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
         btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        # macOS 上 varTag 的 sizeHint 高度（样式表 padding 不计入，实测 ~5px）
+        # 远小于实际渲染高度（原生按钮最小值 ~24px）。_FlowLayout 按偏小的
+        # sizeHint 计算行高，第二行胶囊叠到第一行上（问题4「取消收藏后堆叠」）。
+        # 固定高度让 sizeHint == 实际高度，行高才正确（与右侧按钮同值 24px）。
+        btn.setFixedHeight(24)
+        # 悬停说明（可发现性）：内置变量查注册表（作用/用法/例子），
+        # 自定义变量默认说明（当前值源只能「用户输入」）
+        meta = meta_for(var)
+        btn.setToolTip(meta.tooltip() if meta else custom_default_tooltip())
         btn.customContextMenuRequested.connect(
             lambda _p, v=var: self.remove_requested.emit(v))
         btn.clicked.connect(
@@ -318,6 +388,7 @@ class VariableTagBar(QWidget):
         """追加变量胶囊（外部持久化到 config 后调用）。"""
         self._add_pill(var)
         self._apply_collapse()
+        self._relayout()
 
     def remove_variable(self, var: str) -> None:
         """移除变量胶囊（外部已从 config 删除后调用）。"""
@@ -325,11 +396,66 @@ class VariableTagBar(QWidget):
         if btn is not None:
             self._flow.removeWidget(btn)
             self._pills.remove(btn)
-            btn.deleteLater()
+            self._detach_pill(btn)
         self._apply_collapse()
+        self._relayout()
+
+    def _detach_pill(self, btn) -> None:
+        """立即从胶囊条分离旧胶囊（隐藏 + 脱离父级 + 延迟删除）。
+
+        deleteLater 是延迟删除，只 setVisible(False) 的话，旧胶囊在下一轮
+        事件循环前仍是胶囊条子控件、仍占着旧几何——macOS 上会把新胶囊
+        挤回默认 (0,0,640,480)，叠在一起（问题4「取消收藏后堆叠」）。
+        setParent(None) 立即解除父子关系，旧胶囊不再参与任何重绘/布局。
+        """
+        btn.hide()
+        btn.setParent(None)
+        btn.deleteLater()
 
     def variables(self) -> list[str]:
         return [b.text() for b in self._pills]
+
+    def set_variables(self, variables: list[str]) -> None:
+        """整体替换胶囊（常用变量在「变量库」★ 变更后重建）。"""
+        for btn in self._pills:
+            self._flow.removeWidget(btn)
+            self._detach_pill(btn)
+        self._pills.clear()
+        for var in variables:
+            self._add_pill(var)
+        self._apply_collapse()
+        self._relayout()
+
+    def _relayout(self) -> None:
+        """强制流式布局立即重排（胶囊增/删/重建后）。
+
+        ⚠️ 胶囊区在 QScrollArea 里，控件尺寸不变时 Qt 不会重跑布局——新加
+        胶囊会停在默认几何 (0,0,640,480)，与旧胶囊堆叠（实测：取消收藏后
+        全部叠在一起）。
+
+        不依赖 QLayout.activate()（macOS 上 activate 的 topLevel 检查可能
+        提前 return、不同步重排）——直接调 _do_layout 用当前内容矩形排，
+        再 repaint()（同步）强制重绘清掉旧胶囊残留像素。
+        """
+        self._flow.invalidate()
+        self._flow._do_layout(self.contentsRect(), False)
+        self.updateGeometry()
+        self.repaint()
+        # 兜底：deleteLater 的旧胶囊在下一轮事件循环才真正删除，此轮过后
+        # Qt 可能再跑一次布局把新胶囊打回默认几何——延迟一轮再排一次，
+        # 确保删除完成后的布局是干净的（macOS 上单次 _do_layout 不够）。
+        QTimer.singleShot(0, self._relayout_after_delete)
+
+    def _relayout_after_delete(self) -> None:
+        self._flow._do_layout(self.contentsRect(), False)
+        self.updateGeometry()
+        self.repaint()
+        pos = [(b.text(), b.geometry().x(), b.geometry().y(),
+                b.height(), b.minimumHeight(), b.sizeHint().height(),
+                b.minimumSizeHint().height())
+               for b in self._pills if b.isVisible()]
+        logger.info("胶囊重排完成: 容器宽=%s spacing=%s 可见=(text,x,y,h,minH,sh,msh)=%s",
+                    self.contentsRect().width(), self._flow.spacing(), pos)
 
     def set_expanded(self, expanded: bool) -> None:
         self._expanded = expanded
@@ -432,6 +558,15 @@ class _FlowLayout(QLayout):
             if w is not None and not w.isVisible():
                 continue
             hint = item.sizeHint()
+            # 行高必须按「实际渲染高度」算：macOS 上样式表 padding 不计入
+            # sizeHint（sizeHint 偏小，实测胶囊 ~8px），且 setFixedHeight 不
+            # 可靠地反映到 minimumSize——用三者最大值兜底（w.height() 是上一
+            # 轮 setGeometry 夹到固定高度后的真实高度，最接近实际渲染值）。
+            # 否则第二行胶囊叠到第一行上（问题4「堆叠」）。
+            eff_h = max(hint.height(),
+                        w.minimumHeight() if w is not None else 0,
+                        w.height() if w is not None else 0)
+            hint.setHeight(eff_h)
             if x + hint.width() > rect.right() and line_h > 0:
                 x = rect.x()
                 y += line_h + spacing
@@ -441,3 +576,139 @@ class _FlowLayout(QLayout):
             x += hint.width() + spacing
             line_h = max(line_h, hint.height())
         return y + line_h - rect.y()
+
+
+# 「变量库」弹层行 ★ 点击区宽度（行首星标切换常用）
+LIB_STAR_ZONE = 30
+
+
+class _LibraryRowButton(QPushButton):
+    """变量库行按钮：按下时按 x 区分 ★ 区点击 vs 行点击。
+
+    ⚠️ 不能靠弹层级 mousePressEvent 检测（QPushButton 会消费按下事件，
+    事件不冒泡到父级）——在按钮自身记录按下位置并按 x 分流。不调
+    super().mousePressEvent（避免默认按下态/clicked 干扰，自发光信号）。
+    """
+
+    star_clicked = Signal(str)  # insert：★ 切换常用
+    row_clicked = Signal(str)   # insert：点击插入
+
+    def __init__(self, text: str, insert: str, parent=None):
+        super().__init__(text, parent)
+        self._insert = insert
+
+    def mousePressEvent(self, event) -> None:
+        if event.position().x() < LIB_STAR_ZONE:
+            self.star_clicked.emit(self._insert)
+        else:
+            self.row_clicked.emit(self._insert)
+
+
+class HoverButton(QPushButton):
+    """悬停按钮：enter/leave 事件转发（「变量库」悬停展开用）。
+
+    鼠标移到按钮上 → entered；移出 → left。外部据此 + 弹层的 entered/left
+    用定时器控制开关：鼠标在按钮**或**弹层上都保持打开。
+    """
+
+    entered = Signal()
+    left = Signal()
+
+    def enterEvent(self, event) -> None:
+        super().enterEvent(event)
+        self.entered.emit()
+
+    def leaveEvent(self, event) -> None:
+        super().leaveEvent(event)
+        self.left.emit()
+
+
+class VariableLibraryPopup(QWidget):
+    """「变量库」弹层：按来源类别分组列出全部变量（内置 + 自定义）。
+
+    - Qt.Popup（代码库已验证的可交互弹层模式，同 template_picker/item_detail）：
+      自带 NSPanel 外观阴影 + 点击外部/Esc 关闭——悬停计时器方案在 macOS 上
+      不可靠（移向弹层时 250ms 关窗先触发，点击永远来不及，实测 bug），
+      改由外部「点击切换」（_toggle_library）+ Popup 自带外部点击关闭。
+    - 行 = ★ + 变量插入文本：★ 区点击切换常用（favorites_changed →
+      外部刷新胶囊区），其余区点击 → insert_requested（input 走后缀规则，
+      外部处理）
+    - 只读数据从 config 读（load_favorite_variables）；外部增删自定义
+      变量后调 set_custom_variables 再 rebuild
+    """
+
+    insert_requested = Signal(str)
+    favorites_changed = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent, Qt.FramelessWindowHint | Qt.Popup)
+        self.setObjectName("variableLibrary")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self._custom: list[str] = []
+        self._rows: list[tuple[QPushButton, str]] = []
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(8, 8, 8, 8)
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._scroll.setObjectName("varLibraryScroll")
+        lay.addWidget(self._scroll)
+        self._body = QWidget()
+        self._body_lay = QVBoxLayout(self._body)
+        self._body_lay.setContentsMargins(0, 0, 0, 0)
+        self._body_lay.setSpacing(2)
+        self._scroll.setWidget(self._body)
+        self.resize(260, 300)
+
+    def set_custom_variables(self, custom: list[str]) -> None:
+        """外部注入用户自定义变量（编辑弹窗增删时同步）。"""
+        self._custom = list(custom)
+
+    # ---- 内容构建 ----
+
+    def rebuild(self) -> None:
+        """按来源类别重排全部变量（内置 + 自定义），刷新 ★ 状态。"""
+        while self._body_lay.count():
+            item = self._body_lay.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        self._rows.clear()
+        metas = list(PRESET_VARIABLES) + [
+            VariableMeta(insert=c, category=CAT_CUSTOM, description="",
+                         usage="", example="", builtin=False)
+            for c in self._custom if not is_preset(c)
+        ]
+        favs = set(load_favorite_variables())
+        for cat, group in group_by_category(metas):
+            title = QLabel(cat)
+            title.setObjectName("groupHeader")
+            self._body_lay.addWidget(title)
+            for m in group:
+                btn = _LibraryRowButton(
+                    ("★ " if m.insert in favs else "☆ ") + m.insert,
+                    m.insert)
+                btn.setObjectName("varLibRow")
+                btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                meta = meta_for(m.insert)
+                btn.setToolTip(meta.tooltip() if meta
+                               else custom_default_tooltip())
+                btn.star_clicked.connect(self._toggle_favorite)
+                btn.row_clicked.connect(self._emit_insert)
+                self._body_lay.addWidget(btn)
+                self._rows.append((btn, m.insert))
+        self._body_lay.addStretch(1)
+
+    def _toggle_favorite(self, insert: str) -> None:
+        favs = load_favorite_variables()
+        if insert in favs:
+            favs.remove(insert)
+        else:
+            favs.append(insert)
+        save_favorite_variables(favs)
+        self.rebuild()
+        self.favorites_changed.emit()
+
+    def _emit_insert(self, insert: str) -> None:
+        self.insert_requested.emit(insert)
+        self.hide()

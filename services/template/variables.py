@@ -38,6 +38,7 @@ class RenderContext:
 
     now: datetime = field(default_factory=datetime.now)
     clipboard_text: str = ""
+    selection_text: str = ""
     input_values: dict[str, str] = field(default_factory=dict)
 
 
@@ -74,6 +75,13 @@ class ClipboardProvider(VariableProvider):
         return ctx.clipboard_text
 
 
+class SelectionProvider(VariableProvider):
+    """{{selection}}：当前选中文本（允许为空，与 {{clipboard}} 同语义）。"""
+
+    def render(self, token: Token, ctx: RenderContext) -> str:
+        return ctx.selection_text
+
+
 class InputProvider(VariableProvider):
     """{{input:name}}：用户输入值（渲染前已收集，§40-41）。"""
 
@@ -96,6 +104,7 @@ def build_providers() -> dict[TokenType, VariableProvider]:
         TokenType.DATETIME: DateTimeProvider(TokenType.DATETIME),
         TokenType.UUID: UUIDProvider(),
         TokenType.CLIPBOARD: ClipboardProvider(),
+        TokenType.SELECTION: SelectionProvider(),
         TokenType.INPUT: InputProvider(),
         TokenType.CURSOR: CursorProvider(),
     }

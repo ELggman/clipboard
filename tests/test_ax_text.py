@@ -60,3 +60,20 @@ def test_ensure_ax_enabled_new_pid_sets(monkeypatch):
     # 同一 pid 再次调用 → 命中缓存，不再 SET
     assert ax_text.ensure_ax_enabled() is True
     assert len(calls) == 1
+
+
+def test_read_focused_selection_ax_error_returns_none(monkeypatch):
+    """AX 查询失败（无权限/不支持）：read_focused_selection 返回 None。
+
+    NSWorkspace 是 ObjC 类不可 monkeypatch；改 patch ApplicationServices 的
+    AX 函数（与 ensure_ax_enabled 测试同模式）。AX 调用返回 err≠0 → None。
+    """
+    from services.template.ax_text import read_focused_selection
+
+    import ApplicationServices as _as
+
+    monkeypatch.setattr(_as, "AXUIElementCreateApplication",
+                        lambda pid: ("AX", pid))
+    monkeypatch.setattr(_as, "AXUIElementCopyAttributeValue",
+                        lambda *a, **k: (1, None))  # err != 0
+    assert read_focused_selection() is None

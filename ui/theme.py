@@ -429,6 +429,38 @@ QScrollArea#varScroll > QWidget > QWidget {
     background: transparent;
 }
 
+/* 「变量库」弹层：分组面板 + 行按钮（★ 在前，点击行插入/★ 切常用） */
+QWidget#variableLibrary {
+    background: $window;
+    border: 1px solid $separator;
+    border-radius: 10px;
+}
+QScrollArea#varLibraryScroll { background: transparent; border: none; }
+QScrollArea#varLibraryScroll > QWidget > QWidget { background: transparent; }
+QLabel#groupHeader {
+    color: $secondary;
+    font-size: 11px;
+    padding: 5px 2px 2px 2px;
+}
+QPushButton#varLibRow {
+    background: transparent;
+    border: none;
+    border-radius: 6px;
+    padding: 5px 8px;
+    color: $text;
+    font-size: 12px;
+    font-family: Menlo, Monaco, monospace;
+    text-align: left;
+}
+QPushButton#varLibRow:hover { background: $hover; color: $accent; }
+
+/* 变量自动补全弹层：不透明背景（macOS 弹层透明合成坑，§9） */
+QWidget#variableAutocomplete {
+    background: $window;
+    border: 1px solid $separator;
+    border-radius: 10px;
+}
+
 /* 模板代码编辑器（等宽 + Pygments 高亮） */
 QPlainTextEdit#templateEditor {
     background: $content;

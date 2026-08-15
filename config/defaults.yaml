@@ -40,6 +40,7 @@ template:
   time_format: "%H:%M"
   datetime_format: "%Y-%m-%d %H:%M:%S"
   extra_variables: []           # 用户自定义变量（编辑弹窗「＋ 新增变量」追加）
+  favorite_variables: null      # 常用变量（自动补全/变量区/「变量库」★ 管理）；null=默认全部预设
 
 search:
   page_size: 100

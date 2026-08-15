@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 
 class TemplatePickerPopup(QWidget):
     selected = Signal(object)  # 模板 dict
+    hidden = Signal()          # 关闭时发出（Esc/点外部/选中后）
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent, Qt.FramelessWindowHint | Qt.Popup)
@@ -72,6 +73,10 @@ class TemplatePickerPopup(QWidget):
         if self._svc is None:
             return
         self.populate(self._svc.search_templates(text.strip()))
+
+    def hideEvent(self, event) -> None:
+        super().hideEvent(event)
+        self.hidden.emit()
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
         if event.key() in (Qt.Key_Return, Qt.Key_Enter):

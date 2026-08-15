@@ -508,19 +508,36 @@ def test_templates_variable_tag_inserts(tmp_path):
     dlg.close()
 
 
+def test_templates_input_variable_auto_suffix(tmp_path):
+    """重复点 {{input:name}} → name/name2/name3（后缀规则接线）。"""
+    from database.engine import create_db_engine
+    from database.migrations import migrate
+    from services.template_service import TemplateService
+    from ui.templates_view import TemplateEditorDialog
+
+    engine = create_db_engine(tmp_path / "vs.db")
+    migrate(engine)
+    dlg = TemplateEditorDialog(None, TemplateService(engine), None)
+    for _ in range(3):
+        dlg._var_tags.variable_clicked.emit("{{input:name}}")
+    assert dlg._content.toPlainText() == "{{input:name}}{{input:name2}}{{input:name3}}"
+    dlg.close()
+
+
 def test_variable_tag_bar_collapse_and_add():
     """变量条：超阈值折叠/展开；add_variable 追加、remove_variable 删除。"""
     from ui.template_components import VariableTagBar
 
     bar = VariableTagBar(variables=list(VariableTagBar.DEFAULT_VARIABLES))
-    assert len(bar.variables()) == 7
-    assert bar.needs_collapse()  # 7 > 3 → 外部显示「展开全部」
-    # 折叠态：第 4-7 个隐藏（隐藏控件不占布局；400px 弹窗胶囊区放 3 个）
-    assert bar._pills[3].isHidden() and bar._pills[6].isHidden()
+    n = len(VariableTagBar.DEFAULT_VARIABLES)
+    assert len(bar.variables()) == n
+    assert bar.needs_collapse()  # n > 3 → 外部显示「展开全部」
+    # 折叠态：第 4+ 个隐藏（隐藏控件不占布局；400px 弹窗胶囊区放 3 个）
+    assert bar._pills[3].isHidden() and bar._pills[-1].isHidden()
     assert not bar._pills[0].isHidden()
     # 展开
     bar.set_expanded(True)
-    assert not bar._pills[3].isHidden() and not bar._pills[6].isHidden()
+    assert not bar._pills[3].isHidden() and not bar._pills[-1].isHidden()
     assert bar.is_expanded()
     # 追加自定义变量（按序排入胶囊区）
     bar.add_variable("{{myvar}}")
@@ -530,6 +547,72 @@ def test_variable_tag_bar_collapse_and_add():
     bar.remove_variable("{{myvar}}")
     assert "{{myvar}}" not in bar.variables()
     bar.close()
+
+
+def test_input_dialog_all_filled():
+    """all_filled：全部字段非空才 True（空白/纯空格视为未填）。"""
+    from ui.input_variable_dialog import all_filled
+
+    assert all_filled({})  # 无输入项 → 无需填，恒真
+    assert not all_filled({"name": ""})
+    assert not all_filled({"name": "   "})
+    assert not all_filled({"a": "张三", "b": ""})
+    assert all_filled({"a": "张三", "b": "李四"})
+
+
+def test_input_dialog_preview_text():
+    """preview_text：已填 token 替换为值，未填保留原 token。"""
+    from ui.input_variable_dialog import preview_text
+
+    content = "{{input:leader}}好！我叫{{input:name}}，很高兴认识你。"
+    assert preview_text(content, {}) == content
+    assert preview_text(content, {"name": "王五"}) == \
+        "{{input:leader}}好！我叫王五，很高兴认识你。"
+    assert preview_text(content, {"leader": "同学们", "name": "王五"}) == \
+        "同学们好！我叫王五，很高兴认识你。"
+    # 空白值视为未填，保留 token
+    assert preview_text(content, {"name": "  "}) == content
+
+
+def test_input_dialog_insert_requires_all_filled():
+    """对话框：插入按钮初始置灰；全填满才可点；预览随输入更新。"""
+    from ui.input_variable_dialog import InputVariableDialog
+
+    content = "{{input:leader}}好！我叫{{input:name}}，很高兴认识你。"
+    dlg = InputVariableDialog(["leader", "name"], content=content)
+    try:
+        assert not dlg._insert_btn.isEnabled()  # 初始未填 → 置灰
+        assert dlg._preview.toPlainText() == content  # 预览 = 原文
+        dlg._edits["name"].setText("王五")
+        assert not dlg._insert_btn.isEnabled()  # 还有 leader 未填
+        assert "王五" in dlg._preview.toPlainText()
+        assert "{{input:leader}}" in dlg._preview.toPlainText()
+        dlg._edits["leader"].setText("同学们")
+        assert dlg._insert_btn.isEnabled()  # 全填 → 可插入
+        assert "同学们好！我叫王五，很高兴认识你。" == dlg._preview.toPlainText()
+    finally:
+        dlg.close()
+
+
+def test_input_dialog_no_autodefault_enter_safe():
+    """对话框按钮非 autoDefault：输入框回车不会触发默认按钮关框。
+
+    回归：QDialog 里 QPushButton 默认 autoDefault=True，QLineEdit 回车
+    会冒泡触发默认按钮 → 填一个变量按回车对话框直接消失（实测 bug）。
+    置 autoDefault(False) 后回车只走 _next_or_accept（跳空字段/全填满才
+    插入）。
+    """
+    from PySide6.QtWidgets import QPushButton
+
+    from ui.input_variable_dialog import InputVariableDialog
+
+    dlg = InputVariableDialog(["leader", "name"], content="")
+    try:
+        btns = dlg.findChildren(QPushButton)
+        assert len(btns) >= 2
+        assert all(not b.autoDefault() for b in btns)
+    finally:
+        dlg.close()
 
 
 def test_templates_trigger_segmented_save(tmp_path):

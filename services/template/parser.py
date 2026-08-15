@@ -6,13 +6,14 @@
 import re
 
 from .errors import CursorLimitError, InputError, TemplateError, UnknownVariableError
+from .registry import names as known_names
 from .token import Token, TokenType
 
 # {{variable:params}} —— 变量名 \w+，可选 :params（params 不含 }）
 _VAR_RE = re.compile(r"\{\{(\w+)(?::([^}]*))?\}\}")
 
-# 第一阶段已知变量（文档 §64）
-_KNOWN = {"date", "time", "datetime", "uuid", "clipboard", "cursor", "input"}
+# 第一阶段已知变量（唯一事实源 = 变量注册表 registry.names()）
+_KNOWN = known_names()
 
 
 def parse(template: str) -> list[Token]:
@@ -54,6 +55,8 @@ def parse(template: str) -> list[Token]:
                                 position=m.start()))
         elif name == "clipboard":
             tokens.append(Token(TokenType.CLIPBOARD, position=m.start()))
+        elif name == "selection":
+            tokens.append(Token(TokenType.SELECTION, position=m.start()))
         elif name == "date":
             tokens.append(Token(TokenType.DATE, params=params, position=m.start()))
         elif name == "time":

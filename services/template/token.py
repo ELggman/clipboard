@@ -11,6 +11,7 @@ class TokenType(Enum):
     DATETIME = auto()
     UUID = auto()
     CLIPBOARD = auto()
+    SELECTION = auto()
     CURSOR = auto()
     INPUT = auto()
 

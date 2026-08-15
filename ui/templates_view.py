@@ -11,7 +11,8 @@
 """
 import logging
 
-from PySide6.QtCore import QEvent, Qt, QTimer
+from PySide6.QtCore import QEvent, QPoint, QSize, Qt, QTimer
+from PySide6.QtGui import QCursor, QGuiApplication
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
@@ -35,6 +36,7 @@ from PySide6.QtWidgets import (
 )
 
 from services.template.errors import TemplateError
+from services.template.registry import is_preset
 from services.template_service import TemplateService
 from ui.template_components import (
     ROLE_FOLDER_COUNT,
@@ -43,14 +45,17 @@ from ui.template_components import (
     ROW_INSET,
     STAR_ZONE,
     FolderSourceDelegate,
+    HoverButton,
     TemplateCardDelegate,
     TemplateHighlighter,
+    VariableLibraryPopup,
     VariableTagBar,
+    load_extra_variables,
+    load_favorite_variables,
+    save_extra_variables,
+    save_favorite_variables,
 )
-
-# 用户自定义变量持久化键（config template 段）
-_CONFIG_VARS_KEY = "template"
-_CONFIG_VARS_FIELD = "extra_variables"
+from ui.variable_autocomplete import VariableAutocompleteEditor
 
 # ---- 模板页布局常量（手动调整模板条目宽度 = 中间栏宽度）----
 # 中间栏不再硬编码（旧 setFixedWidth(280) 与左列 160 + 边距 恒 > 420 窗口，
@@ -60,27 +65,6 @@ _CONFIG_VARS_FIELD = "extra_variables"
 _PAGE_MARGIN = 8      # 模板页左右页边距（仅本页，历史/收藏页不受影响）
 _LEFT_WIDTH  = 160    # 左列「分类」固定宽（用户确认保持 160）
 _ENTRY_WIDTH = 0      # 模板条目宽：0 = 随中间栏自适应（推荐）；>0 固定该值
-
-
-def _load_extra_variables() -> list[str]:
-    """用户自定义变量（config template.extra_variables）。"""
-    try:
-        from app.config import load_config
-
-        config = load_config()
-        return list(config.get("template", {}).get("extra_variables", []))
-    except Exception:
-        return []
-
-
-def _save_extra_variables(vars_list: list[str]) -> None:
-    """持久化用户自定义变量。"""
-    try:
-        from app.config import save_user_config
-
-        save_user_config({_CONFIG_VARS_KEY: {_CONFIG_VARS_FIELD: vars_list}})
-    except Exception:
-        logger.exception("保存自定义变量失败")
 
 logger = logging.getLogger(__name__)
 
@@ -152,6 +136,53 @@ class TemplateCreateDialog(QDialog):
         from ui.animations import fade_in_window
 
         fade_in_window(self, dy=0)
+
+
+class _VarButtonColumn(QWidget):
+    """右侧按钮列：手动排布固定高按钮，绕开 QVBoxLayout 高度估算。
+
+    macOS 上 QSS 样式表 padding 不计入 sizeHint，QWidgetItem.sizeHint()/
+    minimumSize() 偏小（实测 QVBoxLayout 汇总后 sizeHint=68px，实际需
+    84px），会把三个 setFixedHeight(24) 的按钮压到互相重叠（问题2）。
+    这里完全手排、不做任何高度估算：按钮固定 24px、间距 6px，从容器顶部
+    往下排，隐藏按钮（展开全部）不占位、其余上移。
+    """
+
+    BTN_H = 24
+    GAP = 6
+
+    def __init__(self, buttons, parent=None):
+        super().__init__(parent)
+        self._buttons = list(buttons)
+        for b in self._buttons:
+            b.setParent(self)
+            b.setFixedHeight(self.BTN_H)
+        self.setFixedHeight(self.BTN_H * 3 + self.GAP * 2)
+
+    def sizeHint(self) -> QSize:
+        # 无布局的 QWidget sizeHint 默认不包含子控件——vrow 会把它当 0 宽。
+        # 返回最宽按钮的 sizeHint 宽，保证按钮列能拿到自然宽度。
+        w = max((b.sizeHint().width() for b in self._buttons), default=0)
+        return QSize(w, self.minimumHeight())
+
+    def minimumSizeHint(self) -> QSize:
+        return self.sizeHint()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._place()
+
+    def _place(self) -> None:
+        w = self.width()
+        y = 0
+        for b in self._buttons:
+            # 用 isHidden() 而非 isVisible()：resizeEvent 在弹窗 show 前就会
+            # 触发，此时所有按钮 isVisible() 都是 False，会把全部跳过、按钮
+            # 停在自然几何叠在 (0,0)。isHidden() 只反映显式 hide()，正是要
+            # 排除「展开全部」隐藏按钮的语义。
+            if not b.isHidden():
+                b.setGeometry(0, y, w, self.BTN_H)
+                y += self.BTN_H + self.GAP
 
 
 class TemplateEditorDialog(QDialog):
@@ -237,23 +268,25 @@ class TemplateEditorDialog(QDialog):
         row2.addWidget(seg)
         vbox.addLayout(row2)
 
-        # 变量区：左侧胶囊（折叠/展开）+ 右侧独立两按钮（展开、新增），
-        # 按钮不挤占变量显示区（设计反馈）；标注在胶囊上方
+        # 变量区：左侧胶囊（只显常用变量，折叠/展开）+ 右侧按钮列
+        # （展开全部、变量库悬停弹层、＋ 新增）；标注在胶囊上方
         l5 = QLabel("变量")
         l5.setObjectName("fieldLabel")
         vbox.addWidget(l5)
         vrow = QHBoxLayout()
         vrow.setSpacing(8)
-        variables = list(VariableTagBar.DEFAULT_VARIABLES)
-        variables += _load_extra_variables()
-        self._var_tags = VariableTagBar(variables=variables)
+        self._var_tags = VariableTagBar(variables=load_favorite_variables())
         self._var_tags.variable_clicked.connect(self._insert_variable)
         self._var_tags.remove_requested.connect(self._remove_variable)
         # 变量区滚动：展开多行时固定高度内滚动（设计反馈：展开显示不完全）
         self._var_scroll = QScrollArea()
         self._var_scroll.setObjectName("varScroll")
         self._var_scroll.setWidgetResizable(True)
-        self._var_scroll.setFixedHeight(72)
+        # 高度须与右侧按钮列（3×24+2×6=84px）一致：vrow 的 QHBoxLayout 高度
+        # 取 max(滚动区, 按钮列)，滚动区若 72px 会压着按钮列（按钮实际 24px
+        # 高、3 个共 84px）→ 新增/变量库按钮重叠（问题2）。改 84px 后二者
+        # 同高，vrow=84px，按钮不再互相压。
+        self._var_scroll.setFixedHeight(84)
         self._var_scroll.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._var_scroll.setVerticalScrollBarPolicy(
@@ -261,27 +294,41 @@ class TemplateEditorDialog(QDialog):
         self._var_scroll.setFrameShape(QFrame.Shape.NoFrame)
         self._var_scroll.setWidget(self._var_tags)
         vrow.addWidget(self._var_scroll, 1)
-        var_col = QVBoxLayout()
-        var_col.setSpacing(6)
+        # 按钮列手动排布（_VarButtonColumn）：macOS 上裸 QVBoxLayout 的
+        # sizeHint/minimumSize 偏小（实测 68px），会把三个 24px 固定高按钮
+        # 压到互相重叠（问题2）。手排容器固定 84px，绕开高度估算。
         n_vars = len(self._var_tags.variables())
         self._more_btn = QPushButton(f"展开全部（{n_vars}）")
         self._more_btn.setObjectName("ghostBtn")
         self._more_btn.setVisible(self._var_tags.needs_collapse())
         self._more_btn.clicked.connect(self._toggle_vars)
-        var_col.addWidget(self._more_btn)
+        self._lib_btn = HoverButton("变量库")
+        self._lib_btn.setObjectName("ghostBtn")
+        self._lib_btn.setToolTip("全部变量（按来源类别分组；★ 管理常用）")
         self._add_btn = QPushButton("＋ 新增")
         self._add_btn.setObjectName("ghostBtn")
         self._add_btn.setToolTip("新增自定义变量")
         self._add_btn.clicked.connect(self._add_variable)
-        var_col.addWidget(self._add_btn)
-        vrow.addLayout(var_col)
+        self._var_col_wrap = _VarButtonColumn(
+            [self._more_btn, self._lib_btn, self._add_btn])
+        vrow.addWidget(self._var_col_wrap)
         vbox.addLayout(vrow)
+        self._vrow = vrow
 
-        # 内容（Pygments + {{变量}} 高亮）
-        self._content = QPlainTextEdit()
+        # 「变量库」弹层（Qt.Popup）：点击切换展开；点击外部/Esc 由
+        # Popup 自带关闭（macOS 悬停计时器方案不可靠，退回点击切换）。
+        self._lib_popup = VariableLibraryPopup(self)
+        self._lib_popup.set_custom_variables(load_extra_variables())
+        self._lib_popup.insert_requested.connect(self._insert_variable)
+        self._lib_popup.favorites_changed.connect(self._refresh_var_tags)
+        self._lib_btn.clicked.connect(self._toggle_library)
+
+        # 内容（Pygments + {{变量}} 高亮；输入 `{{` 弹变量补全）
+        self._content = VariableAutocompleteEditor()
         self._content.setObjectName("templateEditor")
-        self._content.setPlaceholderText("模板内容…（{{date}} 等变量自动高亮）")
+        self._content.setPlaceholderText("模板内容…（{{date}} 等变量自动高亮，{{ 自动补全）")
         self._content.textChanged.connect(self._schedule_highlight)
+        self._content.set_custom_variables(load_extra_variables())
         vbox.addWidget(self._content, 1)
 
         # 启用 + 删除 / 保存 / 取消
@@ -312,6 +359,42 @@ class TemplateEditorDialog(QDialog):
         self._hl_timer.setInterval(400)
         self._hl_timer.timeout.connect(self._update_highlighter)
 
+    def showEvent(self, event) -> None:
+        """弹窗显示后延迟一轮日志右侧三按钮几何（诊断问题2「按钮重叠」）。
+
+        macOS 上用户报告「新增/变量库」按钮重叠，但离屏验证两者在
+        QVBoxLayout 里恒不重叠——show 后延迟到布局完成再记录，若真重叠
+        这里能看到三者 y 撞一起。
+        """
+        super().showEvent(event)
+        # 兜底重排按钮列：resizeEvent 已排，但首次 show 时序可能早于布局定宽，
+        # 延迟一轮再排一次确保按钮落在正确位置。
+        QTimer.singleShot(0, self._var_col_wrap._place)
+        QTimer.singleShot(0, self._log_button_geometry)
+
+    def _log_button_geometry(self) -> None:
+        rows = []
+        for name in ("_more_btn", "_lib_btn", "_add_btn"):
+            b = getattr(self, name)
+            g = b.geometry()
+            rows.append((name, b.isVisible(), g.x(), g.y(),
+                         g.width(), g.height(),
+                         b.sizeHint().height(),
+                         b.minimumSizeHint().height(),
+                         b.minimumHeight(), b.maximumHeight()))
+        sc = self._var_scroll.geometry()
+        ed = self._content.geometry()
+        vw = self._vrow.geometry()
+        wrap = self._var_col_wrap.geometry()
+        logger.info(
+            "变量区诊断: 对话框=%sx%s 按钮=(name,vis,x,y,w,h,sh,msh,minH,maxH)=%s "
+            "滚动区=y%s h%s 编辑器=y%s h%s minH=%s vrow=y%s h%s wrap=y%s h%s",
+            self.width(), self.height(), rows,
+            sc.y(), sc.height(),
+            ed.y(), ed.height(), self._content.minimumSizeHint().height(),
+            vw.y(), vw.height(),
+            wrap.y(), wrap.height())
+
     def _load(self, t: dict) -> None:
         self._name.setText(t["name"])
         self._shortcut.setText(t["shortcut"])
@@ -325,13 +408,23 @@ class TemplateEditorDialog(QDialog):
     # ---- 交互 ----
 
     def _insert_variable(self, var: str) -> None:
-        """变量胶囊点击：插入内容区光标处。"""
+        """变量胶囊点击：插入内容区光标处。
+
+        input 变量走后缀规则（registry.next_input_insert）：内容已含
+        `{{input:name}}` 再点同名胶囊 → 插 `{{input:name2}}`（每次独立输入）。
+        """
+        if var.startswith("{{input:") and var.endswith("}}"):
+            base = var[len("{{input:"):-len("}}")]
+            from services.template.registry import next_input_insert
+
+            var = next_input_insert(self._content.toPlainText(), base)
         self._content.insertPlainText(var)
         self._content.setFocus()
 
     def _add_variable(self) -> None:
-        """「＋ 新增」：输入变量名 → 持久化 → 追加胶囊（新胶囊按序排在
-        已有胶囊之后、右列按钮之前——胶囊区与按钮区分离）。"""
+        """「＋ 新增」：输入变量名 → 持久化（extra_variables + 常用）→
+        刷新胶囊区。预设变量不可重复添加；新自定义默认进常用（胶囊区要
+        显示；「变量库」★ 可移除）。"""
         from ui.dialogs import NameDialog
 
         dlg = NameDialog("新增变量", "变量名（如 myvar 或 {{myvar}}）：",
@@ -342,25 +435,78 @@ class TemplateEditorDialog(QDialog):
         if not raw:
             return
         var = raw if raw.startswith("{{") else f"{{{{{raw}}}}}"
-        if var in self._var_tags.variables():
+        if is_preset(var):
+            self._warn("预设变量不可重复添加")
+            return
+        if var in load_extra_variables():
             self._warn("变量已存在")
             return
-        current = _load_extra_variables()
-        current.append(var)
-        _save_extra_variables(current)
-        self._var_tags.add_variable(var)
-        self._sync_var_buttons()
+        extras = load_extra_variables()
+        extras.append(var)
+        save_extra_variables(extras)
+        favs = load_favorite_variables()
+        if var not in favs:
+            favs.append(var)
+            save_favorite_variables(favs)
+        self._sync_custom_variables()
+        self._refresh_var_tags()
 
     def _remove_variable(self, var: str) -> None:
-        """右键变量胶囊删除：仅用户自定义变量（预设不可删）。"""
-        extras = _load_extra_variables()
+        """右键变量胶囊删除：仅用户自定义变量（预设不可删）；同时移出常用。"""
+        extras = load_extra_variables()
         if var not in extras:
             self._warn(f"预设变量「{var}」不可删除")
             return
         extras.remove(var)
-        _save_extra_variables(extras)
-        self._var_tags.remove_variable(var)
+        save_extra_variables(extras)
+        favs = load_favorite_variables()
+        if var in favs:
+            favs.remove(var)
+            save_favorite_variables(favs)
+        self._sync_custom_variables()
+        self._refresh_var_tags()
+
+    def _sync_custom_variables(self) -> None:
+        """自定义变量变更 → 同步到补全编辑器与变量库弹层。"""
+        extras = load_extra_variables()
+        self._content.set_custom_variables(extras)
+        self._lib_popup.set_custom_variables(extras)
+
+    def _refresh_var_tags(self) -> None:
+        """常用变量变更 → 胶囊区整体重建（只显常用）+ 按钮同步。"""
+        self._var_tags.set_variables(load_favorite_variables())
         self._sync_var_buttons()
+
+    # ---- 「变量库」弹层开关（点击切换；Qt.Popup 点击外部/Esc 自带关闭）----
+
+    def _open_library(self) -> None:
+        self._lib_popup.set_custom_variables(load_extra_variables())
+        self._lib_popup.rebuild()
+        # 下拉式定位：右缘贴「＋ 新增」按钮列右缘、顶部在按钮列下方——
+        # 彻底不遮挡右侧任一按钮（旧定位贴「变量库」按钮左侧，300px 高
+        # 弹层往下延伸仍压到「＋ 新增」按钮，用户报告「按钮重叠」）。
+        btn_global = self._add_btn.mapToGlobal(QPoint(0, 0))
+        x = btn_global.x() + self._add_btn.width() - self._lib_popup.width()
+        y = btn_global.y() + self._add_btn.height() + 6
+        # 屏幕边缘夹紧（窗口贴边时弹层不能被推出屏外）
+        screen = (QGuiApplication.screenAt(QCursor.pos())
+                  or QGuiApplication.primaryScreen())
+        if screen is not None:
+            geo = screen.availableGeometry()
+            x = max(geo.left(), min(x, geo.right() - self._lib_popup.width()))
+            y = max(geo.top(), min(y, geo.bottom() - self._lib_popup.height()))
+        self._lib_popup.show()
+        # show() 之后再 move()：macOS 上 Qt.Popup 显示时可能被系统按光标
+        # 位置重定位，show 前的 move() 会被覆盖 → 弹层压到「＋ 新增」按钮
+        # （用户报告「按钮重叠」）。show 后 move 保证落在按钮列下方。
+        self._lib_popup.move(x, y)
+        self._lib_popup.raise_()
+
+    def _toggle_library(self) -> None:
+        if self._lib_popup.isVisible():
+            self._lib_popup.hide()
+        else:
+            self._open_library()
 
     def _toggle_vars(self) -> None:
         """「展开全部（N）/收起」切换胶囊展开状态。"""
@@ -373,6 +519,9 @@ class TemplateEditorDialog(QDialog):
         self._more_btn.setText(
             "收起" if self._var_tags.is_expanded() else f"展开全部（{n}）")
         self._more_btn.setVisible(self._var_tags.needs_collapse())
+        # 手排容器：可见性变化后重排（隐藏「展开全部」时 lib/add 上移）
+        self._var_col_wrap._place()
+        self._log_button_geometry()
 
     def _schedule_highlight(self) -> None:
         self._hl_timer.start()

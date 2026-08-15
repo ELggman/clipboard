@@ -302,8 +302,71 @@ def start_workspace(app: QApplication) -> None:
 
     template_service = TemplateService(engine)
 
-    def render_and_insert(template: dict, delete_count: int = 0,
-                          cancel_ime: bool = False) -> None:
+    import time
+
+    from AppKit import (NSApplication, NSApplicationActivateIgnoringOtherApps,
+                        NSWorkspace)
+    from PySide6.QtWidgets import QDialog
+
+    # 触发上下文（问题1「插入无反应」+ 问题3「selection 读到空」的共同根因）：
+    # 全局 Picker（⌘⇧S）弹出时本应用会夺走前台——弹层显示中再读
+    # frontmostApplication() 拿到的是自己，导致粘贴打进本应用（插入无反应）
+    # 且 {{selection}} 读到本应用自己的空选中。故在**热键触发瞬间**（本应用
+    # 尚未激活）捕获目标应用 + 其选中文本，随选中回调传给渲染。
+    _trigger_ctx = {"app": None, "selection": None}
+
+    def _capture_trigger_context() -> None:
+        """热键触发瞬间捕获前台目标应用 + 其选中文本（弹层夺焦点之前）。"""
+        from services.template.ax_text import read_focused_selection
+
+        _trigger_ctx["app"] = NSWorkspace.sharedWorkspace().frontmostApplication()
+        try:
+            _trigger_ctx["selection"] = read_focused_selection()
+        except Exception:
+            _trigger_ctx["selection"] = None
+
+    def _activate_target(target) -> None:
+        """把焦点还给目标应用并轮询确认（粘贴前必须到位，否则 ⌘V 打偏）。
+
+        ⚠️ 不能用固定 sleep：应用激活耗时不定，过早发 ⌘V 会打进本应用
+        自己（「点击插入无反应」v7 修复不彻底）。轮询前台 PID 到位再粘贴。
+
+        ⚠️ 轮询里必须 processEvents()：本应用从前台让位要处理 deactivate
+        事件，time.sleep 阻塞主线程会让让位卡住——目标应用永远上不了前台，
+        ⌘V 恒打回本应用（问题1「点击插入无反应」根因）。激活到位后其
+        输入框焦点恢复也是异步的，再等一拍才粘贴。
+        """
+        if target is None:
+            return
+        try:
+            # NSRunningApplication 没有 isRunning()，用 isTerminated() 判断
+            # 是否已退出（isRunning 会抛 AttributeError，此前被 Qt 吞掉 →
+            # 目标应用从未被激活 → ⌘V 恒打回本应用 = 问题1 根因）。
+            if target.isTerminated():
+                return
+            from PySide6.QtWidgets import QApplication
+
+            target.activateWithOptions_(NSApplicationActivateIgnoringOtherApps)
+            target_pid = target.processIdentifier()
+            deadline = time.monotonic() + 1.5
+            reached = False
+            while time.monotonic() < deadline:
+                QApplication.processEvents()  # 泵事件：让 deactivate 完成
+                front = NSWorkspace.sharedWorkspace().frontmostApplication()
+                if front is not None and front.processIdentifier() == target_pid:
+                    reached = True
+                    break
+                time.sleep(0.02)
+            logger.info("目标应用前台恢复 %s (pid=%s)",
+                        "成功" if reached else "超时未到位", target_pid)
+            # 目标应用已前台，但其文本框焦点恢复是异步的——再等一拍
+            # （⌘V 打到「已前台但焦点未就位」窗口也会插入无反应）。
+            time.sleep(0.15)
+        except Exception:
+            logger.exception("激活目标应用失败（继续尝试粘贴）")
+
+    def _render_and_insert_impl(template: dict, delete_count: int = 0,
+                                cancel_ime: bool = False) -> None:
         """模板渲染 → （输入变量对话框）→ 模拟粘贴插入。
 
         delete_count > 0：先删除用户输入的 shortcut 文本
@@ -321,26 +384,58 @@ def start_workspace(app: QApplication) -> None:
             else:
                 delete_backspaces(delete_count, template["shortcut"])
         content = template["content"]
-        text, _cursor, inputs = template_service.render_template(content)
-        if inputs:
-            # 全局触发：应用可能未激活，先激活再弹输入框（§40-41）
-            from AppKit import (NSApplication,
-                                NSApplicationActivateIgnoringOtherApps)
-            from PySide6.QtWidgets import QDialog
+        # 触发上下文：picker 流程在热键时捕获（目标应用 + 选中文本）；tab
+        # 流程未捕获（None）→ 前台即目标应用。读后即清，防下次 tab 触发
+        # 误用上次 picker 的陈旧值。
+        trigger_app = _trigger_ctx["app"]
+        selection = _trigger_ctx["selection"]
+        _trigger_ctx["app"] = None
+        _trigger_ctx["selection"] = None
 
+        text, _cursor, inputs = template_service.render_template(
+            content, selection_text=selection)
+        if inputs:
+            # 全局触发：应用可能未激活，先激活再弹输入框（§40-41）。
+            # ⚠️ 弹框会把前台让给本应用（对话框要可见），关框后必须把
+            # 焦点还给目标应用再粘贴——否则 ⌘V 打进本应用自己。目标应用
+            # 优先用触发时捕获的（picker 流程）；tab 流程前台就是目标。
+            target = (trigger_app
+                      or NSWorkspace.sharedWorkspace().frontmostApplication())
             NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
-            dlg = InputVariableDialog(inputs)
+            dlg = InputVariableDialog(inputs, content=content)
             if dlg.exec() != QDialog.DialogCode.Accepted:
                 logger.info("模板输入取消: shortcut=%s", template["shortcut"])
                 return
+            # 先把值取出来再 _activate_target：其内部 processEvents() 可能
+            # 处理对话框的延迟销毁，之后 dlg 可能已失效（C++ 对象已删）。
+            values = dlg.values()
+            _activate_target(target)
             text, _, _ = template_service.render_template(
-                content, input_values=dlg.values())
+                content, input_values=values, selection_text=selection)
+        elif trigger_app is not None:
+            # 无 input 变量的 picker 流程：弹层关闭后前台可能仍是本应用 →
+            # 粘贴前先把焦点还给目标应用（tab 流程无需——前台本就是目标）。
+            _activate_target(trigger_app)
         template_service.record_usage(template["id"])
         # §95 日志安全：只记 id/shortcut，不记展开内容
         logger.info("模板触发: id=%s shortcut=%s",
                     template["id"], template["shortcut"])
         if not insert_text(text, watcher):
             logger.error("模板插入失败: shortcut=%s", template["shortcut"])
+
+    def render_and_insert(template: dict, delete_count: int = 0,
+                          cancel_ime: bool = False) -> None:
+        """渲染插入的统一入口（on_trigger / picker.selected / 测试钩子）。
+
+        包一层 try/except：渲染/激活/粘贴任一步抛异常，此前会被 Qt 信号
+        分发吞掉（windowed 应用 stderr 不可见）——静默失败、日志里只看到
+        「删除 shortcut」却看不到「模板触发: id=」。落盘堆栈才好定位。
+        """
+        try:
+            _render_and_insert_impl(template, delete_count, cancel_ime)
+        except Exception:
+            logger.exception("模板渲染插入异常: shortcut=%s",
+                             template.get("shortcut"))
 
     from services.template.ax_text import is_ime_composing
     from services.template.ax_text import ensure_ax_enabled
@@ -547,9 +642,15 @@ def start_workspace(app: QApplication) -> None:
     picker = TemplatePickerPopup()
     picker.set_service(template_service)
     picker.selected.connect(render_and_insert)
+    # Esc/点外部取消而未选中时清掉捕获的上下文，防下次 Tab 触发误用陈旧值
+    picker.hidden.connect(
+        lambda: _trigger_ctx.update({"app": None, "selection": None}))
 
     def on_picker() -> None:
         logger.info("模板 Picker：打开")
+        # 弹层会夺走前台：先捕获目标应用 + 选中文本（{{selection}} 依赖），
+        # 否则 render_and_insert 读到的是本应用自己。
+        _capture_trigger_context()
         picker.show_near_cursor()
 
     from PySide6.QtCore import QObject, Signal as _Signal

@@ -595,3 +595,114 @@ def test_ax_matcher_miss_no_trigger():
         on_trigger=lambda t, n, c: triggered.append(n))
     assert matcher.match_text("问候你") is False  # 不以「问候」结尾
     assert triggered == []
+
+
+# ---- 变量注册表（registry，元数据唯一事实源）----
+
+def test_registry_all_presets_complete():
+    """内置变量元数据必填：insert 唯一、description/usage/example 非空。"""
+    from services.template.registry import PRESET_VARIABLES
+
+    inserts = [m.insert for m in PRESET_VARIABLES]
+    assert len(inserts) == len(set(inserts)), "insert 文本必须唯一"
+    for m in PRESET_VARIABLES:
+        assert m.description.strip(), f"{m.insert} 缺 description"
+        assert m.usage.strip(), f"{m.insert} 缺 usage"
+        assert m.example.strip(), f"{m.insert} 缺 example"
+        assert m.category, f"{m.insert} 缺 category"
+
+
+def test_registry_covers_known_variables():
+    """注册表关键字集 == parser 已知集（parser._KNOWN 由注册表驱动）。"""
+    from services.template import parser
+    from services.template.registry import names
+
+    assert parser._KNOWN == names()
+
+
+def test_parse_selection():
+    """{{selection}} 是已知变量 → SELECTION token。"""
+    tokens = parse("Hello {{selection}}")
+    assert _types(tokens) == [TokenType.TEXT, TokenType.SELECTION]
+
+
+def test_meta_for_and_is_preset():
+    from services.template.registry import is_preset, meta_for
+
+    assert is_preset("{{date}}") is True
+    assert is_preset("{{myvar}}") is False          # 用户自定义
+    assert meta_for("{{date}}").category == "系统"
+    assert meta_for("{{input:name}}").category == "用户输入"
+    assert meta_for("{{cursor}}").category == "上下文"
+    assert meta_for("{{myvar}}") is None
+
+
+def test_tooltip_format():
+    """tooltip 组装：作用 + 用法 + 例子三行。"""
+    from services.template.registry import meta_for
+
+    m = meta_for("{{date}}")
+    tip = m.tooltip()
+    assert m.description in tip
+    assert "用法：" in tip and m.usage in tip
+    assert "示例：" in tip and m.example in tip
+
+
+def test_custom_default_tooltip():
+    from services.template.registry import custom_default_tooltip
+
+    assert "弹窗" in custom_default_tooltip()
+
+
+def test_group_by_category_order():
+    """分组顺序固定：系统 → 用户输入 → 上下文 → 自定义；空组不出现。"""
+    from services.template.registry import (
+        PRESET_VARIABLES,
+        VariableMeta,
+        group_by_category,
+    )
+
+    custom = VariableMeta(insert="{{loc}}", category="自定义",
+                          description="", usage="", example="", builtin=False)
+    groups = group_by_category(list(PRESET_VARIABLES) + [custom])
+    cats = [c for c, _ in groups]
+    assert cats == ["系统", "用户输入", "上下文", "自定义"]
+    # 系统组包含 selection（新增），自定义组包含 loc
+    sys_vars = [m.insert for m in dict(groups)["系统"]]
+    assert "{{selection}}" in sys_vars
+    assert dict(groups)["自定义"] == [custom]
+
+
+def test_next_input_insert_auto_suffix():
+    """重复插入同名 input：自动编号 base → base2 → base3。"""
+    from services.template.registry import next_input_insert
+
+    assert next_input_insert("", "name") == "{{input:name}}"
+    assert next_input_insert("a {{input:name}} b", "name") == "{{input:name2}}"
+    content = "{{input:name}}{{input:name2}}"
+    assert next_input_insert(content, "name") == "{{input:name3}}"
+    # 不同标签互不影响
+    assert next_input_insert("{{input:name}}", "标题") == "{{input:标题}}"
+
+
+# ---- {{selection}} 系统变量（§值源-系统状态）----
+
+def test_render_selection():
+    """注入 selection_text：{{selection}} 替换为选中文本。"""
+    text, _ = _render("选中内容：{{selection}}", selection_text="你好")
+    assert text == "选中内容：你好"
+
+
+def test_render_selection_empty():
+    """无选中（空）：{{selection}} 渲染为空串（允许为空）。"""
+    text, _ = _render("【{{selection}}】", selection_text="")
+    assert text == "【】"
+
+
+def test_render_selection_default_reader(tmp_path):
+    """默认 selection_reader：走 ax_text.read_focused_selection（注入替换）。"""
+    from services.template_service import TemplateService
+
+    svc = TemplateService(None, selection_reader=lambda: "选中")
+    text, _, _ = svc.render_template("a{{selection}}b")
+    assert text == "a选中b"

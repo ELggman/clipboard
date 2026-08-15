@@ -38,12 +38,15 @@ def _row_to_dict(row: Snippet) -> dict:
 class TemplateService:
     """模板模块服务（bootstrap 实例化注入 engine）。"""
 
-    def __init__(self, engine: Engine, clipboard_reader=None):
+    def __init__(self, engine: Engine, clipboard_reader=None,
+                 selection_reader=None):
         self._engine = engine
         # 剪贴板读取器可注入（测试替换）；默认读系统剪贴板
         self._read_clipboard = clipboard_reader or self._system_clipboard
+        # 选中文本读取器可注入（测试替换）；默认读前台应用选中文本（AX）
+        self._read_selection = selection_reader or self._system_selection
 
-    # ---- 剪贴板 ----
+    # ---- 剪贴板 / 选中文本 ----
 
     @staticmethod
     def _system_clipboard() -> str:
@@ -52,6 +55,16 @@ class TemplateService:
 
             pb = NSPasteboard.generalPasteboard()
             return pb.stringForType_(NSPasteboardTypeString) or ""
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _system_selection() -> str:
+        """前台应用当前选中文本（{{selection}} 值源）。失败/无选中 → ""。"""
+        try:
+            from services.template.ax_text import read_focused_selection
+
+            return read_focused_selection() or ""
         except Exception:
             return ""
 
@@ -244,6 +257,7 @@ class TemplateService:
     def render_template(self, content: str,
                         input_values: dict[str, str] | None = None,
                         clipboard_text: str | None = None,
+                        selection_text: str | None = None,
                         now: datetime.datetime | None = None,
                         ) -> tuple[str, int | None, list[str]]:
         """完整渲染：parse → 收集 input → 渲染。
@@ -257,6 +271,8 @@ class TemplateService:
             now=now or datetime.datetime.now(),
             clipboard_text=(clipboard_text if clipboard_text is not None
                             else self._read_clipboard()),
+            selection_text=(selection_text if selection_text is not None
+                            else self._read_selection()),
             input_values=input_values or {},
         )
         text, cursor_pos = render(tokens, ctx)

@@ -368,10 +368,11 @@ def load_actions(extra_dirs: list[Path] = ()) -> list[ClipboardAction]:
   保存/删除/取消。组件化：TemplateCardDelegate / FolderSourceDelegate /
   VariableTagBar / TemplateHighlighter（CodeHighlighter 子类：{{变量}}
   accent 覆盖在 Pygments 之上）
-- **变量 Tag 条**（VariableTagBar）：预设 7 个变量 + 用户自定义
-  （`config template.extra_variables` 持久化，编辑弹窗「＋ 新增变量」追加，
-  输入自动补 {{}}，重复提示）；**超 5 个折叠显示前 5 个 + 「展开全部（N）/
-  收起」切换**（隐藏控件不占布局空间）
+- **变量区（v7）**：胶囊条只显**常用变量**（config `template.favorite_variables`，
+  null=全部预设；「变量库」★ 管理）+「变量库」悬停弹层（全部变量按来源类别
+  分组、每行 ★ 切换常用、点击插入，鼠标在按钮/弹层上都保持打开）；「＋ 新增」
+  自定义变量进 `extra_variables` **并默认进常用**；内容编辑器输入 `{{` 弹变量
+  自动补全（注册表内置+自定义，常用在前）
 - **调色板取色**：自绘 delegate 用 `option.palette`（accent 走 Link 角色，
   深浅主题自适应）；**QImage.constBits() 是 BGRA 字节序**——像素分析
   脚本按 RGBA 读会 R/B 反转（调试血泪）
@@ -562,8 +563,14 @@ CREATE INDEX ix_items_session ON clipboard_items (session_id);
 
 ### 7.3 模板模块（v6，原 Snippet）
 
-- **定位**（文档 §1）：shortcut 触发的本地模板引擎——输入 `pyfunc`+Tab → 解析渲染 `{{date}}/{{time}}/{{datetime}}/{{uuid}}/{{clipboard}}/{{input:name}}/{{cursor}}` → 模拟 ⌘V 粘贴 → 恢复原剪贴板
-- **分层**（§83-89）：`services/template/`（errors/token/parser/variables/renderer/matcher）+ `template_service.py`（CRUD/文件夹/搜索评分排序）+ `insertion.py`（粘贴模拟）
+- **定位**（文档 §1）：shortcut 触发的本地模板引擎——输入 `pyfunc`+Tab → 解析渲染 `{{date}}/{{time}}/{{datetime}}/{{uuid}}/{{clipboard}}/{{selection}}/{{input:name}}/{{cursor}}` → 模拟 ⌘V 粘贴 → 恢复原剪贴板
+- **分层**（§83-89）：`services/template/`（errors/token/parser/variables/renderer/matcher/registry/ax_text）+ `template_service.py`（CRUD/文件夹/搜索评分排序）+ `insertion.py`（粘贴模拟）
+- **变量系统（v7，唯一事实源 = `services/template/registry.py`）**：
+  - `VariableMeta`：`insert`/`category`/`description`/`usage`/`example`/`keyword`/`value_source`/`builtin`。内置 8 个变量（date/time/datetime/uuid/clipboard/**selection**/input/cursor），description/usage/example **必填**（悬停 tooltip 三行组装）
+  - **值源分类**（每次渲染一个变量的值只能来自一个源头）：`系统状态`（OS 给的：date/uuid/clipboard/selection）、`用户输入`（弹窗问：input）、`上下文标记`（插入位置：cursor）、`外部计算`（命令/脚本，**未实现**）
+  - **消费者**：parser 合法性校验（`_KNOWN` ← registry.names()）、胶囊悬停 tooltip、`{{` 自动补全候选（`filter_candidates`：常用在前、其余按类别）、「变量库」弹层分组（`group_by_category`：系统→用户输入→上下文→自定义）、常用变量持久化（config `template.favorite_variables`，null=全部预设）
+  - **重复 input 自动编号**：`next_input_insert`——模板已含 `{{input:name}}` 再插入同名 → `{{input:name2}}`/`{{input:name3}}`（每次独立输入，避免去重只问一次）；胶囊点击与自动补全 accept 都走此规则
+  - **自定义变量值源接口（已文档化，未实现执行）**：自定义变量当前只能走「用户输入」（弹窗问值）。`VariableMeta.value_source` 字段已预留——未来可声明自定义变量的值源为「外部计算」并挂命令/脚本在渲染时取值；渲染流水线（`render_template` → `RenderContext`，clipboard/selection 走可注入 reader）按值源分发，扩展点已留，本次不实现执行
 - **数据**：snippets 表（shortcut UNIQUE/folder_id/enabled/favorite/trigger_mode/usage_count/last_used_at）+ snippet_folders；旧数据迁移 shortcut=name 小写（冲突加 `_<id>`）；默认文件夹（个人/工作/开发/模板）+ 默认模板（shrug/today/uuid/quote）幂等插入
 - **触发**（§7）：HotkeyManager 扩展 `raw_key_down` 信号转发无 ⌘⌃⌥ 修饰的按键（字符用 `CGEventKeyboardGetUnicodeString` 跟随布局，回退 vk 映射表），事件透传不消费；matcher 主线程维护输入缓冲，tab 模式 Tab 触发 / automatic 模式输完立即触发，匹配从缓冲末尾扫最长后缀
   - **输入法策略（用户要求：无论哪种输入法，必须完整 shortcut 彻底输入文本框后才触发）**：

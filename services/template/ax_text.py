@@ -48,6 +48,40 @@ def read_focused_text() -> str | None:
         return None
 
 
+def read_focused_selection() -> str | None:
+    """读取前台应用焦点输入框当前**选中的文本**。失败/无选中返回 None。
+
+    {{selection}} 变量值源（§值源-系统状态）：触发时取前台应用里选中的
+    文字。依赖辅助功能权限 + 应用暴露 kAXSelectedTextAttribute（多数
+    编辑器支持；不支持/无选中 → None → 渲染空串，与 {{clipboard}} 允许
+    为空同语义）。
+    """
+    try:
+        from ApplicationServices import (
+            AXUIElementCopyAttributeValue,
+            AXUIElementCreateApplication,
+            kAXFocusedUIElementAttribute,
+            kAXSelectedTextAttribute,
+        )
+        from AppKit import NSWorkspace
+
+        app = NSWorkspace.sharedWorkspace().frontmostApplication()
+        if app is None:
+            return None
+        ax_app = AXUIElementCreateApplication(app.processIdentifier())
+        err, focused = AXUIElementCopyAttributeValue(
+            ax_app, kAXFocusedUIElementAttribute, None)
+        if err != 0 or focused is None:
+            return None
+        err, value = AXUIElementCopyAttributeValue(
+            focused, kAXSelectedTextAttribute, None)
+        if err != 0:
+            return None
+        return str(value) if value is not None else None
+    except Exception:
+        return None
+
+
 def is_ime_composing() -> bool:
     """焦点输入框是否处于输入法组合（marked text）状态。失败返回 False。
 
