@@ -14,6 +14,7 @@ from sqlalchemy.engine import Engine
 
 from database.engine import make_session_factory
 from database.models import Snippet, SnippetFolder
+from services.template.custom_vars import load_custom_vars
 from services.template.parser import collect_inputs, parse, validate_template
 from services.template.renderer import render
 from services.template.variables import RenderContext
@@ -91,7 +92,7 @@ class TemplateService:
                         trigger_mode: str = "tab") -> int:
         """创建模板。shortcut 冲突抛 ValueError；内容非法抛 TemplateError 子类。"""
         self._validate_new_shortcut(shortcut)
-        parse(content)  # 内容验证：抛具体异常（UnknownVariableError 等）
+        parse(content, custom_names=set(load_custom_vars()))  # 内容验证
         now = datetime.datetime.now()
         with make_session_factory(self._engine)() as session:
             sc = shortcut.strip().lower()
@@ -120,7 +121,8 @@ class TemplateService:
             if name is not None:
                 row.name = name
             if content is not None:
-                error = validate_template(content)
+                error = validate_template(
+                    content, custom_names=set(load_custom_vars()))
                 if error:
                     from services.template.errors import TemplateError
 
@@ -259,14 +261,19 @@ class TemplateService:
                         clipboard_text: str | None = None,
                         selection_text: str | None = None,
                         now: datetime.datetime | None = None,
-                        ) -> tuple[str, int | None, list[str]]:
+                        custom_vars: dict | None = None,
+                        ) -> tuple[str, int | None, list]:
         """完整渲染：parse → 收集 input → 渲染。
 
-        返回 (text, cursor_pos|None, input_names 去重列表)。
-        input_values 未提供时 input_names 供调用方收集用户输入后二次调用。
+        返回 (text, cursor_pos|None, input_requests)。input_requests 是
+        list[InputRequest]（{{input:name}} + 用户输入来源的自定义变量），
+        input_values 未提供时供调用方收集用户输入后二次调用。
+        custom_vars：name → CustomVariable；None 时读 config。
         """
-        tokens = parse(content)
-        input_names = collect_inputs(tokens)
+        if custom_vars is None:
+            custom_vars = load_custom_vars()
+        tokens = parse(content, custom_names=set(custom_vars))
+        inputs = collect_inputs(tokens, custom_vars)
         ctx = RenderContext(
             now=now or datetime.datetime.now(),
             clipboard_text=(clipboard_text if clipboard_text is not None
@@ -274,9 +281,10 @@ class TemplateService:
             selection_text=(selection_text if selection_text is not None
                             else self._read_selection()),
             input_values=input_values or {},
+            custom_vars=custom_vars,
         )
         text, cursor_pos = render(tokens, ctx)
-        return text, cursor_pos, input_names
+        return text, cursor_pos, inputs
 
     # ---- 文件夹 ----
 

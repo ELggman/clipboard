@@ -13,7 +13,7 @@
 只能走「用户输入」（见 custom_default_tooltip），未来可扩展 value_source
 声明外部计算值源（接口已预留，执行未实现）。
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 # 来源类别（分组/筛选用；顺序即 UI 展示顺序）
 CAT_SYSTEM = "系统"
@@ -26,6 +26,19 @@ SRC_SYSTEM = "系统状态"
 SRC_INPUT = "用户输入"
 SRC_CONTEXT = "上下文标记"
 SRC_EXTERNAL = "外部计算"
+
+# 用户自定义变量的**值来源**类型（provider 注册表键；顺序即 UI 下拉顺序）
+SOURCE_INPUT = "input"       # 用户输入：触发时弹窗询问（去重）
+SOURCE_FIXED = "fixed"       # 固定值/默认值：config.text 原样插入
+SOURCE_COMMAND = "command"   # 外部命令/脚本：config.command 经 sh -c 执行
+SOURCE_STATE = "state"       # 系统状态：config.state（v1 仅前台应用名）
+
+SOURCE_LABELS: dict[str, str] = {
+    SOURCE_INPUT: "用户输入",
+    SOURCE_FIXED: "固定值",
+    SOURCE_COMMAND: "外部命令",
+    SOURCE_STATE: "系统状态",
+}
 
 
 @dataclass(frozen=True)
@@ -44,6 +57,41 @@ class VariableMeta:
     def tooltip(self) -> str:
         """胶囊悬停多行说明：作用 + 用法 + 例子。"""
         return f"{self.description}\n\n用法：{self.usage}\n示例：{self.example}"
+
+
+@dataclass
+class CustomVariable:
+    """一个用户自定义变量（持久化在 config template.extra_variables）。
+
+    name 不含 `{{}}`（如 "location"）；insert() 还原插入文本 `{{location}}`。
+    source 是值来源类型（SOURCE_*），config 是值源专属配置：
+      - input:   无配置（触发时弹窗询问）
+      - fixed:   {"text": "..."}（严格固定值）
+      - command: {"command": "..."}（sh -c 执行，stdout 作结果）
+      - state:   {"state": "frontmost_app"}（系统状态；框架预留更多）
+    """
+
+    name: str
+    description: str = ""
+    source: str = SOURCE_INPUT
+    config: dict = field(default_factory=dict)
+
+    def insert(self) -> str:
+        return f"{{{{{self.name}}}}}"
+
+
+def custom_tooltip(var: CustomVariable) -> str:
+    """自定义变量悬停多行说明：描述 + 值来源 + （按来源）配置摘要。"""
+    desc = var.description or "自定义变量"
+    label = SOURCE_LABELS.get(var.source, var.source)
+    lines = [desc, f"值来源：{label}"]
+    if var.source == SOURCE_FIXED:
+        lines.append(f"固定值：{var.config.get('text', '')}")
+    elif var.source == SOURCE_COMMAND:
+        lines.append(f"命令：{var.config.get('command', '')}")
+    elif var.source == SOURCE_STATE:
+        lines.append(f"状态：{var.config.get('state', '')}")
+    return "\n".join(lines)
 
 
 # 内置变量（第一阶段：date/time/datetime/uuid/clipboard/selection/input/cursor）。

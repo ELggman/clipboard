@@ -40,6 +40,7 @@ class RenderContext:
     clipboard_text: str = ""
     selection_text: str = ""
     input_values: dict[str, str] = field(default_factory=dict)
+    custom_vars: dict = field(default_factory=dict)  # name → CustomVariable
 
 
 class VariableProvider(ABC):
@@ -96,8 +97,27 @@ class CursorProvider(VariableProvider):
         return ""
 
 
+class CustomProvider(VariableProvider):
+    """{{name}}（自定义变量）：按变量值来源分发到 value_sources provider。
+
+    变量定义从 ctx.custom_vars[token.params] 取（缺省 → 空串），再按
+    var.source 查 value_sources 注册表求值。
+    """
+
+    def render(self, token: Token, ctx: RenderContext) -> str:
+        from .value_sources import build_value_sources
+
+        var = ctx.custom_vars.get(token.params)
+        if var is None:
+            return ""
+        provider = build_value_sources().get(getattr(var, "source", ""))
+        if provider is None:
+            return ""
+        return provider.render(var.name, var.config, ctx)
+
+
 def build_providers() -> dict[TokenType, VariableProvider]:
-    """第一阶段 provider 注册表（文档 §64）。"""
+    """provider 注册表（文档 §64）。"""
     return {
         TokenType.DATE: DateTimeProvider(TokenType.DATE),
         TokenType.TIME: DateTimeProvider(TokenType.TIME),
@@ -107,4 +127,5 @@ def build_providers() -> dict[TokenType, VariableProvider]:
         TokenType.SELECTION: SelectionProvider(),
         TokenType.INPUT: InputProvider(),
         TokenType.CURSOR: CursorProvider(),
+        TokenType.CUSTOM: CustomProvider(),
     }

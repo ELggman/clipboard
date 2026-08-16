@@ -564,13 +564,19 @@ CREATE INDEX ix_items_session ON clipboard_items (session_id);
 ### 7.3 模板模块（v6，原 Snippet）
 
 - **定位**（文档 §1）：shortcut 触发的本地模板引擎——输入 `pyfunc`+Tab → 解析渲染 `{{date}}/{{time}}/{{datetime}}/{{uuid}}/{{clipboard}}/{{selection}}/{{input:name}}/{{cursor}}` → 模拟 ⌘V 粘贴 → 恢复原剪贴板
-- **分层**（§83-89）：`services/template/`（errors/token/parser/variables/renderer/matcher/registry/ax_text）+ `template_service.py`（CRUD/文件夹/搜索评分排序）+ `insertion.py`（粘贴模拟）
+- **分层**（§83-89）：`services/template/`（errors/token/parser/variables/renderer/matcher/registry/custom_vars/value_sources/ax_text）+ `template_service.py`（CRUD/文件夹/搜索评分排序）+ `insertion.py`（粘贴模拟）
 - **变量系统（v7，唯一事实源 = `services/template/registry.py`）**：
   - `VariableMeta`：`insert`/`category`/`description`/`usage`/`example`/`keyword`/`value_source`/`builtin`。内置 8 个变量（date/time/datetime/uuid/clipboard/**selection**/input/cursor），description/usage/example **必填**（悬停 tooltip 三行组装）
-  - **值源分类**（每次渲染一个变量的值只能来自一个源头）：`系统状态`（OS 给的：date/uuid/clipboard/selection）、`用户输入`（弹窗问：input）、`上下文标记`（插入位置：cursor）、`外部计算`（命令/脚本，**未实现**）
+  - **值源分类**（每次渲染一个变量的值只能来自一个源头）：`系统状态`（OS 给的：date/uuid/clipboard/selection）、`用户输入`（弹窗问：input）、`上下文标记`（插入位置：cursor）、`外部计算`（命令/脚本）
   - **消费者**：parser 合法性校验（`_KNOWN` ← registry.names()）、胶囊悬停 tooltip、`{{` 自动补全候选（`filter_candidates`：常用在前、其余按类别）、「变量库」弹层分组（`group_by_category`：系统→用户输入→上下文→自定义）、常用变量持久化（config `template.favorite_variables`，null=全部预设）
   - **重复 input 自动编号**：`next_input_insert`——模板已含 `{{input:name}}` 再插入同名 → `{{input:name2}}`/`{{input:name3}}`（每次独立输入，避免去重只问一次）；胶囊点击与自动补全 accept 都走此规则
-  - **自定义变量值源接口（已文档化，未实现执行）**：自定义变量当前只能走「用户输入」（弹窗问值）。`VariableMeta.value_source` 字段已预留——未来可声明自定义变量的值源为「外部计算」并挂命令/脚本在渲染时取值；渲染流水线（`render_template` → `RenderContext`，clipboard/selection 走可注入 reader）按值源分发，扩展点已留，本次不实现执行
+  - **自定义变量值来源（v8）**：`extra_variables` 由 `list[str]` 迁为结构化 `{name, description, source, config}`（`services/template/custom_vars.py` 读写 + 旧格式自动迁移，剥 `{{}}`、默认 input 来源）。四种来源（`registry.SOURCE_*`）：
+    - `input`：触发时弹窗询问（值在 `ctx.input_values[name]`；与 `{{input:name}}` 共享同名去重键——模板里 `{{name}}` 与 `{{input:name}}` 视为同一个输入，只问一次）
+    - `fixed`：`config.text` 原样插入（严格固定，不做替换）
+    - `command`：`config.command` 经 `/bin/sh -c` **同步执行**，`stdout.strip()` 作结果，**5s 超时 / 非零退出 → 空串 + 日志警告**（渲染失败不崩插入）
+    - `state`：`config.state`（v1 仅 `frontmost_app` 前台应用名），框架预留更多系统状态
+    - 值源 provider 注册表 `services/template/value_sources.py`：新增值源 = 加一个 `ValueSourceProvider` 子类 + `build_value_sources()` 登记一行；`command` 来源本身即「脚本扩展」通道（不写 Python 也能接任意命令）。语义：`{{name}}` = 自定义变量直接求值；`{{input:name}}` = 临时输入，**§43 旧配对已移除（彻底解耦）**
+  - **自定义变量编辑**：`VariableEditDialog`（变量名/描述/值来源下拉/配置区按来源切换）；右键胶囊弹菜单（编辑/删除）；**改名扫描模板引用并警告但不自动替换**（避免静默改坏历史模板）
 - **数据**：snippets 表（shortcut UNIQUE/folder_id/enabled/favorite/trigger_mode/usage_count/last_used_at）+ snippet_folders；旧数据迁移 shortcut=name 小写（冲突加 `_<id>`）；默认文件夹（个人/工作/开发/模板）+ 默认模板（shrug/today/uuid/quote）幂等插入
 - **触发**（§7）：HotkeyManager 扩展 `raw_key_down` 信号转发无 ⌘⌃⌥ 修饰的按键（字符用 `CGEventKeyboardGetUnicodeString` 跟随布局，回退 vk 映射表），事件透传不消费；matcher 主线程维护输入缓冲，tab 模式 Tab 触发 / automatic 模式输完立即触发，匹配从缓冲末尾扫最长后缀
   - **输入法策略（用户要求：无论哪种输入法，必须完整 shortcut 彻底输入文本框后才触发）**：
@@ -646,6 +652,9 @@ CREATE INDEX ix_items_session ON clipboard_items (session_id);
 | 中文输入法 uuid 未按回车就触发 | 焦点文本轮询匹配了组合中未上屏的拼音（部分应用读不到 marked range，`is_ime_composing` 失效） | 轮询固定 `skip_ascii=True` 只匹配中文 shortcut；英文 shortcut 由按键路径（中文提交键）覆盖（§7.3） |
 | 触发后 shortcut 残留输入框 | 只粘贴渲染文本，未删除用户输入的 shortcut | matcher 回调携带 delete_count，插入前 `delete_backspaces(n)`（**必须在弹输入框之前**，弹框夺焦后退格打错位置）（§7.3） |
 | 文件夹操作按钮不可识别 | ＋/✎/－ 符号按钮：✎ 渲染不出、无文字 | 改文字按钮「＋ 新建文件夹」+ 右键菜单（新建/重命名/删除）（§7.3） |
+| 右键变量后整页按钮无反应 | 右键胶囊在 `customContextMenuRequested`（鼠标按下）里同步 `QMenu.exec()` / 弹模态 `QMessageBox`，macOS 上嵌套事件循环残留鼠标 grab，菜单/弹窗关闭后整个编辑面板（含取消/保存）点击失效 | 整条右键链路只用非阻塞 `QMenu.popup()` + `QTimer.singleShot(0)` 延后；预设变量显示置灰菜单项「不可编辑」，不再弹模态框（§7.3） |
+| 关窗后触发 input 模板连带打开主窗口 | 输入框前 `activateIgnoringOtherApps_(True)` 激活本应用 → 触发 `on_app_state(ApplicationActive)` 把隐藏的主窗口 show 出来 | 弹框期间置 `_suppress_window_show` 标志，`on_app_state` 跳过 re-show；取消路径也 `_activate_target` 把焦点还给目标应用（§7.3） |
+| 自定义胶囊悬停说明与变量库不一致 | 胶囊区构造时未注入 tooltips → 自定义变量回退默认「触发时弹窗询问值」；变量库在 `rebuild()` 现算 `custom_tooltip` | 构造时 `VariableTagBar(tooltips=_custom_tooltip_map())` 注入值来源说明（§7.3） |
 
 ---
 

@@ -2,25 +2,41 @@
 
 保存时验证（validate_template）：未知变量、{{input}} 缺 name、
 重复 {{cursor}} 都会抛错——不允许静默删除。
+
+自定义变量（registry.CustomVariable）不在内置关键字集里，靠调用方传入
+custom_names 参与解析：`{{name}}` 命中自定义变量 → TokenType.CUSTOM
+（由值源决定取值），否则 UnknownVariableError。§43 旧配对（{{name}}
+引用 {{input:name}}）已移除——两者彻底解耦。
 """
 import re
+from dataclasses import dataclass
 
 from .errors import CursorLimitError, InputError, TemplateError, UnknownVariableError
-from .registry import names as known_names
+from .registry import SOURCE_INPUT, names as known_names
 from .token import Token, TokenType
 
 # {{variable:params}} —— 变量名 \w+，可选 :params（params 不含 }）
 _VAR_RE = re.compile(r"\{\{(\w+)(?::([^}]*))?\}\}")
 
-# 第一阶段已知变量（唯一事实源 = 变量注册表 registry.names()）
+# 内置变量关键字集合（唯一事实源 = 变量注册表 registry.names()）
 _KNOWN = known_names()
 
 
-def parse(template: str) -> list[Token]:
-    """解析模板为 token 流。失败抛 TemplateError 子类。"""
-    # 先收集已声明的 input 变量（§43：{{name}} 可引用 {{input:name}}）
-    declared = set(m.group(1) for m in
-                   re.finditer(r"\{\{input:([^}:]*)\}\}", template))
+@dataclass(frozen=True)
+class InputRequest:
+    """渲染前需收集的一次输入：name 是 value key，token 是展示/替换文本。"""
+
+    name: str
+    token: str
+
+
+def parse(template: str, custom_names: set[str] | None = None) -> list[Token]:
+    """解析模板为 token 流。失败抛 TemplateError 子类。
+
+    custom_names：当前已定义的自定义变量名集合（不含 `{{}}`）；命中即
+    TokenType.CUSTOM，否则视为未知变量报错。
+    """
+    custom_names = custom_names or set()
     tokens: list[Token] = []
     pos = 0
     cursor_count = 0
@@ -33,9 +49,8 @@ def parse(template: str) -> list[Token]:
         params = m.group(2) or ""
 
         if name not in _KNOWN:
-            if name in declared:
-                # §43：{{name}} 引用已声明的 {{input:name}}——同一变量只问一次
-                tokens.append(Token(TokenType.INPUT, params=name,
+            if name in custom_names:
+                tokens.append(Token(TokenType.CUSTOM, params=name,
                                     position=m.start()))
                 pos = m.end()
                 continue
@@ -75,22 +90,39 @@ def parse(template: str) -> list[Token]:
     return tokens
 
 
-def validate_template(content: str) -> str | None:
-    """保存时验证模板内容。返回 None=合法，否则返回用户可读错误消息。
-
-    同时收集需要用户输入的变量名（去重，按出现顺序，文档 §43）。
-    """
+def validate_template(content: str, custom_names: set[str] | None = None) -> str | None:
+    """保存时验证模板内容。返回 None=合法，否则返回用户可读错误消息。"""
     try:
-        tokens = parse(content)
+        parse(content, custom_names=custom_names)
     except TemplateError as e:
         return str(e)
     return None
 
 
-def collect_inputs(tokens: list[Token]) -> list[str]:
-    """模板中 {{input:name}} 的变量名列表（去重、按首次出现顺序，§43）。"""
+def collect_inputs(tokens: list[Token], custom_vars: dict | None = None) -> list[InputRequest]:
+    """渲染前需用户输入的变量（去重、按首次出现顺序）。
+
+    - {{input:name}} → 临时输入
+    - {{name}}（自定义变量且 source=input）→ 用户输入来源
+    其余自定义变量（fixed/command/state）无需询问，不出现在结果里。
+
+    ⚠️ name 作为去重键：模板里同名 `{{name}}` 与 `{{input:name}}` 共用
+    一次询问（边界情况，§变量-值源 已文档化）。
+    """
+    custom_vars = custom_vars or {}
     seen: list[str] = []
+    out: list[InputRequest] = []
     for t in tokens:
-        if t.type == TokenType.INPUT and t.params not in seen:
-            seen.append(t.params)
-    return seen
+        if t.type == TokenType.INPUT:
+            name = t.params
+            if name not in seen:
+                seen.append(name)
+                out.append(InputRequest(name, f"{{{{input:{name}}}}}"))
+        elif t.type == TokenType.CUSTOM:
+            var = custom_vars.get(t.params)
+            if var is not None and getattr(var, "source", SOURCE_INPUT) == SOURCE_INPUT:
+                name = t.params
+                if name not in seen:
+                    seen.append(name)
+                    out.append(InputRequest(name, f"{{{{{name}}}}}"))
+    return out

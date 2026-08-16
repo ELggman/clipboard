@@ -192,25 +192,49 @@ def test_favorites_round_trip(tmp_path, monkeypatch):
 
 
 def test_extra_variables_round_trip(tmp_path, monkeypatch):
-    """自定义变量持久化 round-trip。"""
+    """自定义变量持久化 round-trip（结构化 CustomVariable）。"""
     _isolate_config(tmp_path, monkeypatch)
+    from services.template.registry import SOURCE_FIXED, CustomVariable
     from ui.template_components import (load_extra_variables,
                                         save_extra_variables)
 
     assert load_extra_variables() == []
-    save_extra_variables(["{{location}}", "{{home}}"])
-    assert load_extra_variables() == ["{{location}}", "{{home}}"]
+    save_extra_variables([
+        CustomVariable(name="location", description="公司地址",
+                       source=SOURCE_FIXED, config={"text": "北京"}),
+        CustomVariable(name="home"),
+    ])
+    got = load_extra_variables()
+    assert [v.name for v in got] == ["location", "home"]
+    assert got[0].description == "公司地址"
+    assert got[0].source == SOURCE_FIXED
+    assert got[0].config == {"text": "北京"}
+    assert got[1].insert() == "{{home}}"
+
+
+def test_extra_variables_migrate_legacy(tmp_path, monkeypatch):
+    """旧 list[str] 自动迁移：剥 {{}}、默认 input 来源、零丢失。"""
+    _isolate_config(tmp_path, monkeypatch)
+    (tmp_path / "settings.yaml").write_text(
+        "template:\n  extra_variables:\n    - '{{location}}'\n    - '{{home}}'\n",
+        encoding="utf-8")
+    from ui.template_components import load_extra_variables
+
+    got = load_extra_variables()
+    assert [v.name for v in got] == ["location", "home"]
+    assert all(v.source == "input" for v in got)
+    assert [v.insert() for v in got] == ["{{location}}", "{{home}}"]
 
 
 def test_variable_library_popup_rebuild_and_star(tmp_path, monkeypatch):
     """变量库弹层：分组重建含自定义；★ 切换常用持久化 + favorites_changed。"""
     _isolate_config(tmp_path, monkeypatch)
-    from services.template.registry import PRESET_VARIABLES
+    from services.template.registry import PRESET_VARIABLES, CustomVariable
     from ui.template_components import (VariableLibraryPopup,
                                         load_favorite_variables)
 
     popup = VariableLibraryPopup()
-    popup.set_custom_variables(["{{location}}"])
+    popup.set_custom_variables([CustomVariable(name="location")])
     toggled = []
     popup.favorites_changed.connect(lambda: toggled.append(1))
     try:
@@ -299,14 +323,41 @@ def test_var_tag_pill_min_height_no_vertical_overlap():
         bar.close()
 
 
+def test_var_tag_bar_custom_pill_tooltip_reflects_source(tmp_path, monkeypatch):
+    """回归：自定义胶囊悬停须显示值来源（固定值），而非默认「弹窗询问」。
+
+    初始构造未注入 tooltips 时，自定义胶囊回退 custom_default_tooltip
+    （「触发时弹窗询问值」），与「变量库」里正确的值来源说明不一致。
+    """
+    _isolate_config(tmp_path, monkeypatch)
+    from services.template.registry import (SOURCE_FIXED, CustomVariable,
+                                            custom_tooltip)
+    from ui.template_components import (VariableTagBar, load_extra_variables,
+                                        save_extra_variables)
+
+    save_extra_variables([
+        CustomVariable(name="ds_token", source=SOURCE_FIXED,
+                       config={"text": "abc123"}),
+    ])
+    tooltips = {v.insert(): custom_tooltip(v) for v in load_extra_variables()}
+    bar = VariableTagBar(variables=["{{ds_token}}"], tooltips=tooltips)
+    try:
+        tip = bar._pills[0].toolTip()
+        assert "固定值" in tip
+        assert "abc123" in tip
+        assert "弹窗" not in tip
+    finally:
+        bar.close()
+
 
 def test_library_row_button_star_zone(tmp_path, monkeypatch):
     """变量库行按钮：★ 区点击切常用（不发插入）；行区点击插入。"""
     _isolate_config(tmp_path, monkeypatch)
+    from services.template.registry import CustomVariable
     from ui.template_components import VariableLibraryPopup
 
     popup = VariableLibraryPopup()
-    popup.set_custom_variables(["{{location}}"])
+    popup.set_custom_variables([CustomVariable(name="location")])
     inserted, toggled = [], []
     popup.insert_requested.connect(lambda s: inserted.append(s))
     popup.favorites_changed.connect(lambda: toggled.append(1))

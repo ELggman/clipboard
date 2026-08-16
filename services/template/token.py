@@ -14,6 +14,7 @@ class TokenType(Enum):
     SELECTION = auto()
     CURSOR = auto()
     INPUT = auto()
+    CUSTOM = auto()
 
 
 @dataclass

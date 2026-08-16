@@ -39,7 +39,8 @@ template:
   date_format: "%Y-%m-%d"
   time_format: "%H:%M"
   datetime_format: "%Y-%m-%d %H:%M:%S"
-  extra_variables: []           # 用户自定义变量（编辑弹窗「＋ 新增变量」追加）
+  extra_variables: []           # 用户自定义变量（结构化：{name, description, source, config}）
+                                #   source: input(用户输入) / fixed(固定值) / command(外部命令) / state(系统状态)
   favorite_variables: null      # 常用变量（自动补全/变量区/「变量库」★ 管理）；null=默认全部预设
 
 search:

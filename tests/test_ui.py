@@ -562,24 +562,34 @@ def test_input_dialog_all_filled():
 
 def test_input_dialog_preview_text():
     """preview_text：已填 token 替换为值，未填保留原 token。"""
+    from services.template.parser import InputRequest
     from ui.input_variable_dialog import preview_text
 
     content = "{{input:leader}}好！我叫{{input:name}}，很高兴认识你。"
-    assert preview_text(content, {}) == content
-    assert preview_text(content, {"name": "王五"}) == \
+    reqs = [InputRequest("leader", "{{input:leader}}"),
+            InputRequest("name", "{{input:name}}")]
+    assert preview_text(content, {}, reqs) == content
+    assert preview_text(content, {"name": "王五"}, reqs) == \
         "{{input:leader}}好！我叫王五，很高兴认识你。"
-    assert preview_text(content, {"leader": "同学们", "name": "王五"}) == \
+    assert preview_text(content, {"leader": "同学们", "name": "王五"}, reqs) == \
         "同学们好！我叫王五，很高兴认识你。"
     # 空白值视为未填，保留 token
-    assert preview_text(content, {"name": "  "}) == content
+    assert preview_text(content, {"name": "  "}, reqs) == content
+    # 自定义变量（input 来源）同样按 token 精确替换
+    content2 = "位置：{{location}}"
+    reqs2 = [InputRequest("location", "{{location}}")]
+    assert preview_text(content2, {"location": "北京"}, reqs2) == "位置：北京"
 
 
 def test_input_dialog_insert_requires_all_filled():
     """对话框：插入按钮初始置灰；全填满才可点；预览随输入更新。"""
+    from services.template.parser import InputRequest
     from ui.input_variable_dialog import InputVariableDialog
 
     content = "{{input:leader}}好！我叫{{input:name}}，很高兴认识你。"
-    dlg = InputVariableDialog(["leader", "name"], content=content)
+    reqs = [InputRequest("leader", "{{input:leader}}"),
+            InputRequest("name", "{{input:name}}")]
+    dlg = InputVariableDialog(reqs, content=content)
     try:
         assert not dlg._insert_btn.isEnabled()  # 初始未填 → 置灰
         assert dlg._preview.toPlainText() == content  # 预览 = 原文
@@ -604,9 +614,12 @@ def test_input_dialog_no_autodefault_enter_safe():
     """
     from PySide6.QtWidgets import QPushButton
 
+    from services.template.parser import InputRequest
     from ui.input_variable_dialog import InputVariableDialog
 
-    dlg = InputVariableDialog(["leader", "name"], content="")
+    reqs = [InputRequest("leader", "{{input:leader}}"),
+            InputRequest("name", "{{input:name}}")]
+    dlg = InputVariableDialog(reqs, content="")
     try:
         btns = dlg.findChildren(QPushButton)
         assert len(btns) >= 2

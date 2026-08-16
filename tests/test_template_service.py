@@ -180,12 +180,12 @@ def test_render_template_pipeline(svc):
 
 def test_render_template_collects_inputs(svc):
     text, cursor, inputs = svc.render_template("Hello {{input:name}}")
-    assert inputs == ["name"]
+    assert [r.name for r in inputs] == ["name"]
     # 调用方流程：先取 inputs 弹输入框 → 二次渲染提供值
     text2, _, inputs2 = svc.render_template(
         "Hello {{input:name}}", input_values={"name": "Alice"})
     assert text2 == "Hello Alice"
-    assert inputs2 == ["name"]
+    assert [r.name for r in inputs2] == ["name"]
 
 
 def test_default_templates_seeded(svc):

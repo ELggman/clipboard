@@ -110,9 +110,47 @@ def test_validate_template_errors():
 
 
 def test_collect_inputs_dedup():
-    """同一变量只收集一次、按首次出现顺序（§43）。"""
-    tokens = parse("{{input:name}} & {{input:topic}} & {{name}}")
-    assert collect_inputs(tokens) == ["name", "topic"]
+    """同一变量只收集一次、按首次出现顺序；InputRequest 带 token。"""
+    tokens = parse("{{input:name}} & {{input:topic}} & {{input:name}}")
+    reqs = collect_inputs(tokens)
+    assert [r.name for r in reqs] == ["name", "topic"]
+    assert [r.token for r in reqs] == ["{{input:name}}", "{{input:topic}}"]
+
+
+def test_collect_inputs_custom_source():
+    """自定义变量只有 input 来源进收集；fixed/command/state 不进。"""
+    from services.template.registry import (
+        SOURCE_FIXED,
+        SOURCE_INPUT,
+        CustomVariable,
+    )
+
+    tokens = parse("{{loc}} {{fixed}}", custom_names={"loc", "fixed"})
+    reqs = collect_inputs(tokens, {
+        "loc": CustomVariable(name="loc", source=SOURCE_INPUT),
+        "fixed": CustomVariable(name="fixed", source=SOURCE_FIXED),
+    })
+    assert [r.name for r in reqs] == ["loc"]  # 只有 input 来源的进收集
+    assert reqs[0].token == "{{loc}}"
+
+
+def test_parse_custom_variable():
+    """自定义变量命中 custom_names → CUSTOM token（params=name）。"""
+    tokens = parse("Hello {{location}}", custom_names={"location"})
+    assert _types(tokens) == [TokenType.TEXT, TokenType.CUSTOM]
+    assert tokens[1].params == "location"
+
+
+def test_parse_custom_not_pairing():
+    """§43 已移除：{{name}} 不再引用 {{input:name}}——未定义即未知变量。"""
+    with pytest.raises(UnknownVariableError):
+        parse("{{input:name}} {{name}}")
+
+
+def test_validate_template_custom_names():
+    """validate_template 透传 custom_names：自定义变量合法。"""
+    assert validate_template("{{location}}", custom_names={"location"}) is None
+    assert "未知变量" in validate_template("{{location}}")
 
 
 # ---- Renderer（§117-120）----
@@ -652,6 +690,24 @@ def test_custom_default_tooltip():
     from services.template.registry import custom_default_tooltip
 
     assert "弹窗" in custom_default_tooltip()
+
+
+def test_custom_tooltip_by_source():
+    """自定义变量 tooltip：描述 + 值来源 + 按来源的配置摘要。"""
+    from services.template.registry import (
+        SOURCE_FIXED,
+        CustomVariable,
+        custom_tooltip,
+    )
+
+    var = CustomVariable(name="email", description="工作邮箱",
+                         source=SOURCE_FIXED, config={"text": "a@b.c"})
+    tip = custom_tooltip(var)
+    assert "工作邮箱" in tip
+    assert "值来源：固定值" in tip
+    assert "a@b.c" in tip
+    # 无描述回退「自定义变量」
+    assert "自定义变量" in custom_tooltip(CustomVariable(name="x"))
 
 
 def test_group_by_category_order():

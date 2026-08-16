@@ -35,8 +35,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from services.template.custom_vars import extra_insert_texts
 from services.template.errors import TemplateError
-from services.template.registry import is_preset
+from services.template.registry import custom_tooltip, is_preset
 from services.template_service import TemplateService
 from ui.template_components import (
     ROLE_FOLDER_COUNT,
@@ -56,6 +57,7 @@ from ui.template_components import (
     save_favorite_variables,
 )
 from ui.variable_autocomplete import VariableAutocompleteEditor
+from ui.variable_edit_dialog import VariableEditDialog
 
 # ---- 模板页布局常量（手动调整模板条目宽度 = 中间栏宽度）----
 # 中间栏不再硬编码（旧 setFixedWidth(280) 与左列 160 + 边距 恒 > 420 窗口，
@@ -197,6 +199,7 @@ class TemplateEditorDialog(QDialog):
         super().__init__(parent)
         self._svc = svc
         self._template = template          # dict | None（None = 新建）
+        self._menus: list = []             # 右键菜单引用防 GC
         is_new = template is None
         self.setWindowTitle("新建模板" if is_new else "编辑模板")
         self.setModal(True)
@@ -275,9 +278,14 @@ class TemplateEditorDialog(QDialog):
         vbox.addWidget(l5)
         vrow = QHBoxLayout()
         vrow.setSpacing(8)
-        self._var_tags = VariableTagBar(variables=load_favorite_variables())
+        # 胶囊创建时即注入自定义变量悬停说明（否则 tooltips 为空，自定义
+        # 变量胶囊会回退到默认「触发时弹窗询问值」——与「变量库」里正确的
+        # 值来源说明不一致，实测 bug）。
+        self._var_tags = VariableTagBar(
+            variables=load_favorite_variables(),
+            tooltips=self._custom_tooltip_map())
         self._var_tags.variable_clicked.connect(self._insert_variable)
-        self._var_tags.remove_requested.connect(self._remove_variable)
+        self._var_tags.remove_requested.connect(self._on_variable_context)
         # 变量区滚动：展开多行时固定高度内滚动（设计反馈：展开显示不完全）
         self._var_scroll = QScrollArea()
         self._var_scroll.setObjectName("varScroll")
@@ -328,7 +336,7 @@ class TemplateEditorDialog(QDialog):
         self._content.setObjectName("templateEditor")
         self._content.setPlaceholderText("模板内容…（{{date}} 等变量自动高亮，{{ 自动补全）")
         self._content.textChanged.connect(self._schedule_highlight)
-        self._content.set_custom_variables(load_extra_variables())
+        self._content.set_custom_variables(extra_insert_texts())
         vbox.addWidget(self._content, 1)
 
         # 启用 + 删除 / 保存 / 取消
@@ -422,42 +430,96 @@ class TemplateEditorDialog(QDialog):
         self._content.setFocus()
 
     def _add_variable(self) -> None:
-        """「＋ 新增」：输入变量名 → 持久化（extra_variables + 常用）→
-        刷新胶囊区。预设变量不可重复添加；新自定义默认进常用（胶囊区要
-        显示；「变量库」★ 可移除）。"""
-        from ui.dialogs import NameDialog
-
-        dlg = NameDialog("新增变量", "变量名（如 myvar 或 {{myvar}}）：",
-                         placeholder="myvar", confirm_text="添加", parent=self)
+        """「＋ 新增」：填 变量名/描述/值来源 → 持久化（extra_variables +
+        常用）→ 刷新胶囊区。新自定义默认进常用（胶囊区要显示；「变量库」
+        ★ 可移除）。"""
+        dlg = VariableEditDialog(parent=self)
         if not dlg.exec():
             return
-        raw = dlg.text().strip()
-        if not raw:
-            return
-        var = raw if raw.startswith("{{") else f"{{{{{raw}}}}}"
-        if is_preset(var):
-            self._warn("预设变量不可重复添加")
-            return
-        if var in load_extra_variables():
-            self._warn("变量已存在")
-            return
+        var = dlg.result_variable()
         extras = load_extra_variables()
+        if any(v.name == var.name for v in extras):
+            self._warn(f"变量「{var.name}」已存在")
+            return
         extras.append(var)
         save_extra_variables(extras)
         favs = load_favorite_variables()
-        if var not in favs:
-            favs.append(var)
+        if var.insert() not in favs:
+            favs.append(var.insert())
             save_favorite_variables(favs)
         self._sync_custom_variables()
         self._refresh_var_tags()
 
-    def _remove_variable(self, var: str) -> None:
-        """右键变量胶囊删除：仅用户自定义变量（预设不可删）；同时移出常用。"""
+    def _on_variable_context(self, var: str) -> None:
+        """右键胶囊 → 菜单：预设显示禁用项「不可编辑」，自定义显示编辑/删除。
+
+        ⚠️ 关键：整条链路只用**非阻塞** QMenu.popup()，绝不在右键处理器里
+        弹模态框（QMessageBox / QMenu.exec）。macOS 上右键弹模态框会在关闭后
+        残留鼠标 grab，整页按钮（展开/变量库/新增/取消/保存）点击无反应
+        （问题2）。singleShot(0) 再把 popup 移出鼠标按下事件处理器。
+        """
+        QTimer.singleShot(0, lambda: self._show_variable_menu(var))
+
+    def _show_variable_menu(self, var: str) -> None:
+        menu = QMenu(self)
+        self._menus.append(menu)  # 保持引用防 GC（同 TemplatesView._active_menus）
+        if is_preset(var):
+            act = menu.addAction("预设变量不可编辑")
+            act.setEnabled(False)
+        else:
+            menu.addAction("编辑变量…").triggered.connect(
+                lambda: self._edit_variable(var))
+            menu.addAction("删除变量…").triggered.connect(
+                lambda: self._remove_variable(var))
+        menu.popup(QCursor.pos())
+
+    def _edit_variable(self, var: str) -> None:
+        """编辑自定义变量（改名/描述/值来源）；改名扫描引用但**不自动替换**。"""
         extras = load_extra_variables()
-        if var not in extras:
+        current = next((v for v in extras if v.insert() == var), None)
+        if current is None:
+            return
+        dlg = VariableEditDialog(parent=self, variable=current)
+        if not dlg.exec():
+            return
+        updated = dlg.result_variable()
+        # 改名：扫描模板引用，警告但不自动替换（避免静默改坏历史模板）
+        if updated.name != current.name:
+            refs = self._count_references(current.name)
+            if refs:
+                self._warn(
+                    f"有 {refs} 个模板引用了「{current.name}」，"
+                    "改名后不会自动更新这些引用")
+        if any(v.name == updated.name for v in extras if v.insert() != var):
+            self._warn(f"变量「{updated.name}」已存在")
+            return
+        extras = [updated if v.insert() == var else v for v in extras]
+        save_extra_variables(extras)
+        # 改名同步常用（favorites 存插入文本 {{old}} → {{new}}）
+        favs = load_favorite_variables()
+        if var in favs:
+            favs.remove(var)
+            if updated.insert() not in favs:
+                favs.append(updated.insert())
+            save_favorite_variables(favs)
+        self._sync_custom_variables()
+        self._refresh_var_tags()
+
+    def _count_references(self, name: str) -> int:
+        """扫描模板内容引用 {{name}} 的数量（改名警告用）。"""
+        if self._svc is None:
+            return 0
+        token = f"{{{{{name}}}}}"
+        return sum(1 for t in self._svc.list_templates()
+                   if token in t["content"])
+
+    def _remove_variable(self, var: str) -> None:
+        """删除自定义变量（预设不可删）；同时移出常用。"""
+        extras = load_extra_variables()
+        if not any(v.insert() == var for v in extras):
             self._warn(f"预设变量「{var}」不可删除")
             return
-        extras.remove(var)
+        extras = [v for v in extras if v.insert() != var]
         save_extra_variables(extras)
         favs = load_favorite_variables()
         if var in favs:
@@ -469,13 +531,18 @@ class TemplateEditorDialog(QDialog):
     def _sync_custom_variables(self) -> None:
         """自定义变量变更 → 同步到补全编辑器与变量库弹层。"""
         extras = load_extra_variables()
-        self._content.set_custom_variables(extras)
+        self._content.set_custom_variables(extra_insert_texts())
         self._lib_popup.set_custom_variables(extras)
 
     def _refresh_var_tags(self) -> None:
         """常用变量变更 → 胶囊区整体重建（只显常用）+ 按钮同步。"""
+        self._var_tags.set_tooltips(self._custom_tooltip_map())
         self._var_tags.set_variables(load_favorite_variables())
         self._sync_var_buttons()
+
+    def _custom_tooltip_map(self) -> dict[str, str]:
+        """自定义变量 insert → 悬停说明（描述 + 值来源）。"""
+        return {v.insert(): custom_tooltip(v) for v in load_extra_variables()}
 
     # ---- 「变量库」弹层开关（点击切换；Qt.Popup 点击外部/Esc 自带关闭）----
 
@@ -591,9 +658,10 @@ class TemplateEditorDialog(QDialog):
             logger.info("模板已删除: id=%s", self._template["id"])
             self.accept()
 
-    @staticmethod
-    def _warn(message: str) -> None:
-        QMessageBox.warning(None, "模板", message)
+    def _warn(self, message: str) -> None:
+        # parent=self：警告框挂在编辑面板上（而非顶层），关闭后焦点/模态
+        # 能正确归还给编辑面板，配合 singleShot 延后避免 macOS grab 残留
+        QMessageBox.warning(self, "模板", message)
 
 
 class TemplatesView(QWidget):

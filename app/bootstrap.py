@@ -131,8 +131,16 @@ def start_workspace(app: QApplication) -> None:
     # 关窗后（窗口隐藏）点 Dock 图标 → 应用激活 → 重新显示窗口
     from PySide6.QtCore import Qt
 
+    # 输入变量弹框期间抑制「激活即显主窗口」：input 模板在关窗状态下触发，
+    # 需 activateIgnoringOtherApps 让弹框可见，但该激活会把 applicationState
+    # 置为 Active → 上面的 handler 误把隐藏的主窗口带出来（用户：关窗后触发
+    # input 应只弹输入框，不应打开 main_window）。置位期间跳过 re-show。
+    _suppress_window_show = False
+
     def on_app_state(state) -> None:
-        if state == Qt.ApplicationState.ApplicationActive and not window.isVisible():
+        if (state == Qt.ApplicationState.ApplicationActive
+                and not window.isVisible()
+                and not _suppress_window_show):
             window.show()
             window.raise_()
             logger.info("主窗口已重新显示")
@@ -401,14 +409,22 @@ def start_workspace(app: QApplication) -> None:
             # 优先用触发时捕获的（picker 流程）；tab 流程前台就是目标。
             target = (trigger_app
                       or NSWorkspace.sharedWorkspace().frontmostApplication())
-            NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
-            dlg = InputVariableDialog(inputs, content=content)
-            if dlg.exec() != QDialog.DialogCode.Accepted:
-                logger.info("模板输入取消: shortcut=%s", template["shortcut"])
-                return
-            # 先把值取出来再 _activate_target：其内部 processEvents() 可能
-            # 处理对话框的延迟销毁，之后 dlg 可能已失效（C++ 对象已删）。
-            values = dlg.values()
+            # 激活本应用只为让输入框可见，但会连带触发 on_app_state 把隐藏
+            # 的主窗口带出来——置 _suppress_window_show 抑制，只弹输入框。
+            nonlocal _suppress_window_show
+            _suppress_window_show = True
+            try:
+                NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+                dlg = InputVariableDialog(inputs, content=content)
+                if dlg.exec() != QDialog.DialogCode.Accepted:
+                    logger.info("模板输入取消: shortcut=%s", template["shortcut"])
+                    _activate_target(target)  # 取消同样把焦点还给目标应用
+                    return
+                # 先把值取出来再 _activate_target：其内部 processEvents() 可能
+                # 处理对话框的延迟销毁，之后 dlg 可能已失效（C++ 对象已删）。
+                values = dlg.values()
+            finally:
+                _suppress_window_show = False
             _activate_target(target)
             text, _, _ = template_service.render_template(
                 content, input_values=values, selection_text=selection)

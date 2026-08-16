@@ -38,11 +38,19 @@ from PySide6.QtWidgets import (
 )
 
 from ui.code_highlighter import CodeHighlighter
+from services.template.custom_vars import (
+    extra_insert_texts,
+    load_custom_vars,
+    load_extra_variables,
+    save_extra_variables,
+)
 from services.template.registry import (
     CAT_CUSTOM,
     PRESET_VARIABLES,
+    CustomVariable,
     VariableMeta,
     custom_default_tooltip,
+    custom_tooltip,
     group_by_category,
     is_preset,
     meta_for,
@@ -74,26 +82,9 @@ _STAR_DIM = QColor("#B0B0B6")
 
 
 # ---- 变量配置持久化（config template 段；胶囊区/变量库/自动补全共用）----
-
-def load_extra_variables() -> list[str]:
-    """用户自定义变量（config template.extra_variables）。"""
-    try:
-        from app.config import load_config
-
-        config = load_config()
-        return list(config.get("template", {}).get("extra_variables", []))
-    except Exception:
-        return []
-
-
-def save_extra_variables(vars_list: list[str]) -> None:
-    """持久化用户自定义变量。"""
-    try:
-        from app.config import save_user_config
-
-        save_user_config({"template": {"extra_variables": list(vars_list)}})
-    except Exception:
-        pass
+# load_extra_variables / save_extra_variables 已迁到
+# services.template.custom_vars（结构化 list[CustomVariable] + 旧格式迁移），
+# 此处 re-export（顶部 import）供 UI 与既有调用方兼容。
 
 
 def load_favorite_variables() -> list[str]:
@@ -344,10 +335,12 @@ class VariableTagBar(QWidget):
     # 折叠时最多显示的胶囊数（400px 弹窗胶囊区 ≈ 280px 放 3 个）
     _MAX_COLLAPSED = 3
 
-    def __init__(self, parent: QWidget | None = None, variables=None):
+    def __init__(self, parent: QWidget | None = None, variables=None,
+                 tooltips=None):
         super().__init__(parent)
         self._expanded = False
         self._pills: list[QPushButton] = []
+        self._tooltips: dict[str, str] = dict(tooltips or {})
         self._flow = _FlowLayout(self, spacing=6)
         # HeightForWidth：布局按实际宽度查询包裹高度（滚动区依赖——
         # 展开多行时 minimumSizeHint 高于视口才出现滚动条）
@@ -374,9 +367,10 @@ class VariableTagBar(QWidget):
         # 固定高度让 sizeHint == 实际高度，行高才正确（与右侧按钮同值 24px）。
         btn.setFixedHeight(24)
         # 悬停说明（可发现性）：内置变量查注册表（作用/用法/例子），
-        # 自定义变量默认说明（当前值源只能「用户输入」）
+        # 自定义变量用注入的 tooltip（描述 + 值来源；缺省回退默认说明）
         meta = meta_for(var)
-        btn.setToolTip(meta.tooltip() if meta else custom_default_tooltip())
+        btn.setToolTip(meta.tooltip() if meta
+                       else (self._tooltips.get(var) or custom_default_tooltip()))
         btn.customContextMenuRequested.connect(
             lambda _p, v=var: self.remove_requested.emit(v))
         btn.clicked.connect(
@@ -414,6 +408,13 @@ class VariableTagBar(QWidget):
 
     def variables(self) -> list[str]:
         return [b.text() for b in self._pills]
+
+    def set_tooltips(self, tooltips: dict[str, str]) -> None:
+        """更新自定义变量悬停说明（描述/值来源变更后由外部注入）。
+
+        须在 set_variables 之前调用（后者重建胶囊时读取）。
+        """
+        self._tooltips = dict(tooltips or {})
 
     def set_variables(self, variables: list[str]) -> None:
         """整体替换胶囊（常用变量在「变量库」★ 变更后重建）。"""
@@ -644,7 +645,7 @@ class VariableLibraryPopup(QWidget):
         super().__init__(parent, Qt.FramelessWindowHint | Qt.Popup)
         self.setObjectName("variableLibrary")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        self._custom: list[str] = []
+        self._custom: list[CustomVariable] = []
         self._rows: list[tuple[QPushButton, str]] = []
         lay = QVBoxLayout(self)
         lay.setContentsMargins(8, 8, 8, 8)
@@ -660,7 +661,7 @@ class VariableLibraryPopup(QWidget):
         self._scroll.setWidget(self._body)
         self.resize(260, 300)
 
-    def set_custom_variables(self, custom: list[str]) -> None:
+    def set_custom_variables(self, custom: list[CustomVariable]) -> None:
         """外部注入用户自定义变量（编辑弹窗增删时同步）。"""
         self._custom = list(custom)
 
@@ -674,11 +675,15 @@ class VariableLibraryPopup(QWidget):
             if w is not None:
                 w.deleteLater()
         self._rows.clear()
-        metas = list(PRESET_VARIABLES) + [
-            VariableMeta(insert=c, category=CAT_CUSTOM, description="",
-                         usage="", example="", builtin=False)
-            for c in self._custom if not is_preset(c)
-        ]
+        tooltips: dict[str, str] = {}
+        metas = list(PRESET_VARIABLES)
+        for c in self._custom:
+            if is_preset(c.insert()):
+                continue
+            metas.append(VariableMeta(insert=c.insert(), category=CAT_CUSTOM,
+                                      description="", usage="", example="",
+                                      builtin=False))
+            tooltips[c.insert()] = custom_tooltip(c)
         favs = set(load_favorite_variables())
         for cat, group in group_by_category(metas):
             title = QLabel(cat)
@@ -692,7 +697,8 @@ class VariableLibraryPopup(QWidget):
                 btn.setCursor(Qt.CursorShape.PointingHandCursor)
                 meta = meta_for(m.insert)
                 btn.setToolTip(meta.tooltip() if meta
-                               else custom_default_tooltip())
+                               else (tooltips.get(m.insert)
+                                     or custom_default_tooltip()))
                 btn.star_clicked.connect(self._toggle_favorite)
                 btn.row_clicked.connect(self._emit_insert)
                 self._body_lay.addWidget(btn)
