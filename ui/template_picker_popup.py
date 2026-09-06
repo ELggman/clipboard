@@ -5,9 +5,15 @@
 """
 import logging
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtGui import QCursor, QGuiApplication, QKeyEvent
 from PySide6.QtWidgets import QLineEdit, QListWidget, QVBoxLayout, QWidget
+
+from ui.macos_patch import (
+    patch_qnspanel_can_become_key,
+    register_native_panel,
+    unregister_native_panel,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +24,7 @@ class TemplatePickerPopup(QWidget):
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent, Qt.FramelessWindowHint | Qt.Popup)
+        patch_qnspanel_can_become_key()  # macOS 键盘路由根因修复（白名单，幂等）
         self.setObjectName("templatePicker")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self._svc = None
@@ -55,10 +62,19 @@ class TemplatePickerPopup(QWidget):
         self.move(x, y)
         self.show()
         self.raise_()
+        register_native_panel(self)  # show 后原生 NSWindow 才存在，此刻入白名单
         from ui.animations import fade_in_window
 
         fade_in_window(self)
         self._search.setFocus()
+        # 复拍：激活落地后补一次 key window（与 Quick Paste 同款确定性补位）
+        QTimer.singleShot(120, self._reassert_key)
+
+    def _reassert_key(self) -> None:
+        register_native_panel(self)
+        self.activateWindow()
+        self.raise_()
+        self._search.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
 
     def populate(self, templates: list[dict]) -> None:
         self._templates = templates
@@ -75,6 +91,7 @@ class TemplatePickerPopup(QWidget):
         self.populate(self._svc.search_templates(text.strip()))
 
     def hideEvent(self, event) -> None:
+        unregister_native_panel(self)  # 隐藏后不能再成为 key
         super().hideEvent(event)
         self.hidden.emit()
 

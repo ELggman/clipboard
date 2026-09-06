@@ -82,6 +82,58 @@ def read_focused_selection() -> str | None:
         return None
 
 
+def focused_is_text_input() -> bool:
+    """前台应用焦点元素是否为可插入文本框（AX role 判断）。失败返回 False。
+
+    Quick Paste 用（⌥⇧V）：弹列表**前**探测前台应用的焦点是否在文本框——
+    是 → 选中条目时直接插入到该框；否 → 走复制（用户决策）。只按 role 判断
+    不读文本；无权限/非 AX 应用/焦点不在输入类元素 → False。
+    """
+    try:
+        from ApplicationServices import (
+            AXUIElementCopyAttributeValue,
+            AXUIElementCreateApplication,
+            kAXComboBoxRole,
+            kAXFocusedUIElementAttribute,
+            kAXInsertionPointLineNumberAttribute,
+            kAXRoleAttribute,
+            kAXSearchFieldRole,
+            kAXTextAreaRole,
+            kAXTextFieldRole,
+        )
+        from AppKit import NSWorkspace
+
+        # Chromium/Electron（VS Code 等）默认不构建 AX 树 → role 查询返回
+        # NoValue，focused_is_text_input 恒 False（编辑器永远走复制路径）。
+        # 先强制开启 AX 树（ensure_ax_enabled 内部按 pid 缓存，仅首次 SET）。
+        ensure_ax_enabled()
+
+        app = NSWorkspace.sharedWorkspace().frontmostApplication()
+        if app is None:
+            return False
+        ax_app = AXUIElementCreateApplication(app.processIdentifier())
+        err, focused = AXUIElementCopyAttributeValue(
+            ax_app, kAXFocusedUIElementAttribute, None)
+        if err != 0 or focused is None:
+            return False
+        err, role = AXUIElementCopyAttributeValue(
+            focused, kAXRoleAttribute, None)
+        if err == 0 and role is not None:
+            role_str = str(role)
+            if role_str in {
+                str(kAXTextFieldRole), str(kAXTextAreaRole),
+                str(kAXComboBoxRole), str(kAXSearchFieldRole),
+            }:
+                return True
+        # 兜底：焦点元素带插入点属性（AXInsertionPointLineNumber）→ 可输入
+        # 文本。覆盖 AX role 非标准但提供了插入点的编辑器/自定义输入控件。
+        err, _ = AXUIElementCopyAttributeValue(
+            focused, kAXInsertionPointLineNumberAttribute, None)
+        return err == 0
+    except Exception:
+        return False
+
+
 def is_ime_composing() -> bool:
     """焦点输入框是否处于输入法组合（marked text）状态。失败返回 False。
 

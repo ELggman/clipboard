@@ -20,13 +20,16 @@ from PySide6.QtCore import QObject, Signal
 
 logger = logging.getLogger(__name__)
 
-# ⌘⇧V：V 的物理 vk 码 = 9（不依赖键盘布局）
+# ⌘⇧V：V 的物理 vk 码 = 9（不依赖键盘布局）——唤出主窗口
 KEY_V = 9
 # ⌘⇧P：P 的物理 vk 码 = 35（隐私模式开关，新增.md §9.4）
 KEY_P = 35
 # ⌘⇧S：S 的物理 vk 码 = 1（模板 Picker，§16）
 KEY_S = 1
 MASK_HOTKEY = Quartz.kCGEventFlagMaskCommand | Quartz.kCGEventFlagMaskShift
+# ⌥⇧V：Option+Shift+V（Quick Paste 最近列表；与 ⌘⇧V 分开，互不干扰）
+MASK_QUICK = (Quartz.kCGEventFlagMaskAlternate
+              | Quartz.kCGEventFlagMaskShift)
 
 # Tab Trigger 排除的修饰键（⌘/⌃/⌥ 组合键不参与输入流）
 _RAW_EXCLUDE_MODS = (Quartz.kCGEventFlagMaskCommand
@@ -75,11 +78,13 @@ def _tap_callback(_proxy, _event_type, event, _refcon):
 class HotkeyManager(QObject):
     """全局热键监听（多绑定）。回调内只做轻量匹配；跨线程用 Qt signal 派发到主线程。
 
-    绑定：构造函数注册默认 ⌘⇧V → activated；add_binding() 可追加其它热键
-    （如 ⌘⇧P → privacy_toggle）。所有绑定共享一个 CGEventTap。
+    绑定：构造函数注册默认 ⌘⇧V → activated（唤出主窗口）；add_binding() 可
+    追加其它热键（如 ⌘⇧P → privacy_toggle、⌥⇧V → quick_paste）。所有绑定
+    共享一个 CGEventTap。
     """
 
-    activated = Signal()           # ⌘⇧V Quick Paste（主线程接收）
+    activated = Signal()           # ⌘⇧V 唤出主窗口（主线程接收）
+    quick_paste = Signal()         # ⌥⇧V Quick Paste 最近列表
     privacy_toggle = Signal()      # ⌘⇧P 隐私模式开关（新增.md §9.4）
     permission_required = Signal()  # 未授权/创建失败
     raw_key_down = Signal(int, str)  # (vk, char) 普通按键输入流（Tab Trigger）

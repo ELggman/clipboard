@@ -10,6 +10,7 @@
 import logging
 import string
 
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import QApplication
 
@@ -39,6 +40,21 @@ LIGHT = {
     "hover_item": "rgba(0, 0, 0, 0.04)",
     "scrollbar": "rgba(0, 0, 0, 0.22)",        # 滚动条滑块（默认太浅不可见）
     "scrollbar_hover": "rgba(0, 0, 0, 0.38)",
+    # 按钮状态色（设计规范 §5：hover / pressed / disabled）
+    "accent_soft_hover": "#2682EE",
+    "accent_soft_disabled": "#C7C7CC",
+    "secondary_hover": "#E5E5EA",
+    "secondary_pressed": "#D1D1D6",
+    "btn_disabled_text": "#AEAEB2",
+    "ghost_hover": "rgba(0, 0, 0, 0.05)",
+    "ghost_pressed": "rgba(0, 0, 0, 0.10)",
+    "danger_hover": "rgba(255, 59, 48, 0.10)",
+    # 输入框聚焦环（设计规范：1px 半透明蓝）
+    "focus_ring": "rgba(0, 122, 255, 0.35)",
+    # 菜单分隔线（设计规范 §17：浅灰蓝线，不用深色实线）
+    "menu_separator": "rgba(60, 60, 67, 0.12)",
+    # 工具提示底色（设计规范 §25：深色浮层，浅/深主题一致）
+    "tooltip_bg": "rgba(30, 30, 30, 0.92)",
 }
 
 DARK = {
@@ -60,13 +76,40 @@ DARK = {
     "hover_item": "rgba(255, 255, 255, 0.06)",
     "scrollbar": "rgba(255, 255, 255, 0.25)",
     "scrollbar_hover": "rgba(255, 255, 255, 0.42)",
+    "accent_soft_hover": "#4798F7",
+    "accent_soft_disabled": "#3A3A3C",
+    "secondary_hover": "#414144",
+    "secondary_pressed": "#4A4A4C",
+    "btn_disabled_text": "#6E6E73",
+    "ghost_hover": "rgba(255, 255, 255, 0.08)",
+    "ghost_pressed": "rgba(255, 255, 255, 0.16)",
+    "danger_hover": "rgba(255, 69, 58, 0.18)",
+    "focus_ring": "rgba(10, 132, 255, 0.55)",
+    "menu_separator": "rgba(255, 255, 255, 0.12)",
+    "tooltip_bg": "rgba(30, 30, 30, 0.92)",
 }
 
 _QSS = string.Template("""
-QMainWindow, QDialog, QWidget#quickPaste {
+QMainWindow, QDialog {
     background: $window;
 }
 QWidget { color: $text; }
+
+/* Quick Paste 弹窗（⌥⇧V 最近列表）：透明容器 + 圆角毛玻璃浮层卡片。
+   容器 WA_TranslucentBackground，阴影由 QGraphicsDropShadowEffect 画在
+   _SHADOW_GAP 留白区；卡片 12px 圆角 + 1px 分隔线（apple-design 材料层） */
+QWidget#quickPaste {
+    background: transparent;
+}
+QFrame#quickPasteCard {
+    background: $window;
+    border: 1px solid $separator;
+    border-radius: 12px;
+}
+QFrame#quickPasteCard QWidget { background: transparent; }
+QLabel#quickPasteTitle { color: $secondary; font-size: 13px; }
+QLabel#quickPasteHint  { color: $secondary; font-size: 12px; }
+QListWidget#quickPasteList { background: transparent; border: none; }
 
 /* ⚠️ 不要加 QWidget { outline: none; }：实测会干扰 QListView::item:selected
    的背景绘制（选中态渲染成浅色 tint），详见 git 历史 commit 说明 */
@@ -91,7 +134,7 @@ QListView#typeTabs::item {
     padding: 0 14px;
     margin: 4px 2px;
     border-radius: 9px;
-    color: #3A3A3C;
+    color: $secondary;   /* 次要灰：深色主题下不再被硬编码 #3A3A3C 吃掉 */
 }
 QListView#typeTabs::item:hover { background: $hover; }
 QListView#typeTabs::item:selected {
@@ -116,11 +159,14 @@ QLineEdit#searchBox {
     padding: 0 10px;
     font-size: 14px;
     color: $text;
-    selection-background-color: $accent;
+    /* 选中用半透明蓝 + 主题文字色（实心 $accent 会与浅色 HighlightedText
+       叠出「深字压深蓝」不可读，§9） */
+    selection-background-color: $selection_bg;
+    selection-color: $selection_text;
 }
 QLineEdit#searchBox:focus {
     background: $window;
-    border: 1px solid rgba(0, 122, 255, 0.35);
+    border: 1px solid $focus_ring;
 }
 
 /* 历史列表：浅灰底（UI 优化——条目正常透明/hover 白/选中淡蓝，
@@ -180,16 +226,22 @@ QListView#sideList::item:selected {
     color: $accent_text;
 }
 
-/* 输入类控件（片段表单等）：NSSearchField 风格 */
-QLineEdit, QPlainTextEdit {
+/* 输入类控件（片段表单等）：NSSearchField 风格。
+   边框占位 1px 透明：focus 换蓝边时不发生内容 1px 跳动。
+   QTextEdit 覆盖详情弹层全文区——此前漏掉，dark 下原生白底（§9） */
+QLineEdit, QPlainTextEdit, QTextEdit {
     background: $search_bg;
-    border: none;
+    border: 1px solid transparent;
     border-radius: 8px;
     padding: 6px 10px;
     font-size: 13px;
-    selection-background-color: $accent;
+    selection-background-color: $selection_bg;
+    selection-color: $selection_text;
 }
 QPlainTextEdit { padding: 8px 10px; }
+QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus {
+    border: 1px solid $focus_ring;
+}
 /* 代码详情视图：行号是独立 gutter 组件（item_detail_popup._CodeView），
    与文本区并排。padding 必须为 0：通用 QPlainTextEdit 规则的 8px 顶部
    内边距会把文本压下半行高，与 gutter 的 contentOffset 行号错位。
@@ -203,6 +255,7 @@ QPlainTextEdit#codeView {
     border-radius: 0;
     padding: 0px;
     selection-background-color: $selection_bg;
+    selection-color: $selection_text;
 }
 
 /* 右键菜单：Apple 风格（圆角浮层、选中强调色、分隔线） */
@@ -213,18 +266,33 @@ QMenu {
     padding: 6px;
 }
 QMenu::item {
-    padding: 6px 28px 6px 14px;
+    padding: 8px 28px 8px 14px;
     border-radius: 6px;
     font-size: 13px;
 }
+/* 悬停 = 浅色底（设计规范 §17：soft hover，不用实心蓝），文字保持主题色 */
 QMenu::item:selected {
-    background: $accent;
-    color: $accent_text;
+    background: $hover;
+    color: $text;
+}
+QMenu::item:disabled {
+    color: $btn_disabled_text;
 }
 QMenu::separator {
     height: 1px;
-    background: $separator;
+    background: $menu_separator;
     margin: 4px 10px;
+}
+
+/* 工具提示：Apple 深色浮层（设计规范 §25：7px 圆角、11-12px 字，
+   浅/深主题同一深底白字） */
+QToolTip {
+    background-color: $tooltip_bg;
+    color: #FFFFFF;
+    border: none;
+    border-radius: 7px;
+    padding: 6px 8px;
+    font-size: 12px;
 }
 
 /* 详情弹层：背景必须不透明（macOS 的 Qt.Popup 是 NSPanel，可能走透明合成，
@@ -234,8 +302,16 @@ QWidget#itemDetail {
 }
 QLabel#detailMeta { color: $secondary; font-size: 12px; }
 
-/* 按钮统一：文字色、字号、尺寸（primary/secondary 同 padding 同高） */
-QPushButton { color: $text; font-size: 13px; }
+/* 按钮统一：默认 = 浅灰底 + 9px 圆角（设计规范 §5.1）。未指定
+   objectName 的按钮（个别「取消」）也落到统一外观；各具名按钮
+   （primary/secondary/ghost/…）用 id 规则覆盖默认底。 */
+QPushButton {
+    background: $content;
+    border: none;
+    border-radius: 9px;
+    color: $text;
+    font-size: 13px;
+}
 QPushButton#primaryButton,
 QPushButton#secondaryButton {
     border: none;
@@ -246,12 +322,19 @@ QPushButton#primaryButton {
     background: $accent_soft;  /* 浅一档的按钮蓝 */
     color: $accent_text;
 }
+QPushButton#primaryButton:hover { background: $accent_soft_hover; }
 QPushButton#primaryButton:pressed { background: $accent_soft_pressed; }
+QPushButton#primaryButton:disabled {
+    background: $accent_soft_disabled;
+    color: $btn_disabled_text;
+}
 QPushButton#secondaryButton {
     background: $search_bg;
     color: $text;
 }
-QPushButton#secondaryButton:pressed { background: $separator; }
+QPushButton#secondaryButton:hover { background: $secondary_hover; }
+QPushButton#secondaryButton:pressed { background: $secondary_pressed; }
+QPushButton#secondaryButton:disabled { color: $btn_disabled_text; }
 /* destructive：破坏性操作（清空/删除）确认按钮，macOS 红色惯例 */
 QPushButton#destructiveButton {
     background: #FF453A;
@@ -260,7 +343,12 @@ QPushButton#destructiveButton {
     border-radius: 6px;
     padding: 6px 18px;
 }
+QPushButton#destructiveButton:hover { background: #E5433A; }
 QPushButton#destructiveButton:pressed { background: #D63A30; }
+QPushButton#destructiveButton:disabled {
+    background: $accent_soft_disabled;
+    color: $btn_disabled_text;
+}
 
 /* 状态栏 */
 QStatusBar { color: $secondary; font-size: 11px; background: transparent; }
@@ -276,29 +364,19 @@ QLabel#sectionTitle { color: $secondary; font-size: 12px; font-weight: 600; }
 QScrollArea { background: transparent; border: none; }
 QWidget#settingsContainer { background: transparent; }
 
-/* 会话下拉（历史页顶部）与搜索范围下拉：搜索框风格 */
-QComboBox#sessionCombo, QComboBox#searchScope {
-    background: $search_bg;
-    border: none;
-    border-radius: 8px;
-    padding: 4px 10px;
-    font-size: 12px;
-    color: $text;
-}
-QComboBox#sessionCombo::drop-down, QComboBox#searchScope::drop-down {
-    border: none;
-    width: 18px;
-}
-QComboBox#sessionCombo QAbstractItemView,
-QComboBox#searchScope QAbstractItemView {
-    background: $window;
-    border: 1px solid $separator;
-    border-radius: 8px;
-    padding: 4px;
-    selection-background-color: $accent;
-    selection-color: $accent_text;
-    color: $text;
-}
+/* QComboBox 全部保持 Qt 原生 macOS 外观，不写任何 QSS：
+   实测（§9）在 macOS 上给 QComboBox 设 QSS 背景/border 会：
+   1) 尾部 drop-down 区域渗出原生按钮的灰色矩形块；
+   2) `border: 1px solid transparent` 渲染成顶部/边缘灰色线段；
+   3) 弹层改成样式化 QListView 后内容显示不全（原生菜单自动适配宽度、
+   完整显示全部选项，macOS 原生的下拉箭头 + 扁平外观即设计规范 §8 目标）。
+   需要一致性时改代码（setFixedSize / QProxyStyle），不靠 QSS。
+   ⚠️ 也不得给 QComboBox QAbstractItemView 写规则——同样会触发
+   样式化弹层导致裁剪。
+   （原 #sessionCombo / #searchScope 样式已移除；searchScope 未再用。）
+   深色主题跟随：原生组合框深/浅外观由 apply_theme() 的
+   QStyleHints.setColorScheme() 切换（macOS 上即设置 NSAppearance），
+   不要试图用 QSS 覆盖 macStyle 的 bezel。 */
 /* 会话管理菜单按钮：圆形省略号 */
 QPushButton#sessionMenuBtn {
     background: transparent;
@@ -335,7 +413,7 @@ QPushButton#scopeSegBtn {
     background: transparent;
     border: none;
     border-radius: 8px;
-    color: #6E6E73;
+    color: $secondary;   /* 次要灰：深色主题下不再被硬编码 #6E6E73 吃掉 */
     font-size: 12px;
     min-height: 28px;   /* 填满外层 seg 36px（减 margins 3×2） */
 }
@@ -377,15 +455,18 @@ QLabel#emptyHint {
     color: $secondary;
     font-size: 13px;
 }
+/* ghost：工具栏次要操作（展开/变量库/新增）——设计规范 §5.4 透明底，
+   hover/pressed 浅色反馈（原为实心灰，改透明更接近 Apple 工具栏） */
 QPushButton#ghostBtn {
-    background: $search_bg;
+    background: transparent;
     border: none;
     border-radius: 8px;
     padding: 4px 10px;
     color: $secondary;
     font-size: 13px;
 }
-QPushButton#ghostBtn:hover { background: $hover; }
+QPushButton#ghostBtn:hover { background: $ghost_hover; }
+QPushButton#ghostBtn:pressed { background: $ghost_pressed; }
 QListView#sourceList, QListView#templateList {
     background: transparent;
     border: none;
@@ -478,7 +559,8 @@ QPushButton#dangerBtn {
     color: #FF3B30;
     font-size: 13px;
 }
-QPushButton#dangerBtn:hover { background: $hover; }
+QPushButton#dangerBtn:hover { background: $danger_hover; }
+QPushButton#dangerBtn:pressed { background: $danger_hover; }
 
 /* 收藏夹浮层面板：悬浮覆盖在条目区上方 */
 QFrame#collectionPanel {
@@ -511,7 +593,9 @@ def _resolve_mode(app: QApplication, mode: str) -> str:
     """把 system 解析为 light/dark；返回实际模式。"""
     if mode != "system":
         return mode
-    resolved = "dark" if app.styleHints().colorScheme() == 1 else "light"
+    # ⚠️ 必须用 Qt.ColorScheme.Dark 比较：PySide6 的 enum 与 int 不相等，
+    #   旧的 `== 1`（Light）恒为 False → 系统深色恒解析成浅色（潜伏 bug）
+    resolved = "dark" if app.styleHints().colorScheme() == Qt.ColorScheme.Dark else "light"
     logger.info("跟随系统主题: %s", resolved)
     return resolved
 
@@ -537,8 +621,23 @@ def _build_palette(p: dict) -> QPalette:
 
 
 def apply_theme(app: QApplication, mode: str = "system") -> str:
-    """应用主题（mode: system / light / dark），返回实际生效的模式。"""
-    resolved = _resolve_mode(app, mode)
+    """应用主题（mode: system / light / dark），返回实际生效的模式。
+
+    macOS 原生控件（QComboBox 等）的外观跟随 NSAppearance，而不是 QPalette：
+    QSS 无法覆盖 macStyle 的原生 bezel（§9 坑），深色主题下不加处理，
+    原生组合框会保持系统浅色外观、白底 + 应用深色浅字 → 不可读。
+    Qt 6.8+ 的 QStyleHints.setColorScheme() 从根上切换整个应用的原生外观
+    （macOS 上即设置 NSAppearance），原生控件随之正确变深/变浅，且不动 popup。
+    """
+    if mode == "system":
+        # 跟随系统：先解除可能残留的强制外观，再读系统真实值
+        app.styleHints().unsetColorScheme()
+        resolved = _resolve_mode(app, mode)
+    else:
+        resolved = mode
+        scheme = Qt.ColorScheme.Dark if resolved == "dark" else Qt.ColorScheme.Light
+        app.styleHints().setColorScheme(scheme)
+        logger.info("强制原生外观: %s", scheme.name)
     palette = LIGHT if resolved == "light" else DARK
     app.setPalette(_build_palette(palette))
     app.setStyleSheet(build_stylesheet(palette))

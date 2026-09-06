@@ -517,5 +517,92 @@ def test_migration_v6_idempotent(tmp_path):
         count = conn.execute(text(
             "SELECT COUNT(*) FROM snippets WHERE shortcut='shrug'")).scalar()
         assert count == 1
-        assert conn.execute(text("PRAGMA user_version")).scalar() == 6
+        assert conn.execute(text("PRAGMA user_version")).scalar() == 7
     eng.dispose()
+
+
+def test_migration_v7_image_hash_normalize(tmp_path):
+    """v7 迁移：TIFF 来源图片 hash 归一化——修正遗留 hash、折叠重复条目。
+
+    复现用户场景：同一图片落盘到同一 PNG 文件，但存在两条记录——旧条目
+    hash=digest(原始 TIFF 字节)、新条目 hash=digest(PNG 文件内容)。v7 应
+    把旧条目修正为 canonical，或（一旦与同会话已存在行冲突）删除重复行。
+    """
+    import hashlib
+    from io import BytesIO
+
+    from PIL import Image
+
+    from database.engine import create_db_engine
+    from database.migrations import migrate
+
+    eng = create_db_engine(tmp_path / "img.db")
+    migrate(eng)  # 建到 v7
+
+    # 构造一张图：PNG 落盘文件（内容 = canonical digest 来源）
+    buf = BytesIO()
+    Image.new("RGB", (4, 4), (255, 0, 0)).save(buf, "PNG")
+    png = buf.getvalue()
+    canonical = hashlib.sha256(png).hexdigest()
+    images = tmp_path / "images"
+    images.mkdir(exist_ok=True)
+    fpath = images / f"{canonical}.png"
+    fpath.write_bytes(png)
+
+    def _insert(hash_: str) -> None:
+        with eng.begin() as conn:
+            conn.execute(text(
+                "INSERT INTO clipboard_items (type, file_path, hash,"
+                " created_at, updated_at, session_id) VALUES"
+                " ('image', :f, :h, datetime('now'), datetime('now'), 1)"),
+                {"f": str(fpath), "h": hash_})
+
+    # 旧条目：hash=digest(原始 TIFF 字节)（≠ canonical，模拟旧实现）
+    old_hash = hashlib.sha256(b"fake-tiff-bytes").hexdigest()
+    _insert(old_hash)
+    # 新重复条：hash=canonical（Quick Paste 重复制已产生的重复）
+    _insert(canonical)
+
+    # 回退版本号使 v7 迁移重跑
+    with eng.begin() as conn:
+        conn.execute(text("PRAGMA user_version = 6"))
+    migrate(eng)
+
+    with eng.connect() as conn:
+        rows = conn.execute(text(
+            "SELECT hash FROM clipboard_items WHERE type='image' ORDER BY id"
+        )).fetchall()
+        # 两条同图记录应折叠为 1 条，且 hash 归一到 canonical（PNG 内容 digest）
+        assert len(rows) == 1, f"应折叠为 1 条 image，实得 {len(rows)}"
+        assert rows[0][0] == canonical
+        # 被删除行的 FTS 索引同步清理（外部内容表保持一致）
+        fts = conn.execute(text(
+            "SELECT COUNT(*) FROM items_fts WHERE rowid NOT IN"
+            " (SELECT id FROM clipboard_items)")).scalar()
+        assert fts == 0
+    eng.dispose()
+
+
+def test_image_service_save_canonical_png_name(tmp_path):
+    """image_service.save：名 = **PNG 内容** digest——TIFF 来源与重复制闭环
+    hash 一致（Q1 修复的前提）。"""
+    import hashlib
+    from io import BytesIO
+
+    from PIL import Image
+
+    from services.image_service import ImageService
+
+    svc = ImageService(tmp_path / "images")
+    img = Image.new("RGB", (3, 3), (0, 90, 200))
+    tiff_buf, png_buf = BytesIO(), BytesIO()
+    img.save(tiff_buf, "TIFF")
+    img.save(png_buf, "PNG")
+    tiff, png = tiff_buf.getvalue(), png_buf.getvalue()
+
+    path = svc.save(tiff)  # TIFF 输入
+    assert path.name == f"{hashlib.sha256(png).hexdigest()}.png"
+    assert path.read_bytes() == png
+    # 幂等：同一图像字节再存，复用同路径
+    assert svc.save(tiff) == path
+    assert svc.save(png) == path  # PNG 直存也归一为同一份

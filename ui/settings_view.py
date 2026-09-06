@@ -25,6 +25,8 @@ from PySide6.QtWidgets import (
 
 logger = logging.getLogger(__name__)
 
+from app import __version__
+
 _THEME_OPTIONS = [("system", "跟随系统"), ("light", "浅色"), ("dark", "深色")]
 _FONT_OPTIONS = [12, 13, 14, 15, 16]
 _MAX_ITEMS_OPTIONS = [(100, "100"), (500, "500"), (1000, "1000"), (-1, "无限")]
@@ -185,6 +187,20 @@ class SettingsView(QWidget):
         self._pause_btn.setObjectName("secondaryButton")
         self._pause_btn.clicked.connect(self._toggle_pause)
         layout.addRow("监控", self._pause_btn)
+
+        # ---- 关于（版权标注）----
+        section = QLabel("关于")
+        section.setObjectName("sectionTitle")
+        layout.addRow(section)
+
+        about_app = QLabel("Clipboard Workspace")
+        layout.addRow("应用", about_app)
+
+        about_version = QLabel(__version__)
+        layout.addRow("版本", about_version)
+
+        about_copyright = QLabel("© 2026 Elgg")
+        layout.addRow("Copyright", about_copyright)
 
         # 改动即生效
         self._theme.currentIndexChanged.connect(lambda _: self._on_change("theme"))

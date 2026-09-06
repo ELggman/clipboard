@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <!-- Clipboard Workspace 应用图标。实测 dock：满幅 1024 图标在住户 Dock 里
+       是 62.5pt，比同坞内缩图标（48~54pt）大一圈；66% 内缩（44pt）又偏小。
+       取二者之间 832×832≈81%（≈50pt）匹配坞内常见的带留白图标；四边透明
+       边 ~96。底色浅蓝 #6FB5FF（用户认可），圆角 rx≈150 保持契形比例。
+       剪贴板（夹+主体+内容行）保持用户确认尺寸、精确居中（在方块内垂直
+       留白 190 / 水平 246 对称）。
+       几何与 ui/icons.py 的 _clipboard 线稿同源。 -->
+  <rect x="96" y="96" width="832" height="832" rx="150" fill="#6FB5FF"/>
+
+  <!-- 顶部夹（保持用户确认尺寸，中心 x512） -->
+  <rect x="452" y="286" width="120" height="102" rx="40" fill="#FFFFFF"/>
+  <!-- 主体（保持用户确认尺寸，中心 512,512） -->
+  <rect x="342" y="358" width="340" height="380" rx="64" fill="#FFFFFF"/>
+  <!-- 内容行（剪贴板上的文本，第三行较短） -->
+  <rect x="384" y="426" width="256" height="40" rx="20" fill="#007AFF"/>
+  <rect x="384" y="494" width="256" height="40" rx="20" fill="#007AFF"/>
+  <rect x="437" y="562" width="150" height="40" rx="20" fill="#007AFF"/>
+</svg>

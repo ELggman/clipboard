@@ -15,6 +15,8 @@ a = Analysis(
         # 内置配置与 Action 插件目录（运行时加载，静态分析收集不到）
         ("../config", "config"),
         ("../actions", "actions"),
+        # 应用图标 PNG（运行时 setWindowIcon；icns 供 BUNDLE icon= 用）
+        ("../resources/icon.png", "resources"),
     ],
     hiddenimports=collect_submodules("actions"),
     hookspath=[],
@@ -50,7 +52,7 @@ coll = COLLECT(
 app = BUNDLE(
     coll,
     name=APP_NAME,
-    icon=None,  # TODO: resources/icon.icns 后替换
+    icon="../resources/icon.icns",  # 由 packaging/gen_icons.py 从 icon.svg 生成
     bundle_identifier=BUNDLE_ID,
     info_plist={
         "LSUIElement": True,  # accessory 应用：菜单栏常驻，Dock 无图标

@@ -8,6 +8,7 @@ import logging.handlers
 import sys
 
 from PySide6.QtNetwork import QLocalServer, QLocalSocket  # 单实例：QLocalServer 在 QtNetwork
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
 from app import APP_ID, ROOT_DIR, __version__
@@ -52,6 +53,13 @@ def main() -> int:
     app.setApplicationName("Clipboard Workspace")
     app.setApplicationVersion(__version__)
     app.setQuitOnLastWindowClosed(False)  # 常驻后台（菜单栏应用）
+
+    # 应用图标（窗口标题栏 / dev 模式 Dock；打包后 .app 图标由 spec 的 icon.icns 决定）。
+    # 用 resources/icon.png（由 packaging/gen_icons.py 从 icon.svg 生成），
+    # 缺失时静默跳过（仅图标，不影响功能）。
+    _icon = ROOT_DIR / "resources" / "icon.png"
+    if _icon.exists():
+        app.setWindowIcon(QIcon(str(_icon)))
 
     if not _ensure_single_instance():
         return 0

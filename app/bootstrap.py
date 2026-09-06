@@ -3,6 +3,7 @@
 V1 核心闭环已打通：ClipboardWatcher 解析 → history_service 去重落库
 → MainWindow.refresh_history 刷新列表与状态栏。
 """
+import hashlib
 import logging
 import os
 from pathlib import Path
@@ -136,11 +137,106 @@ def start_workspace(app: QApplication) -> None:
     # 置为 Active → 上面的 handler 误把隐藏的主窗口带出来（用户：关窗后触发
     # input 应只弹输入框，不应打开 main_window）。置位期间跳过 re-show。
     _suppress_window_show = False
+    # Quick Paste 弹窗等待激活落地再 show（首次 ⌥⇧V 不出现问题的修复）：
+    # 置 True 表示「本次将要显示但没有在激活态」，由 on_app_state 的
+    # ApplicationActive 回调消费。
+    _pending_qp_show = False
+
+    # X 最小化到托盘：Dock 图标显隐跟随窗口。show → Regular（显示 Dock），
+    # 关窗 → Accessory（隐藏 Dock，仅留菜单栏托盘）。dev（有 Dock）与打包
+    # （LSUIElement，本身无 Dock）都走同一函数，行为一致。
+    from AppKit import (NSApplication, NSApplicationActivationPolicyAccessory,
+                        NSApplicationActivationPolicyRegular, NSImage)
+
+    _nsapp = NSApplication.sharedApplication()
+
+    # 诊断：观察 NSApp 的激活/失活通知（OS 级，独立于 Qt 的状态映射），
+    # 定位 Quick Paste「回车无反应」——应用有没有真的成为前台应用/被踢回。
+    try:
+        from AppKit import (NSApplicationDidBecomeActiveNotification,
+                            NSApplicationDidResignActiveNotification,
+                            NSNotificationCenter)
+
+        _notif_center = NSNotificationCenter.defaultCenter()
+
+        def _ns_state_log(note):
+            logger.debug("NSApp 通知: %s (isActive=%s)", note.name(),
+                         _nsapp.isActive())
+
+        _notif_center.addObserverForName_object_queue_usingBlock_(
+            NSApplicationDidBecomeActiveNotification, None, None, _ns_state_log)
+        _notif_center.addObserverForName_object_queue_usingBlock_(
+            NSApplicationDidResignActiveNotification, None, None, _ns_state_log)
+    except Exception:
+        logger.exception("注册 NSApp 激活诊断观察者失败")
+
+    # Dock 图标素材：激活策略切回 Regular 后 macOS 会用系统默认图标重建
+    # Dock 图标（用户实测：唤出后是无图标通用图标）——必须显式重设应用图标。
+    # NSImage 只建一次并持引用（PyObjC alloc/init 后需存活，防被释放）。
+    _icon_path = ROOT_DIR / "resources" / "icon.png"
+    _dock_icon_image = None
+    if _icon_path.exists():
+        _dock_icon_image = NSImage.alloc().initWithContentsOfFile_(
+            str(_icon_path))
+
+    def _set_dock_visible(visible: bool) -> None:
+        """切换 Dock 图标显隐（Accessory=隐藏 / Regular=显示）。
+
+        恢复显示时重设应用图标（见上注释）——政策翻转会让默认图标顶替。
+        """
+        try:
+            policy = (NSApplicationActivationPolicyRegular if visible
+                      else NSApplicationActivationPolicyAccessory)
+            _nsapp.setActivationPolicy_(policy)
+            if visible and _dock_icon_image is not None:
+                _nsapp.setApplicationIconImage_(_dock_icon_image)
+        except Exception:
+            logger.exception("切换 Dock 图标显隐失败")
+
+    # 关窗（hidden_to_tray）→ 只保留托盘，Dock 图标收起
+    window.hidden_to_tray.connect(lambda: _set_dock_visible(False))
+
+    def _show_main_window() -> None:
+        """把主窗口带回到前台（托盘「显示主窗口」/ ⌘⇧V 唤出共用）。
+
+        附带恢复 Dock 图标（X 关窗已把激活策略切到 Accessory 隐藏 Dock，
+        唤出时必须切回 Regular，底部才会重新出现图标，并重设应用图标）。
+
+        与既有 on_app_state（点击 Dock 恢复）同守卫：输入变量弹框期间
+        不强行带出主窗口（_suppress_window_show 置位）。
+        """
+        if _suppress_window_show:
+            return
+        _set_dock_visible(True)
+        # 最小化（减号）后 show() 不会还原最小化窗口（实测仍保持
+        # isMinimized）→ 必须 showNormal()。隐藏（叉号）则 show() 即可。
+        if window.isMinimized():
+            window.showNormal()
+        else:
+            window.show()
+        window.raise_()
+        window.activateWindow()
 
     def on_app_state(state) -> None:
-        if (state == Qt.ApplicationState.ApplicationActive
+        nonlocal _pending_qp_show
+        # 应用状态变迁（激活/非激活）跟踪：Quick Paste 首次弹出竞态排查用，
+        # 日常放 debug 不刷屏。
+        logger.debug("应用状态变化: %s (policy=%s)", state, _nsapp.activationPolicy())
+        # Quick Paste 弹窗在「应用已激活」后才 show：activate 异步落地，在
+        # isActive=False 时 show 会被 Qt.Popup 立刻关闭（第一次 ⌥⇧V 弹窗
+        # 不出现/闪没——用户实测），改为收到 ApplicationActive 再 show。
+        if state == Qt.ApplicationState.ApplicationActive and _pending_qp_show:
+            _pending_qp_show = False
+            _qpopup_show()
+        # 仅「Dock 可见」时才允许激活即还原：点击 Dock 图标 → 显示主窗口。
+        # 关窗已把激活策略切 Accessory（隐藏 Dock、最小化到托盘），此时激活
+        # （点托盘菜单栏 item / activateIgnoringOtherApps 等）不应把主窗口
+        # 带出来——用户点顶部托盘图标只应弹菜单，窗口由「显示主窗口」唤起。
+        if (_nsapp.activationPolicy() == NSApplicationActivationPolicyRegular
+                and state == Qt.ApplicationState.ApplicationActive
                 and not window.isVisible()
                 and not _suppress_window_show):
+            _set_dock_visible(True)
             window.show()
             window.raise_()
             logger.info("主窗口已重新显示")
@@ -260,6 +356,13 @@ def start_workspace(app: QApplication) -> None:
         if item.type == "image" and item.data:
             try:
                 item.file_path = str(image_service.save(item.data))
+                # 去重键归一化：DB hash 用「落盘 PNG 内容」的 digest（save 已按
+                # PNG 字节命名）。监听器 digest 的是剪贴板原始字节（可能是
+                # TIFF），而 Quick Paste 重复制该图时剪贴板拿到的是 PNG 字节，
+                # digest 不同 → 去重永久失效产生重复条目（用户实测）。统一为
+                # PNG 内容 digest 后，任何写入路径的闭环 hash 一致。
+                item.hash = hashlib.sha256(
+                    Path(item.file_path).read_bytes()).hexdigest()
                 item.data = b""  # 释放内存
             except Exception:
                 logger.exception("图片保存失败，放弃本条")
@@ -276,30 +379,158 @@ def start_workspace(app: QApplication) -> None:
     watcher.changed.connect(on_clipboard_changed)
     watcher.start()
 
-    # Quick Paste（⌘⇧V）：最近 10 条 → 弹出层 → Enter 重新复制
+    # Quick Paste（⌥⇧V / 托盘「快速粘贴」）：最近 10 条 → 弹出层 → 回车/双击
     popup = QuickPastePopup()
 
-    def on_quick_paste() -> None:
+    # 弹窗期间主窗口退避：macOS 应用级激活（activateIgnoringOtherApps_）会把
+    # 整个应用带到前台——⌥⇧V/托盘「快速粘贴」只应弹列表，不应把已打开的主窗口
+    # 一起带出来（用户实测：⌥⇧V 会连主界面一起唤出）。故弹窗打开时藏起可见的
+    # 主窗口，弹窗关闭（dismissed）后恢复原可见状态。
+    _quick_paste_retreat = False
+    # 选中条目时决定「插入文本框 / 复制」的触发上下文：弹列表**前**（激活本
+    # 应用之前）的前台应用 + 其焦点是否在文本框。激活后前台就变成我们自己，
+    # 探测不到原目标应用，故必须在 activate 之前记下。
+    _quick_paste_ctx: dict = {"app": None, "in_text": False}
+
+    def _show_quick_paste() -> bool:
+        """填充并显示 Quick Paste 弹窗。返回是否有历史可弹。
+
+        弹窗是 Qt.Popup：应用未激活时显示会立刻失焦关闭——托盘菜单刚关闭
+        时应用未必在前台，弹窗一闪就没了（用户反馈「没有反应」），故先
+        activateIgnoringOtherApps_ 让弹窗可见且能保持焦点。已在前台的场合
+        重复激活无害。
+
+        弹出的全周期置 _suppress_window_show：激活触发 applicationStateChanged
+        (Active)，该事件**异步**送达——届时退避已把主窗口 hide()，on_app_state
+        的「窗口不可见 → 恢复」守卫会误把主窗口又拉回来（问题：⌥⇧V 弹出主窗口
+        +列表）。置位期间 on_app_state 直接跳过。
+        """
         items = history_service.list_recent(engine, limit=10)
         if not items:
             logger.info("Quick Paste：暂无历史")
-            return
+            return False
+        try:
+            from AppKit import NSProcessInfo, NSWorkspace
+
+            target = NSWorkspace.sharedWorkspace().frontmostApplication()
+            in_text = False
+            if target is not None:
+                ours = (target.processIdentifier()
+                        == NSProcessInfo.processInfo().processIdentifier())
+                if ours:
+                    in_text = False  # 前台是本应用自己（如搜索框）→ 走复制
+                else:
+                    from services.template.ax_text import focused_is_text_input
+
+                    in_text = focused_is_text_input()
+            _quick_paste_ctx.update({"app": target, "in_text": in_text})
+        except Exception:
+            logger.exception("Quick Paste 读取触发上下文失败")
         logger.info("Quick Paste：弹出 %d 条", len(items))
+        nonlocal _suppress_window_show, _quick_paste_retreat, _pending_qp_show
+        _suppress_window_show = True
+        # 退避：先藏主窗口（激活不会带出主窗口）。populate 不涉窗口显示，先做。
+        if not _quick_paste_retreat and window.isVisible() and not window.isMinimized():
+            _quick_paste_retreat = True
+            window.hide()
         popup.populate(items)
+        popup.set_hint(_quick_paste_ctx["in_text"])  # 顶栏行为提示：插入/复制
+
+        # 先激活，再在「已激活」后 show（macOS 键盘路由根因的两半）：
+        # 1) activate 异步落地（DidBecomeActive ~10ms 后）；在 isActive=False 时
+        #    show 会被 Qt.Popup 立刻关闭 → 第一次 ⌥⇧V 弹窗不出现（用户实测）。
+        #    已激活则直接 show；未激活置 _pending_qp_show，由 on_app_state 的
+        #    ApplicationActive 回调补 show，杜绝「闪没」。
+        # 2) QNSPanel.canBecomeKeyWindow 覆写为 YES（QuickPastePopup 构造时已
+        #    patch）：弹窗成为系统 key window，回车按键才真正进本进程（否则
+        #    无 key window，AppKit 响 beep——用户实测回车有音但无复制）。
+        try:
+            _nsapp.activateIgnoringOtherApps_(True)
+        except Exception:
+            logger.exception("Quick Paste 激活应用失败")
+        if _nsapp.isActive():
+            _qpopup_show()
+        else:
+            _pending_qp_show = True
+        return True
+
+    def _qpopup_show() -> None:
+        """在「应用已激活」前提下显示 Quick Paste 弹窗 + 激活落地补拍。
+
+        只应在已激活时调用（on_app_state 的 ApplicationActive 回调，或
+        _show_quick_paste 里 isActive()==True 分支）。补拍等激活完全落地后
+        再 makeKeyAndOrderFront + 焦点归位到列表（回车路由的最终保证）。
+        """
         popup.show_near_cursor()
+        from PySide6.QtCore import QTimer
+
+        QTimer.singleShot(120, popup.reassert_focus)
+
+    def _restore_main_after_quick_paste() -> None:
+        """Quick Paste 弹窗关闭后：解除激活抑制，恢复退避的主窗口。"""
+        nonlocal _suppress_window_show, _quick_paste_retreat
+        _suppress_window_show = False
+        if _quick_paste_retreat:
+            _quick_paste_retreat = False
+            window.show()
+
+    popup.dismissed.connect(_restore_main_after_quick_paste)
+
+    def on_quick_paste() -> None:
+        """⌥⇧V（Quick Paste）：只弹最近列表，不唤出主窗口。
+
+        用户决策：⌘⇧V 只负责唤出主窗口，最近剪贴板列表单独设快捷键。
+        """
+        _show_quick_paste()
+
+    def on_summon_main() -> None:
+        """⌘⇧V：唤出主窗口（与托盘「显示主窗口」同路径，不弹 Quick Paste）。
+
+        Quick Paste 弹窗开着时 ⌘⇧V → 先关弹窗（dismissed 会恢复退避的主窗口）
+        再唤出，避免「无反应」（弹窗作为 Qt.Popup 抢键盘，妨碍窗口置顶）。
+        """
+        if popup.isVisible():
+            popup.close()
+        _show_main_window()  # 内部已带 _suppress_window_show 守卫
+
+    def on_tray_quick_paste() -> None:
+        """托盘菜单「快速粘贴」：只弹 Quick Paste 列表，不唤出主窗口。"""
+        _show_quick_paste()
 
     def on_picked(item) -> None:
-        if set_clipboard_item(item):
-            logger.info("Quick Paste：已重新复制 %s", item.type)
-        popup.close()
+        """选中条目（回车/双击）：前台应用焦点在文本框 → 直接插入，否则复制。
+
+        插入用模板同款 insert_text（剪贴板→⌘V→恢复原剪贴板），目标应用用
+        弹列表前记录的前台应用（_activate_target 把焦点还给它再粘贴）。
+        图片/文件无可插入文本 → 一律复制；文本框只在 text/url 时插入。
+        """
+        target = _quick_paste_ctx["app"]
+        in_text = (_quick_paste_ctx["in_text"] and item.type in ("text", "url"))
+        if not in_text or target is None:
+            # 复制路径：先写剪贴板再关弹窗（dismissed 恢复退避主窗口+解除抑制）
+            if set_clipboard_item(item):
+                logger.info("Quick Paste：已重新复制 %s", item.type)
+            popup.close()
+            return
+        logger.info("Quick Paste：插入文本框 %s", item.type)
+        popup.close()  # 关弹窗（dismissed 恢复主窗口）→ 目标应用前台 → 粘贴
+        from services.template.insertion import insert_text
+
+        _activate_target(target)
+        insert_text(item.content, watcher)
 
     popup.selected.connect(on_picked)
-    hotkey.activated.connect(on_quick_paste)
+    hotkey.activated.connect(on_summon_main)  # ⌘⇧V 唤出主窗口
+    # ⌥⇧V：Quick Paste 最近列表（与唤出主窗口分离，用户决策）
+    hotkey.quick_paste.connect(on_quick_paste)
     # 隐私模式热键 ⌘⇧P（§9.4）：同一 CGEventTap 多绑定
-    from services.hotkey_manager import KEY_P, KEY_S, MASK_HOTKEY
+    from services.hotkey_manager import KEY_P, KEY_S, KEY_V
+    from services.hotkey_manager import MASK_HOTKEY, MASK_QUICK
 
     hotkey.add_binding(KEY_P, MASK_HOTKEY, hotkey.privacy_toggle)
     hotkey.privacy_toggle.connect(privacy_state.toggle)
+    # ⌥⇧V：Quick Paste 最近列表（与 ⌘⇧V 唤出主窗口分开，用户决策）
+    hotkey.add_binding(KEY_V, MASK_QUICK, hotkey.quick_paste)
 
     # 模板模块（v6）：Tab Trigger + 全局 Picker（文档 §7/§16）
     from services.template.insertion import delete_backspaces, insert_text
@@ -664,6 +895,15 @@ def start_workspace(app: QApplication) -> None:
 
     def on_picker() -> None:
         logger.info("模板 Picker：打开")
+        import threading
+
+        # 诊断：与 Quick Paste 对照——pickear 不隐藏主窗口、不显式激活。
+        logger.info(
+            "Picker：显示前（policy=%s, main-thread=%s, activeWindow=%s）",
+            _nsapp.activationPolicy(),
+            threading.current_thread() is threading.main_thread(),
+            QApplication.activeWindow(),
+        )
         # 弹层会夺走前台：先捕获目标应用 + 选中文本（{{selection}} 依赖），
         # 否则 render_and_insert 读到的是本应用自己。
         _capture_trigger_context()
@@ -684,11 +924,54 @@ def start_workspace(app: QApplication) -> None:
 
     # 测试/调试钩子（不对外暴露 API）
     app._quick_paste_popup = popup
+    app._quick_paste_ctx = _quick_paste_ctx
     app._on_quick_paste = on_quick_paste
+    app._on_summon_main = on_summon_main
+    app._on_app_state = on_app_state
     app._template_picker = picker
     app._template_matcher = matcher
     app._template_service = template_service
     app._render_and_insert = render_and_insert
+
+    # ---- 顶部菜单栏托盘图标（常驻；与 ui/icons.py 剪贴板线稿同图形语言）----
+    from PySide6.QtGui import QIcon
+    from PySide6.QtWidgets import QMenu, QSystemTrayIcon
+
+    from ui.icons import make_icon
+
+    # 黑底剪贴板线稿 → macOS 模板图标（Alpha 作遮罩，菜单栏明暗自适应）。
+    # make_icon 内部 2x 超采样 → 36px 物理；先绘完再设 DPR=2：逻辑 18pt、
+    # Retina 36px 清晰。（⚠️ 不可先设 DPR 再画，devicePixelRatio+QPainter
+    # 绘制的偏移 bug，见 ui/icons.py 注释）
+    _tray_pix = make_icon("clipboard", 18, "#000000")
+    _tray_pix.setDevicePixelRatio(2.0)
+    tray_icon = QIcon(_tray_pix)
+    tray_icon.setIsMask(True)
+    tray = QSystemTrayIcon(tray_icon, parent=app)
+    tray.setToolTip("Clipboard Workspace")
+
+    tray_menu = QMenu()
+    act_show = tray_menu.addAction("显示主窗口")
+    act_quick = tray_menu.addAction("快速粘贴")
+    tray_menu.addSeparator()
+    act_pause = tray_menu.addAction(
+        "恢复监控" if privacy_state.paused else "暂停监控")
+    tray_menu.addSeparator()
+    act_quit = tray_menu.addAction("退出")
+    tray.setContextMenu(tray_menu)
+
+    act_show.triggered.connect(_show_main_window)
+    act_quick.triggered.connect(on_tray_quick_paste)
+    act_pause.triggered.connect(privacy_state.toggle)
+    privacy_state.changed.connect(
+        lambda paused: act_pause.setText("恢复监控" if paused else "暂停监控"))
+    act_quit.triggered.connect(app.quit)
+
+    # ⚠️ 点击托盘图标本身不显示主窗口（用户要求）：macOS 菜单栏 item 点击
+    # 默认弹出 contextMenu，只有菜单项「显示主窗口」才会唤起窗口。因此这里
+    # 不接 tray.activated（左键单击曾直接 _show_main_window，已移除）。
+    tray.show()
+    logger.info("托盘图标已常驻菜单栏")
 
     logger.info("启动完成")
 

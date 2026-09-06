@@ -22,17 +22,24 @@ class ImageService:
         self._dir.mkdir(parents=True, exist_ok=True)
 
     def save(self, data: bytes) -> Path:
-        """按内容 hash 落盘（重名直接复用），返回存储路径。"""
-        digest = hashlib.sha256(data).hexdigest()
+        """落盘：先解码重编码为 PNG，按 **PNG 字节**的 sha256 命名并返回路径。
+
+        为什么要重编码再算 hash：来源剪贴板可能是 TIFF/其它格式（截图/
+        Safari），旧实现按「原始字节」sha256 命名，但文件内容其实已是重编码
+        的 PNG —— 之后 Quick Paste 重新复制该图，系统剪贴板拿到的是 PNG
+        字节，digest 与 DB 里存的「原始 TIFF digest」不同 → 去重失效，产生
+        重复条目（用户实测）。统一为「PNG 内容 digest」后，重复制闭环 hash
+        一致，去重命中。重名直接复用，不入数据库。
+        """
+        img = Image.open(BytesIO(data))
+        buf = BytesIO()
+        img.save(buf, "PNG")
+        png_bytes = buf.getvalue()  # 落盘即这份字节 → 命名即内容 digest
+        digest = hashlib.sha256(png_bytes).hexdigest()
         path = self._dir / f"{digest}.png"
         if not path.exists():
-            try:
-                img = Image.open(BytesIO(data))
-                img.save(path, "PNG")
-                logger.info("图片已保存: %s", path.name)
-            except Exception:
-                logger.exception("图片落盘失败")
-                raise
+            path.write_bytes(png_bytes)
+            logger.info("图片已保存: %s", path.name)
         return path
 
     @lru_cache(maxsize=128)

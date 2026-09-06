@@ -12,7 +12,7 @@ from .models import Base
 
 logger = logging.getLogger(__name__)
 
-_SCHEMA_VERSION = 6
+_SCHEMA_VERSION = 7
 
 # 幂等扩展 DDL（FTS5 全文索引 + 常用索引）
 _EXTRA_DDL = [
@@ -41,6 +41,8 @@ def migrate(engine: Engine) -> None:
         _upgrade_v5_dedupe_scope(engine)
     if current < 6:
         _upgrade_v6_snippets_to_templates(engine)
+    if current < 7:
+        _upgrade_v7_image_hash_normalize(engine)
 
     with engine.begin() as conn:
         for ddl in _EXTRA_DDL:
@@ -306,3 +308,50 @@ def _upgrade_v6_snippets_to_templates(engine: Engine) -> None:
                 " VALUES (:n, :sc, :c, datetime('now'), datetime('now'))"),
                 {"n": name, "sc": sc, "c": content})
     logger.info("v6 迁移：模板模块（snippets 重建 + snippet_folders + 默认模板）")
+
+
+def _upgrade_v7_image_hash_normalize(engine: Engine) -> None:
+    """v6 → v7：图片去重键归一化为「落盘 PNG 内容」的 sha256。
+
+    起因（用户实测）：TIFF/其它格式来源的图片在 save 时已重编码为 PNG，
+    但 DB hash 记的是**原始剪贴板字节** digest。Quick Paste 重复制该图 → 系统
+    剪贴板拿到的是 PNG 字节 → 生成不同 hash → save_item 去重查询不命中 →
+    产生重复条目。v7 把现存图片行的 hash 统一重算为文件内容 digest；若与
+    同会话已有行冲突（即本轮已产生的重复），保留较新行（id 更大）、删除
+    旧行及其 FTS 行。文件缺失的行跳过（保持原状，不入库区域不可恢复）。
+    """
+    import hashlib
+    from pathlib import Path
+
+    logger.info("v7 迁移：图片 hash 归一化（TIFF 来源去重修复）")
+    with engine.begin() as conn:
+        rows = conn.execute(text(
+            "SELECT id, session_id, file_path, hash FROM clipboard_items"
+            " WHERE type = 'image'")).fetchall()
+        fixed = dropped = 0
+        for rid, sid, fpath, cur_hash in rows:
+            try:
+                digest = hashlib.sha256(Path(fpath).read_bytes()).hexdigest()
+            except OSError:
+                continue  # 文件缺失：无法重算，跳过
+            if digest == cur_hash:
+                continue
+            dup = conn.execute(text(
+                "SELECT id FROM clipboard_items"
+                " WHERE hash = :h AND session_id = :s AND id != :rid"),
+                {"h": digest, "s": sid, "rid": rid}).fetchone()
+            if dup:
+                # 该行是重复 → 删除（FTS5 外部内容表不支持按行 DELETE，
+                # 末尾统一 rebuild 保持索引一致）
+                conn.execute(text("DELETE FROM clipboard_items WHERE id = :id"),
+                             {"id": rid})
+                dropped += 1
+            else:
+                conn.execute(text(
+                    "UPDATE clipboard_items SET hash = :h WHERE id = :rid"),
+                    {"h": digest, "rid": rid})
+                fixed += 1
+        if dropped:
+            conn.execute(text("INSERT INTO items_fts(items_fts) VALUES('rebuild')"))
+        if fixed or dropped:
+            logger.info("v7：图片 hash 修正 %d 行，清理重复 %d 行", fixed, dropped)

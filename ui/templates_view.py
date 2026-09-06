@@ -352,6 +352,7 @@ class TemplateEditorDialog(QDialog):
         self._delete_btn.clicked.connect(self._delete)
         row3.addWidget(self._delete_btn)
         cancel_btn = QPushButton("取消")
+        cancel_btn.setObjectName("secondaryButton")  # 与同排「保存」同款灰底（此前漏 objectName 原生样式）
         cancel_btn.clicked.connect(self.reject)
         row3.addWidget(cancel_btn)
         self._save_btn = QPushButton("保存")

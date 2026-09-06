@@ -168,6 +168,180 @@ def test_quick_paste_popup_enter_selects(tmp_path):
     popup.deleteLater()
 
 
+def test_quick_paste_popup_dismissed_emitted(tmp_path):
+    """Quick Paste：隐藏（选中/Esc/点外部）会发出 dismissed——供外部恢复退避的主窗口。"""
+    from ui.quick_paste_popup import QuickPastePopup
+
+    popup = QuickPastePopup()
+    dismissed = []
+    popup.dismissed.connect(lambda: dismissed.append(True))
+    popup.populate([
+        ClipboardItem(type="text", content="x"),
+    ])
+    popup.show()  # populate 只装载；可见后 hide 才发 dismissed
+    pytest_app.processEvents()
+    assert len(dismissed) == 0  # 显示不算隐藏
+    popup.close()
+    pytest_app.processEvents()
+    assert len(dismissed) == 1
+    popup.deleteLater()
+
+
+def test_quick_paste_popup_double_click_selects(tmp_path):
+    """Quick Paste：双击条目 → 发出 selected 信号并关闭（与回车同路径）。
+
+    直接驱动 itemDoubleClicked→_pick_item 连接的处理函数：rows 查找 + 发
+    selected + 关闭（真实双击由 QListView 合成，offscreen 下时序不可靠，
+    但连接（itemDoubleClicked→_pick_item）与处理逻辑在本测试覆盖）。
+    """
+    from ui.quick_paste_popup import QuickPastePopup
+
+    popup = QuickPastePopup()
+    picked = []
+    popup.selected.connect(lambda item: picked.append(item))
+    popup.populate([
+        ClipboardItem(type="text", content="first item"),
+        ClipboardItem(type="text", content="second item"),
+    ])
+    pytest_app.processEvents()
+    popup._pick_item(popup._list.item(1))
+    assert len(picked) == 1 and picked[0].content == "second item"
+    assert not popup.isVisible()  # 选中后自动关闭（dismissed 会发出）
+    popup.deleteLater()
+
+
+def test_quick_paste_popup_enter_via_popup_window(tmp_path):
+    """Quick Paste：回车落在弹窗顶层（无子控件持焦点，macOS 激活时序常见）
+    也触发选中——keyPressEvent 兜底。"""
+    from PySide6.QtTest import QTest
+
+    from ui.quick_paste_popup import QuickPastePopup
+
+    popup = QuickPastePopup()
+    picked = []
+    popup.selected.connect(lambda item: picked.append(item))
+    popup.populate([
+        ClipboardItem(type="text", content="first"),
+        ClipboardItem(type="text", content="second"),
+    ])
+    popup.show()
+    pytest_app.processEvents()
+    # 不聚焦列表：按键直达弹窗窗口自身
+    QTest.keyClick(popup, Qt.Key.Key_Return)
+    assert len(picked) == 1 and picked[0].content == "first"
+    assert not popup.isVisible()
+    popup.deleteLater()
+
+
+def test_quick_paste_popup_return_no_double_fire(tmp_path):
+    """Quick Paste：同一次回车（QShortcut + _PickList 兜底可能都触发）只发一次
+    selected——_done 守卫防重。"""
+    from ui.quick_paste_popup import QuickPastePopup
+
+    popup = QuickPastePopup()
+    picked = []
+    popup.selected.connect(lambda item: picked.append(item))
+    popup.populate([
+        ClipboardItem(type="text", content="only"),
+    ])
+    # 三路入口各调一次（模拟同次按键的多条触发路径）
+    popup._pick_current_row()
+    popup._pick_current_row()
+    popup._pick_item(popup._list.item(0))
+    assert len(picked) == 1
+    popup.deleteLater()
+
+
+def test_quick_paste_popup_reassert_focus(tmp_path):
+    """Quick Paste：激活落地后的补拍不崩，且焦点归还列表（activeWindow=None
+    竞态的最终兜底——macOS 激活异步、弹窗无 key window 时回车进不了本进程）。"""
+    from ui.quick_paste_popup import QuickPastePopup
+
+    popup = QuickPastePopup()
+    popup.populate([ClipboardItem(type="text", content="x")])
+    popup.show()
+    pytest_app.processEvents()
+    popup.reassert_focus()
+    pytest_app.processEvents()
+    # 焦点回到列表（offscreen 下 activeWindow 可能仍无值，但列表持焦点即可）
+    assert popup._list.hasFocus()
+    popup.deleteLater()
+
+
+def test_quick_paste_popup_enter_global_capture(tmp_path):
+    """Quick Paste：回车落在**其它控件**上（模拟 macOS 下活动窗口仍是隐藏主
+    窗口、按键被送进主窗口控件树——列表/弹窗自身的 keyPressEvent 都收不到）
+    也能被应用级事件过滤器捕获并触发选中。"""
+    from PySide6.QtWidgets import QPushButton
+    from PySide6.QtTest import QTest
+
+    from ui.quick_paste_popup import QuickPastePopup
+
+    # 焦点放在弹出的按钮上（它没有任何回车处理逻辑，模拟「目标死控件」）
+    sink = QPushButton("sink")
+    sink.show()
+    sink.setFocus()
+    pytest_app.processEvents()
+
+    popup = QuickPastePopup()
+    popup.populate([
+        ClipboardItem(type="text", content="first"),
+        ClipboardItem(type="text", content="second"),
+    ])
+    popup.show()
+    pytest_app.processEvents()
+
+    picked = []
+    popup.selected.connect(lambda item: picked.append(item))
+    QTest.keyClick(sink, Qt.Key.Key_Return)
+    assert len(picked) == 1 and picked[0].content == "first"
+    assert not popup.isVisible()
+    popup.deleteLater()
+    sink.deleteLater()
+
+
+def test_quick_paste_row_single_line(tmp_path):
+    """Quick Paste 行文字单行化：markdown/多行内容折叠换行为空格，避免
+    drawText 多行块在定高 44px 行内被顶对齐/裁剪（Q2 修复）。"""
+    from ui.quick_paste_popup import _single_line
+
+    assert _single_line("# 标题\n- 项目一\n\t- 项目二") == "# 标题 - 项目一 - 项目二"
+    assert _single_line("普通一行") == "普通一行"
+    assert _single_line("a  b\nc") == "a b c"
+
+
+def test_qnspanel_patch_idempotent_safe():
+    """QNSPanel.canBecomeKeyWindow 覆写：幂等，且 offscreen 下不抛错（无
+    ObjC 类时静默跳过——真实 GUI 会话由 shadow 验证过 isKeyWindow=True）。"""
+    from ui.quick_paste_popup import patch_qnspanel_can_become_key
+
+    patch_qnspanel_can_become_key()  # 不抛
+    patch_qnspanel_can_become_key()  # 幂等（模块级 flag 短路）
+
+
+def test_qnspanel_whitelist_scoping():
+    """覆写为白名单：未注册的 QNSPanel（如 QComboBox 下拉）回落默认 NO；
+    注册的本应用弹窗才 YES；隐藏注销后回落——杜绝「全局放行空掉所有下拉」。"""
+    import ui.macos_patch as mp
+
+    fake_panel, other = object(), object()
+    fake_widget = object()
+    original = mp._native_panel
+    mp._native_panel = lambda w: fake_panel
+    try:
+        # 未注册的面板：默认 NO（QComboBox 下拉行为不变）
+        assert mp._can_become_key(other) is False
+        # 注册 → 放行
+        mp.register_native_panel(fake_widget)
+        assert mp._can_become_key(fake_panel) is True
+        assert mp._can_become_key(other) is False  # 其它面板仍 NO
+        # 注销 → 回落（防地址复用误放行新 panel）
+        mp.unregister_native_panel(fake_widget)
+        assert mp._can_become_key(fake_panel) is False
+    finally:
+        mp._native_panel = original
+
+
 def test_main_window_search_filters(tmp_path):
     """搜索栏接线：输入过滤列表，清空恢复完整历史。"""
     from services import history_service

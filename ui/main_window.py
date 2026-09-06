@@ -14,6 +14,7 @@ from PySide6.QtCore import (
     QTimer,
     Qt,
     QVariantAnimation,
+    Signal,
 )
 from PySide6.QtGui import (
     QColor,
@@ -136,6 +137,10 @@ class NavItemDelegate(QStyledItemDelegate):
 
 
 class MainWindow(QMainWindow):
+    # X 关闭 → 隐藏到托盘（bootstrap 订阅后收起 Dock 图标；仅窗口 UI 意图，
+    # 不触发任何业务/数据结构变更）
+    hidden_to_tray = Signal()
+
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
         self.setWindowTitle("Clipboard Workspace")
@@ -289,6 +294,7 @@ class MainWindow(QMainWindow):
         event.ignore()
         self.hide()
         logger.info("主窗口已隐藏（应用继续后台运行）")
+        self.hidden_to_tray.emit()
 
     # ---- 搜索 ----
 
