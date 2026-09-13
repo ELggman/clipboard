@@ -551,6 +551,50 @@ def test_detail_popup_image(tmp_path):
     popup.deleteLater()
 
 
+def test_detail_popup_stats_footer(tmp_path):
+    """详情弹层底部状态栏：文本/代码显示统计，图片隐藏。"""
+    from ui.item_detail_popup import ItemDetailPopup
+
+    popup = ItemDetailPopup()
+
+    # 文本条目：显示统计（首次即正确——不依赖 isVisible，见 _update_stats 注释）
+    popup.show_item(ClipboardItem(type="text", content="hello world\n第二行"))
+    pytest_app.processEvents()
+    assert popup._stats.isVisible()
+    assert popup._stats.text().startswith("15 字符")
+
+    # 代码条目：切换到代码视图后统计同步刷新
+    popup.show_item(ClipboardItem(type="code", language="python",
+                                  content="def f(x):\n    return x + 1"))
+    pytest_app.processEvents()
+    assert popup._stats.isVisible()
+    assert popup._stats.text() == "26 字符 · 17 字符(不含空格) · 6 字 · 2 行"
+
+    # 图片条目：无文本 → 状态栏隐藏
+    popup.show_item(ClipboardItem(type="image", file_path="/nonexistent.png"))
+    pytest_app.processEvents()
+    assert popup._stats.isHidden()
+
+    popup.deleteLater()
+
+
+def test_detail_popup_stats_on_reveal(tmp_path):
+    """敏感条目：遮蔽态统计遮蔽文本，Reveal 后统计刷新为原文。"""
+    from ui.item_detail_popup import ItemDetailPopup
+
+    popup = ItemDetailPopup()
+    popup.show_item(ClipboardItem(type="text", content="secretvalue",
+                                  sensitive=1, sensitive_type="api_key"))
+    pytest_app.processEvents()
+    masked = popup._stats.text()
+    assert masked.startswith("12 字符")          # 遮蔽文本长度
+    popup._toggle_reveal()
+    pytest_app.processEvents()
+    assert popup._stats.isVisible()
+    assert popup._stats.text().startswith("11 字符")  # "secretvalue" 原文
+    popup.deleteLater()
+
+
 def test_history_item_clicked_signal(tmp_path):
     """单击历史条目发出 item_activated（详情弹层入口）。"""
     from services.image_service import ImageService

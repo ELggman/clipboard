@@ -301,6 +301,7 @@ QWidget#itemDetail {
     background: $window;
 }
 QLabel#detailMeta { color: $secondary; font-size: 12px; }
+QLabel#detailStats { color: $secondary; font-size: 11px; padding-top: 2px; }
 
 /* 按钮统一：默认 = 浅灰底 + 9px 圆角（设计规范 §5.1）。未指定
    objectName 的按钮（个别「取消」）也落到统一外观；各具名按钮

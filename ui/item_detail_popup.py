@@ -175,6 +175,13 @@ class ItemDetailPopup(QWidget):
         buttons.addWidget(self._copy_btn)
         layout.addLayout(buttons)
 
+        # 底部状态栏：当前内容的统计（字符数/字数/行数，§Word 口径）。
+        # 仅文本类视图（text/url/file/code）显示；图片无文本 → 隐藏。
+        self._stats = QLabel()
+        self._stats.setObjectName("detailStats")
+        self._stats.hide()
+        layout.addWidget(self._stats)
+
     def show_item(self, item, image_service=None) -> None:
         """展示条目详情。image_service 预留（缩略图服务，当前直接用文件加载）。"""
         self._item = item
@@ -227,6 +234,29 @@ class ItemDetailPopup(QWidget):
         self._save_btn.setVisible(is_code)
         self._reveal_btn.setVisible(bool(item.sensitive))
         self._copy_btn.setText("复制" if is_code else "复制全部")
+        self._update_stats()
+
+    def _update_stats(self) -> None:
+        """刷新底部统计：取**当前显示**的文本（与所见一致，遮蔽时统计遮蔽文本）。
+
+        用 `isHidden()` 而非 `isVisible()`：`_apply_view` 在弹窗 show 之前调用，
+        此时父窗口未显示 → 子控件 `isVisible()` 恒为 False（首次/每次重开都会漏统计）。
+        `isHidden()` 只反映显式 show/hide，与父窗口可见性无关。
+        """
+        if not self._code.isHidden():
+            text = self._code.edit.toPlainText()
+        elif not self._text.isHidden():
+            text = self._text.toPlainText()
+        else:                          # 图片视图：无文本内容
+            self._stats.hide()
+            return
+        if not text:
+            self._stats.hide()
+            return
+        from app.text_utils import text_stats
+
+        self._stats.setText(text_stats(text).label())
+        self._stats.show()
 
     def _mask_content(self, item) -> str:
         from services.sensitive_detector import mask
