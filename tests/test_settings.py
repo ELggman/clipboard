@@ -85,11 +85,11 @@ def test_delete_older_than(engine_factory):
         total = conn.execute(text("SELECT COUNT(*) FROM clipboard_items")).scalar()
     assert total == 3
 
-    removed_files = history_service.delete_older_than(engine, days=30)
+    removed_files, deleted = history_service.delete_older_than(engine, days=30)
     with engine.connect() as conn:
         remaining = [r[0] for r in conn.execute(
             text("SELECT content FROM clipboard_items")).fetchall()]
-    assert removed_files == []
+    assert (removed_files, deleted) == ([], 1)  # 文本条目没有文件，但确实删了 1 条
     assert remaining == ["old pinned", "new"]  # 旧未置顶删除，置顶豁免，新保留
 
 
@@ -109,8 +109,9 @@ def test_delete_older_than_returns_image_paths(engine_factory, tmp_path):
                  " ('image', '', 'old.png', 'hi', 0, 0, :t, :t, :f)"),
             {"t": datetime.datetime.now() - datetime.timedelta(days=40), "f": str(img)},
         )
-    removed = history_service.delete_older_than(engine, days=30)
-    assert removed == [str(img)]  # 返回图片路径供清理
+    removed_files, deleted = history_service.delete_older_than(engine, days=30)
+    assert removed_files == [str(img)]  # 返回图片路径供清理
+    assert deleted == 1
 
 
 def test_trim_history(engine_factory):
@@ -168,6 +169,36 @@ def test_autostart_plist(tmp_path):
 
 # ---- 设置页控件 ----
 
+def test_settings_view_load_does_not_write_config(tmp_path):
+    """装载配置必须屏蔽控件信号：否则打开一次设置页就把当前值钉进 settings.yaml，
+    以后改 defaults.yaml 的默认值对老用户再也不生效（回归）。"""
+    from ui.settings_view import SettingsView
+
+    config = {
+        "app": {"theme": "system", "font_size": 14, "launch_at_login": False},
+        "history": {"max_items": 500, "auto_delete_days": 30,
+                    "save_images": True, "show_image_filename": True},
+        "privacy": {"policy": "warn", "temp_minutes": 5, "block_private_key": True,
+                    "ignored_apps": []},
+    }
+    applied = {}
+    appliers = {k: (lambda o, k=k: applied.__setitem__(k, o)) for k in
+                ("theme", "font", "show_filename", "autostart", "max_items",
+                 "privacy_block_private_key", "privacy_policy", "privacy_temp")}
+    cfg_path = tmp_path / "settings.yaml"
+
+    view = SettingsView()
+    view.set_context(config, appliers, cfg_path)
+    assert not cfg_path.exists()  # 装载不写盘
+    assert applied == {}          # 也不回调 applier
+
+    # 用户真的改一下 → 才写盘
+    view._block_private_key.setChecked(False)
+    assert applied["privacy_block_private_key"]["privacy"]["block_private_key"] is False
+    assert "block_private_key: false" in cfg_path.read_text(encoding="utf-8")
+    view.close()
+
+
 def test_settings_view_apply_and_persist(tmp_path):
     from ui.settings_view import SettingsView
 
@@ -196,6 +227,33 @@ def test_settings_view_apply_and_persist(tmp_path):
     assert applied.get("max_items", {}).get("history", {}).get("max_items") == 1000
 
 
+# ---- 暂停监控状态的持久化（§9.3）----
+
+def test_privacy_state_restores_paused():
+    """暂停状态可按配置恢复，toggle 时广播（重启后不能悄悄恢复记录）。"""
+    from app.bootstrap import PrivacyState
+
+    assert PrivacyState().paused is False          # 缺省仍是「监控中」
+    state = PrivacyState(paused=True)
+    assert state.paused is True
+    seen = []
+    state.changed.connect(seen.append)
+    state.toggle()
+    assert state.paused is False and seen == [False]
+
+
+def test_defaults_have_privacy_flags():
+    """defaults.yaml 提供 privacy.paused 与 block_private_key 默认值。"""
+    import yaml
+
+    from app.config import CONFIG_DIR
+
+    data = yaml.safe_load(
+        (CONFIG_DIR / "defaults.yaml").read_text(encoding="utf-8"))
+    assert data["privacy"]["paused"] is False
+    assert data["privacy"]["block_private_key"] is True
+
+
 # ---- 隐私管线决策（新增.md §9.5-9.17）----
 
 def _privacy_config(**overrides) -> dict:
@@ -217,6 +275,77 @@ def test_privacy_pipeline_excluded_app():
     decision = apply_privacy_policy(item, _privacy_config(ignored_apps=["1Password"]))
     assert decision == "excluded"
     assert item.sensitive == 0  # 未进入检测
+
+
+def test_privacy_exclusion_matches_bundle_id():
+    """忽略条目带 bundle id 时，按 bundle id 命中——localizedName() 随系统语言变，
+    只存名字的话中文系统下（微信 = 「微信」）排除会静默失效（§9.5）。"""
+    import hashlib
+
+    from app.bootstrap import apply_privacy_policy
+    from app.types import ClipboardItem
+
+    ignored = [{"name": "WeChat", "bundle_id": "com.tencent.xinWeChat"}]
+    cfg = _privacy_config(ignored_apps=ignored)
+
+    # 系统语言变了：名字对不上，但 bundle id 对得上 → 仍然排除
+    item = ClipboardItem(type="text", content="x", source_app="微信",
+                         source_app_id="com.tencent.xinWeChat")
+    item.hash = hashlib.sha256(b"x").hexdigest()
+    assert apply_privacy_policy(item, cfg) == "excluded"
+
+    # 名字命中（bundle id 拿不到）也要排除
+    item2 = ClipboardItem(type="text", content="y", source_app="WeChat")
+    item2.hash = hashlib.sha256(b"y").hexdigest()
+    assert apply_privacy_policy(item2, cfg) == "excluded"
+
+    # 大小写/空白差异照样命中
+    item3 = ClipboardItem(type="text", content="z", source_app=" wechat ")
+    item3.hash = hashlib.sha256(b"z").hexdigest()
+    assert apply_privacy_policy(item3, cfg) == "excluded"
+
+
+def test_privacy_exclusion_unknown_app_saves():
+    """身份取不到（前台应用获取失败）时宁可保存：漏保存是静默丢数据。"""
+    import hashlib
+
+    from app.bootstrap import apply_privacy_policy
+    from app.types import ClipboardItem
+
+    item = ClipboardItem(type="text", content="plain note")
+    item.hash = hashlib.sha256(b"n").hexdigest()
+    assert apply_privacy_policy(
+        item, _privacy_config(ignored_apps=["1Password"])) == "save"
+
+
+def test_privacy_private_key_not_saved_by_default():
+    """§9.15：私钥默认不保存——默认策略下自动升级为 ignore。"""
+    import hashlib
+
+    from app.bootstrap import apply_privacy_policy
+    from app.types import ClipboardItem
+
+    pem = ("-----BEGIN PRIVATE KEY-----\n"
+           "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQ\n"
+           "-----END PRIVATE KEY-----")
+    item = ClipboardItem(type="text", content=pem)
+    item.hash = hashlib.sha256(b"k").hexdigest()
+    assert apply_privacy_policy(item, _privacy_config()) == "sensitive_ignore"
+
+    # 关掉「私钥不保存」开关 → 回到 warn 语义：保存但标记遮蔽
+    item2 = ClipboardItem(type="text", content=pem)
+    item2.hash = hashlib.sha256(b"k").hexdigest()
+    assert apply_privacy_policy(
+        item2, _privacy_config(block_private_key=False)) == "save"
+    assert item2.sensitive == 1
+    assert item2.sensitive_type == "private_key"
+
+    # 用户显式选 save_temporarily 时以用户选择为准（只升级默认的 warn）
+    item3 = ClipboardItem(type="text", content=pem)
+    item3.hash = hashlib.sha256(b"k").hexdigest()
+    assert apply_privacy_policy(
+        item3, _privacy_config(policy="save_temporarily")) == "save"
+    assert item3.expires_at != ""
 
 
 def test_privacy_pipeline_warn_marks_sensitive():

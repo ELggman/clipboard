@@ -6,12 +6,17 @@
   （实测「胶原」搜不出「最近胶原蛋白满满」）→ 改走 LIKE 子串扫描，
   10k 行全表扫描仅数毫秒，性能目标内
 - 正则高级模式：内存过滤兜底
+- 三条路径都排除「已过期的临时条目」与「敏感条目」——判据见
+  services/item_filters.py（敏感内容若能搜到，遮蔽显示就形同虚设）
 """
 import logging
 import re
+from datetime import datetime
 
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
+
+from services import item_filters
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +60,7 @@ class SearchService:
         """返回命中的 clipboard_items.id 列表，最新优先。
 
         session_id=None 全局；指定则限定该会话。
+        过期临时条目与敏感条目一律不返回（判据见 services/item_filters.py）。
         """
         if not query.strip():
             return []
@@ -63,8 +69,9 @@ class SearchService:
         if _contains_cjk(query):
             return self._search_like(query, limit, session_id)
         terms = _fts_terms(query)
-        where = " WHERE items_fts MATCH :q"
-        params: dict = {"q": terms, "limit": limit}
+        where = (" WHERE items_fts MATCH :q"
+                 f" AND {item_filters.searchable_sql('i')}")
+        params: dict = {"q": terms, "limit": limit, "now": datetime.now()}
         if session_id is not None:
             where += " AND i.session_id = :sid"
             params["sid"] = session_id
@@ -90,8 +97,10 @@ class SearchService:
         if not terms:
             return []
         where = " AND ".join(f"content LIKE :t{i} ESCAPE '\\'" for i in range(len(terms)))
+        where += f" AND {item_filters.searchable_sql()}"
         params = {f"t{i}": f"%{_like_escape(t)}%" for i, t in enumerate(terms)}
         params["limit"] = limit
+        params["now"] = datetime.now()
         if session_id is not None:
             where += " AND session_id = :sid"
             params["sid"] = session_id
@@ -110,8 +119,13 @@ class SearchService:
         except re.error:
             logger.warning("无效正则: %r", pattern)
             return []
-        where = "" if session_id is None else " WHERE session_id = :sid"
-        params = {"sid": session_id} if session_id is not None else {}
+        where = f" WHERE ({item_filters.searchable_sql()}"
+        if session_id is not None:
+            where += " AND session_id = :sid"
+        where += ")"
+        params: dict = {"now": datetime.now()}
+        if session_id is not None:
+            params["sid"] = session_id
         with self._engine.connect() as conn:
             rows = conn.execute(
                 text("SELECT id, content FROM clipboard_items" + where +

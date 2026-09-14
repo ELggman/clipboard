@@ -10,7 +10,6 @@ from typing import Any, Callable
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
-    QComboBox,
     QFormLayout,
     QFrame,
     QHBoxLayout,
@@ -23,9 +22,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ui.fluent_combo import FluentComboBox
+
 logger = logging.getLogger(__name__)
 
 from app import __version__
+from app.types import TEMP_MINUTE_OPTIONS
+from services import app_identity
 
 _THEME_OPTIONS = [("system", "跟随系统"), ("light", "浅色"), ("dark", "深色")]
 _FONT_OPTIONS = [12, 13, 14, 15, 16]
@@ -44,7 +47,7 @@ _DELETE_POLICY_OPTIONS = [("move", "移回普通会话"), ("delete", "直接删�
 _POLICY_OPTIONS = [("warn", "提醒（保存并遮蔽显示）"),
                    ("ignore", "忽略（不保存）"),
                    ("save_temporarily", "临时保存（自动过期）")]
-_TEMP_OPTIONS = [(1, "1 分钟"), (5, "5 分钟"), (10, "10 分钟"), (30, "30 分钟")]
+_TEMP_OPTIONS = [(m, f"{m} 分钟") for m in TEMP_MINUTE_OPTIONS]
 
 
 class SettingsView(QWidget):
@@ -91,37 +94,37 @@ class SettingsView(QWidget):
         scroll.setWidget(container)
         outer.addWidget(scroll)
 
-        self._theme = QComboBox()
+        self._theme = FluentComboBox()
         for value, label in _THEME_OPTIONS:
             self._theme.addItem(label, value)
         layout.addRow("主题", self._theme)
 
-        self._font = QComboBox()
+        self._font = FluentComboBox()
         for size in _FONT_OPTIONS:
             self._font.addItem(f"{size} pt", size)
         layout.addRow("字体大小", self._font)
 
-        self._max_items = QComboBox()
+        self._max_items = FluentComboBox()
         for value, label in _MAX_ITEMS_OPTIONS:
             self._max_items.addItem(label, value)
         layout.addRow("每会话历史数量上限", self._max_items)
 
-        self._auto_delete = QComboBox()
+        self._auto_delete = FluentComboBox()
         for value, label in _AUTO_DELETE_OPTIONS:
             self._auto_delete.addItem(label, value)
         layout.addRow("自动删除", self._auto_delete)
 
-        self._file_size = QComboBox()
+        self._file_size = FluentComboBox()
         for value, label in _FILE_SIZE_OPTIONS:
             self._file_size.addItem(label, value)
         layout.addRow("文件大小上限", self._file_size)
 
-        self._dedupe_scope = QComboBox()
+        self._dedupe_scope = FluentComboBox()
         for value, label in _DEDUPE_OPTIONS:
             self._dedupe_scope.addItem(label, value)
         layout.addRow("去重范围", self._dedupe_scope)
 
-        self._delete_policy = QComboBox()
+        self._delete_policy = FluentComboBox()
         for value, label in _DELETE_POLICY_OPTIONS:
             self._delete_policy.addItem(label, value)
         layout.addRow("删除会话时", self._delete_policy)
@@ -149,15 +152,21 @@ class SettingsView(QWidget):
         section.setObjectName("sectionTitle")
         layout.addRow(section)
 
-        self._policy = QComboBox()
+        self._policy = FluentComboBox()
         for value, label in _POLICY_OPTIONS:
             self._policy.addItem(label, value)
         layout.addRow("敏感内容策略", self._policy)
 
-        self._temp_minutes = QComboBox()
+        self._temp_minutes = FluentComboBox()
         for value, label in _TEMP_OPTIONS:
             self._temp_minutes.addItem(label, value)
         layout.addRow("临时保存时长", self._temp_minutes)
+
+        # §9.15：私钥类内容默认不保存（拿到即可冒充身份，且不像口令能改）
+        self._block_private_key = QCheckBox("私钥内容不保存（推荐）")
+        self._block_private_key.setToolTip(
+            "开启后，检测到 PRIVATE KEY 内容时不论上面选了哪种策略都不保存")
+        layout.addRow("私钥处理", self._block_private_key)
 
         # 忽略的应用（§9.5）：来源应用 ∈ 列表 → 不保存
         self._ignored_list = QListWidget()
@@ -212,6 +221,8 @@ class SettingsView(QWidget):
         self._autostart.toggled.connect(lambda _: self._on_change("autostart"))
         self._policy.currentIndexChanged.connect(lambda _: self._on_change("privacy_policy"))
         self._temp_minutes.currentIndexChanged.connect(lambda _: self._on_change("privacy_temp"))
+        self._block_private_key.toggled.connect(
+            lambda _: self._on_change("privacy_block_private_key"))
         self._file_size.currentIndexChanged.connect(lambda _: self._on_change("max_file_size"))
         self._dedupe_scope.currentIndexChanged.connect(lambda _: self._on_change("dedupe_scope"))
         self._delete_policy.currentIndexChanged.connect(lambda _: self._on_change("session_delete_policy"))
@@ -249,9 +260,11 @@ class SettingsView(QWidget):
         self._autostart.setChecked(bool(app_cfg.get("launch_at_login", False)))
         self._set_combo_value(self._policy, priv_cfg.get("policy", "warn"))
         self._set_combo_value(self._temp_minutes, priv_cfg.get("temp_minutes", 5))
+        self._block_private_key.setChecked(
+            bool(priv_cfg.get("block_private_key", True)))
         self._ignored_list.clear()
-        for app_name in priv_cfg.get("ignored_apps", []):
-            self._ignored_list.addItem(QListWidgetItem(app_name))
+        for entry in app_identity.normalize_entries(priv_cfg.get("ignored_apps", [])):
+            self._append_ignored(entry)
         self._block_signals(False)
 
     def _collect_overrides(self) -> dict[str, Any]:
@@ -274,6 +287,7 @@ class SettingsView(QWidget):
                 "policy": self._policy.currentData(),
                 "temp_minutes": self._temp_minutes.currentData(),
                 "ignored_apps": self._ignored_apps(),
+                "block_private_key": self._block_private_key.isChecked(),
             },
             "session": {
                 "delete_policy": self._delete_policy.currentData(),
@@ -282,9 +296,36 @@ class SettingsView(QWidget):
 
     # ---- 隐私操作 ----
 
-    def _ignored_apps(self) -> list[str]:
-        return [self._ignored_list.item(i).text()
-                for i in range(self._ignored_list.count())]
+    def _ignored_apps(self) -> list[dict[str, str]]:
+        """忽略列表（配置格式）：`[{name, bundle_id}]`。
+
+        旧格式（纯字符串）在 `_load_from_config` 里已被归一成同一种形态，
+        故这里给出去的永远是映射——匹配逻辑见 `services/app_identity.py`。
+        兜底：没有附带条目的列表项（外部直接 addItem 的纯文本）按旧格式
+        当作「只有名字」，避免把空条目写进配置文件。
+        """
+        result: list[dict[str, str]] = []
+        for i in range(self._ignored_list.count()):
+            item = self._ignored_list.item(i)
+            entry = item.data(Qt.ItemDataRole.UserRole)
+            if isinstance(entry, dict):
+                result.append(entry)
+            elif item.text():
+                result.append({"name": item.text(), "bundle_id": ""})
+        return result
+
+    def _ignored_keys(self) -> set[str]:
+        """已在列表里的应用的匹配键（名字/bundle id 归一化），供选择器去重。"""
+        return {key for key in (app_identity.entry_key(e) for e in self._ignored_apps())
+                if key}
+
+    def _append_ignored(self, entry: dict[str, str]) -> None:
+        """列表项显示名字，完整条目（含 bundle id）挂在 UserRole 上。"""
+        item = QListWidgetItem(app_identity.display_name(entry))
+        item.setData(Qt.ItemDataRole.UserRole, entry)
+        if entry.get("bundle_id"):
+            item.setToolTip(entry["bundle_id"])
+        self._ignored_list.addItem(item)
 
     def _add_ignored_app(self) -> None:
         """从已安装应用列表选择（不再手动输入，新增.md §9.5）。"""
@@ -292,12 +333,16 @@ class SettingsView(QWidget):
 
         from ui.app_picker_dialog import AppPickerDialog
 
-        dialog = AppPickerDialog(self, selected=set(self._ignored_apps()))
+        dialog = AppPickerDialog(self, selected=self._ignored_keys())
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            name = dialog.selected_app()
-            if name and name not in self._ignored_apps():
-                self._ignored_list.addItem(QListWidgetItem(name))
-                self._on_change("privacy_ignored")
+            entry = dialog.selected_entry()
+            if entry is None:
+                return
+            stored = {"name": entry.name, "bundle_id": entry.bundle_id}
+            if app_identity.entry_key(stored) in self._ignored_keys():
+                return
+            self._append_ignored(stored)
+            self._on_change("privacy_ignored")
 
     def _remove_ignored_app(self) -> None:
         row = self._ignored_list.currentRow()
@@ -327,13 +372,17 @@ class SettingsView(QWidget):
     # ---- 工具 ----
 
     @staticmethod
-    def _set_combo_value(combo: QComboBox, value) -> None:
+    def _set_combo_value(combo: FluentComboBox, value) -> None:
         idx = combo.findData(value)
         combo.setCurrentIndex(idx if idx >= 0 else 0)
 
     def _block_signals(self, blocked: bool) -> None:
+        # 装载配置时必须屏蔽：这些控件一旦发信号就会走 _on_change →
+        # 把「刚从配置读出来的值」又写回 settings.yaml。等于打开一次设置页
+        # 就把当前默认值钉死成用户配置，以后改 defaults.yaml 再也不生效。
         for w in (self._theme, self._font, self._max_items, self._auto_delete,
                   self._file_size, self._dedupe_scope, self._delete_policy,
                   self._save_images, self._show_filename,
-                  self._autostart, self._policy, self._temp_minutes):
+                  self._autostart, self._policy, self._temp_minutes,
+                  self._block_private_key):
             w.blockSignals(blocked)

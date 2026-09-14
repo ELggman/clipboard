@@ -56,6 +56,25 @@ def test_history_row_layouts(tmp_path):
     view.close()
 
 
+def test_history_row_paint_multiline_sensitive(tmp_path):
+    """多行 .env 敏感条目：遮蔽文本仍带换行（逐处遮蔽、保留行结构），
+    但列表行是**单行**元素——绘制必须压平空白且不崩。
+
+    回归：不压平的话两行会挤成 `localhostDB_PASSWORD=…` 连读。
+    """
+    view = HistoryView()
+    view.add_item(ClipboardItem(
+        type="text",
+        content="DB_HOST=localhost\nDB_PASSWORD=sup3rs3cret!\nDEBUG=true",
+        preview="DB_HOST=localhost",
+        sensitive=1, sensitive_type="api_key"))
+    view.resize(400, 300)
+    view.show()
+    pytest_app.processEvents()
+    assert view.grab().isNull() is False   # paint 冒烟（走敏感行绘制路径）
+    view.close()
+
+
 def test_history_show_filename_toggle(tmp_path):
     """开关关闭时不崩，布局仍按图片条目走。"""
     from services.image_service import ImageService
@@ -432,7 +451,7 @@ def test_context_menu_copy_action(tmp_path):
 
     labels = [a.text() for a in menu.actions()]
     assert labels == ["复制", "添加到模板…", "置顶", "标记为敏感",
-                      "收藏", "", "删除"]  # "" = 分隔线
+                      "临时保存", "收藏", "", "删除"]  # "" = 分隔线
 
     menu.actions()[0].trigger()  # 复制
     pb = NSPasteboard.generalPasteboard()
@@ -1177,7 +1196,7 @@ def test_history_menu_add_to_collection(tmp_path):
 
     # 「收藏」子菜单：★ 快速收藏 + 收藏夹列表 + 新建收藏夹…
     # （用 view 持有的引用，shiboken 对 QAction.menu() 重新包装会失效）
-    sub = view._active_menus[1]
+    sub = next(m for m in view._active_menus if m.title() == "收藏")
     names = [a.text() for a in sub.actions()]
     assert names[0] == "★ 快速收藏"
     assert "收藏夹A" in names
@@ -1212,7 +1231,8 @@ def test_favorite_feedback_and_virtual_collection(tmp_path):
     messages = []
     view.feedback.connect(messages.append)
     menu = view._build_menu(item)
-    fav_menu = view._active_menus[1]  # 「收藏」子菜单（持有引用）
+    # 「收藏」子菜单（按标题取：菜单项顺序会随功能增减变化）
+    fav_menu = next(m for m in view._active_menus if m.title() == "收藏")
     fav_menu.actions()[0].trigger()  # ★ 快速收藏
     assert messages == ["已收藏"]
     assert item.favorite == 1
@@ -1635,12 +1655,45 @@ def test_settings_privacy_section_persists(tmp_path):
     view.set_context(config, {}, cfg_path)
     view._policy.setCurrentIndex(1)       # ignore
     view._temp_minutes.setCurrentIndex(2)  # 10 分钟
-    view._ignored_list.addItem("1Password")
+    view._ignored_list.addItem("1Password")   # 旧格式纯文本项也要能存下来
+    view._append_ignored({"name": "Code", "bundle_id": "com.microsoft.VSCode"})
     view._on_change("privacy_ignored")
     saved = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
     assert saved["privacy"]["policy"] == "ignore"
     assert saved["privacy"]["temp_minutes"] == 10
-    assert saved["privacy"]["ignored_apps"] == ["1Password"]
+    # 条目同时记名字与 bundle id（§9.5）：名字给用户看，bundle id 不随语言变
+    assert saved["privacy"]["ignored_apps"] == [
+        {"name": "1Password", "bundle_id": ""},
+        {"name": "Code", "bundle_id": "com.microsoft.VSCode"},
+    ]
+    view.close()
+
+
+def test_settings_ignored_apps_roundtrip_legacy_and_new(tmp_path):
+    """旧格式（纯字符串）配置能读进来并原样存回；新格式带 bundle id 也保持。"""
+    import yaml
+
+    from ui.settings_view import SettingsView
+
+    config = {
+        "app": {}, "history": {},
+        "privacy": {"policy": "warn", "temp_minutes": 5,
+                    "ignored_apps": ["1Password",
+                                     {"name": "Code",
+                                      "bundle_id": "com.microsoft.VSCode"}]},
+    }
+    cfg_path = tmp_path / "settings.yaml"
+    view = SettingsView()
+    view.set_context(config, {}, cfg_path)
+    view._on_change("privacy_ignored")
+    saved = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    assert saved["privacy"]["ignored_apps"] == [
+        {"name": "1Password", "bundle_id": ""},
+        {"name": "Code", "bundle_id": "com.microsoft.VSCode"},
+    ]
+    # 列表显示名字（不是 bundle id），匹配键取 bundle id
+    assert view._ignored_list.item(1).text() == "Code"
+    assert view._ignored_keys() == {"1password", "com.microsoft.vscode"}
     view.close()
 
 
@@ -1733,6 +1786,76 @@ def test_app_picker_lists_installed_apps():
     dialog.close()
 
 
+def test_app_entry_indexes_folder_name_and_bundle_id(tmp_path):
+    """别名索引：目录名 / bundle id 可搜，但存进忽略列表的仍是规范名。
+
+    真机反例（本次修复的起因）：/Applications/Visual Studio Code.app 的
+    CFBundleDisplayName 与 CFBundleName 都是 "Code"，localizedName() 也是
+    "Code"——而忽略匹配正是拿 localizedName() 跟列表做精确比较。只按显示名
+    索引时，用户搜 "Visual Studio Code" 会一无所获。
+    """
+    import plistlib
+
+    from ui.app_picker_dialog import _entry_from_bundle
+
+    app = tmp_path / "Visual Studio Code.app"
+    (app / "Contents").mkdir(parents=True)
+    (app / "Contents" / "Info.plist").write_bytes(plistlib.dumps({
+        "CFBundleDisplayName": "Code",
+        "CFBundleName": "Code",
+        "CFBundleIdentifier": "com.microsoft.VSCode",
+        "CFBundleExecutable": "Code",
+    }))
+
+    entry = _entry_from_bundle(app)
+    assert entry.name == "Code"                 # 存进列表的值（须与 localizedName 一致）
+    assert entry.hint == "Visual Studio Code"   # 列表里附带显示，便于辨认
+    assert "visual studio code" in entry.aliases
+    assert "com.microsoft.vscode" in entry.aliases
+    assert entry.path == app
+
+
+def test_app_picker_search_by_alias_keeps_canonical_name():
+    """按别名搜到应用后，选中的仍是可匹配的规范名；列表项带图标。"""
+    from PySide6.QtCore import Qt as _Qt
+
+    from ui.app_picker_dialog import AppPickerDialog, scan_installed_apps
+
+    entries = scan_installed_apps()
+    assert entries
+
+    dialog = AppPickerDialog()
+    dialog.show()
+    pytest_app.processEvents()
+
+    def row_of(name: str):
+        for i in range(dialog._list.count()):
+            item = dialog._list.item(i)
+            if item.data(_Qt.ItemDataRole.UserRole) == name:
+                return i
+        return -1
+
+    with_alias = next((e for e in entries if e.aliases), None)
+    if with_alias is not None:
+        row = row_of(with_alias.name)
+        assert row >= 0
+        alias = sorted(with_alias.aliases)[0]
+        dialog._search.setText(alias)
+        pytest_app.processEvents()
+        assert not dialog._list.item(row).isHidden(), f"按别名 {alias} 搜不到"
+        dialog._list.setCurrentRow(row)
+        assert dialog.selected_app() == with_alias.name, "选中值必须是规范名"
+
+    # 列表项带图标（.app 都在本机，图标不应为空）
+    entry_with_path = next((e for e in entries if e.path is not None), None)
+    if entry_with_path is not None:
+        row = row_of(entry_with_path.name)
+        assert row >= 0
+        assert not dialog._list.item(row).icon().isNull()
+
+    dialog.close()
+
+
 def test_code_meta_shows_pin_and_favorite_marks():
     """代码条目置顶/收藏后 meta 显示 📌/★（与其他类型一致；语言 emoji 已
     移除——UI 优化改线性类型图标，meta 只保留语言名）。"""
@@ -1783,6 +1906,50 @@ def test_context_menu_toggle_sensitive(tmp_path):
     menu2 = view._build_menu(loaded)
     labels2 = [a.text() for a in menu2.actions()]
     assert "取消敏感标记" in labels2
+    view.close()
+
+
+def test_history_menu_temp_expiry(tmp_path):
+    """右键「临时保存」（§9.9）：逐条设置到期时间，写库 + 内存同步 + 反馈。"""
+    import hashlib
+
+    from database.engine import create_db_engine
+    from database.migrations import migrate
+    from services import history_service
+    from ui.history_view import HistoryView
+
+    engine = create_db_engine(tmp_path / "temp.db")
+    migrate(engine)
+    item = ClipboardItem(type="text", content="temporary note")
+    item.hash = hashlib.sha256(b"temporary note").hexdigest()
+    history_service.save_item(engine, item)
+
+    view = HistoryView()
+    view.set_menu_context(engine, None, None)
+    view.set_items(history_service.list_recent(engine))
+    loaded = view._model.index(0, 0).data(ROLE_ITEM)
+    assert loaded.expires_at == ""
+
+    messages = []
+    view.feedback.connect(messages.append)
+    menu = view._build_menu(loaded)
+    temp_menu = next(m for m in view._active_menus if m.title() == "临时保存")
+    assert [a.text() for a in temp_menu.actions()] == \
+        ["1 分钟", "5 分钟", "10 分钟", "30 分钟"]  # 未设过 → 无「取消」
+
+    next(a for a in temp_menu.actions() if a.text() == "5 分钟").trigger()
+    assert loaded.expires_at != ""                              # 内存同步
+    assert history_service.list_recent(engine)[0].expires_at != ""   # 落库
+    assert messages == ["已设为 5 分钟临时条目"]
+
+    # 已设过 → 菜单标题带到期时间，且多出「取消临时保存」
+    menu2 = view._build_menu(loaded)
+    temp2 = next(m for m in view._active_menus if m.title().startswith("临时保存（"))
+    cancel = next(a for a in temp2.actions() if a.text() == "取消临时保存")
+    cancel.trigger()
+    assert loaded.expires_at == ""
+    assert history_service.list_recent(engine)[0].expires_at == ""
+    assert messages[-1] == "已取消临时保存"
     view.close()
 
 

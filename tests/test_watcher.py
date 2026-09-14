@@ -56,6 +56,22 @@ def test_parse_blank_ignored():
     assert ClipboardWatcher._parse(pb) is None
 
 
+def test_parse_fills_source_app_identity():
+    """解析结果带来源应用身份（显示名 + bundle id），供忽略列表匹配（§9.5）。"""
+    pb = _set_text("identity probe")
+    item = ClipboardWatcher._parse(pb)
+    assert item is not None
+    # 前台应用在无窗口的测试环境下可能取不到，但字段必须存在且与取值函数一致
+    assert (item.source_app, item.source_app_id) == ClipboardWatcher._frontmost_app()
+    assert isinstance(item.source_app, str) and isinstance(item.source_app_id, str)
+
+
+def test_frontmost_app_returns_pair():
+    """(_frontmost_app 返回二元组)：bundle id 不随系统语言变，是匹配的稳定标识。"""
+    result = ClipboardWatcher._frontmost_app()
+    assert isinstance(result, tuple) and len(result) == 2
+
+
 def _png_bytes(color: str = "red") -> bytes:
     buf = BytesIO()
     Image.new("RGB", (4, 4), color).save(buf, "PNG")

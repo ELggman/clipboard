@@ -288,3 +288,114 @@ def test_preview_image_uses_filename():
         hash="x" * 64,
     )
     assert history_service.compute_preview(item) == "abc123.png"
+
+
+# ---- 可见性收口（§9.9 过期 / §9.17 敏感）----
+#
+# 过期条目由 24h 清扫定时器真正删除，在此之前只靠读取路径过滤；
+# 敏感条目正文不参与检索（否则搜索框成了遮蔽内容的旁路）。
+
+
+def _set_expired(engine, content: str, delta_minutes: int) -> None:
+    """把某条内容的 expires_at 设为现在 ±delta 分钟。"""
+    from datetime import datetime, timedelta
+
+    with engine.begin() as conn:
+        conn.execute(
+            text("UPDATE clipboard_items SET expires_at = :t WHERE content = :c"),
+            {"t": datetime.now() + timedelta(minutes=delta_minutes), "c": content},
+        )
+
+
+def test_expired_items_hidden_from_list(engine):
+    """已过期但尚未清扫的条目，不出现在历史列表/收藏/时间线（§9.9）。"""
+    history_service.save_item(engine, _item("expired note"))
+    history_service.save_item(engine, _item("live note"))
+    _set_expired(engine, "expired note", -10)
+    _set_expired(engine, "live note", +30)
+
+    assert [i.content for i in history_service.list_recent(engine)] == ["live note"]
+    assert [i.content for i in history_service.list_grouped(engine)[0][1]] == ["live note"]
+
+    from services import history_service as hs
+
+    with engine.begin() as conn:
+        conn.execute(text(
+            "UPDATE clipboard_items SET favorite = 1 WHERE content = 'expired note'"))
+    assert hs.list_favorites(engine) == []
+
+
+def test_expired_items_hidden_from_search(engine):
+    """已过期条目的正文也不该被搜到（FTS / CJK LIKE / 正则三条路径）。"""
+    history_service.save_item(engine, _item("expired needle xyz"))
+    history_service.save_item(engine, _item("live needle xyz"))
+    history_service.save_item(engine, _item("过期内容 秘密"))
+    _set_expired(engine, "expired needle xyz", -10)
+    _set_expired(engine, "过期内容 秘密", -10)
+
+    assert [r.content for r in history_service.search_items(engine, "needle")] == \
+        ["live needle xyz"]                                    # FTS
+    assert [r.content for r in history_service.search_items(engine, "过期内容")] == []  # LIKE
+    assert [r.content for r in history_service.search_items(engine, "xyz", regex=True)] == \
+        ["live needle xyz"]                                    # 正则
+
+
+def test_sensitive_content_not_searchable(engine):
+    """敏感条目搜不到（§9.17）：否则输入候选口令看是否命中即可反推遮蔽内容。"""
+    history_service.save_item(engine, _item("secret hunter2 token"))
+    history_service.save_item(engine, _item("public hunter2 note"))
+    history_service.save_item(engine, _item("中文 机密内容"))
+
+    def _id_of(fragment: str) -> int:
+        return next(i.id for i in history_service.list_recent(engine)
+                    if fragment in i.content)
+
+    history_service.set_sensitive(engine, _id_of("secret"), True)
+    history_service.set_sensitive(engine, _id_of("机密"), True)
+
+    # 列表仍看得到（渲染为遮蔽态），只是搜不到
+    assert len(history_service.list_recent(engine)) == 3
+    # FTS 路径：被遮蔽的那条不再命中，未遮蔽的照常
+    assert [r.content for r in history_service.search_items(engine, "hunter2")] == \
+        ["public hunter2 note"]
+    assert history_service.search_items(engine, "token") == []
+    # CJK LIKE 路径
+    assert history_service.search_items(engine, "机密") == []
+    # 正则路径（内存过滤兜底）
+    assert [r.content for r in history_service.search_items(engine, "hunter2", regex=True)] == \
+        ["public hunter2 note"]
+
+
+def test_set_expires_toggle(engine):
+    """逐条设置临时保存（§9.9）：到期即不可见，取消后回到永久条目。"""
+    history_service.save_item(engine, _item("temp me"))
+    item_id = history_service.list_recent(engine)[0].id
+
+    assert history_service.set_expires(engine, item_id, 30) is True
+    assert history_service.list_recent(engine)[0].expires_at != ""
+
+    # 「到期」后不必等清扫定时器：读取路径立刻过滤
+    _set_expired(engine, "temp me", -1)
+    assert history_service.list_recent(engine) == []
+
+    # 取消临时保存 → 回永久条目（清扫没跑到之前仍能救回来）
+    assert history_service.set_expires(engine, item_id, 0) is True
+    assert history_service.list_recent(engine)[0].expires_at == ""
+
+    assert history_service.set_expires(engine, 0, 5) is False  # 未落库条目
+
+
+def test_unmark_sensitive_restores_searchability(engine):
+    """取消敏感标记后又能搜到（过滤是查询层行为，不是一次性删索引）。"""
+    from services.search_service import SearchService
+
+    history_service.save_item(engine, _item("toggle me 4u8123"))
+    item_id = history_service.list_recent(engine)[0].id
+    svc = SearchService(engine)
+    assert svc.search("4u8123") == [item_id]
+
+    history_service.set_sensitive(engine, item_id, True)
+    assert svc.search("4u8123") == []
+
+    history_service.set_sensitive(engine, item_id, False)
+    assert svc.search("4u8123") == [item_id]

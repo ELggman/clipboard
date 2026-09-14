@@ -73,7 +73,16 @@ class ClipboardWatcher(QObject):
 
     @staticmethod
     def _parse(pb: NSPasteboard) -> ClipboardItem | None:
-        source_app = ClipboardWatcher._frontmost_app()
+        """解析剪贴板内容，并补上「来源应用」身份（§9.5 排除匹配用）。"""
+        item = ClipboardWatcher._parse_payload(pb)
+        if item is not None:
+            (item.source_app,
+             item.source_app_id) = ClipboardWatcher._frontmost_app()
+        return item
+
+    @staticmethod
+    def _parse_payload(pb: NSPasteboard) -> ClipboardItem | None:
+        """按类型解析（图片 → 文件 → URL → 文本/代码）；来源应用由 `_parse` 补。"""
 
         # 1) Image：PNG 优先，TIFF 兜底。
         #    必须放在 File 之前：应用内复制图片（截图/VS Code/Safari）时
@@ -86,7 +95,6 @@ class ClipboardWatcher(QObject):
             return ClipboardItem(
                 type=IMAGE,
                 data=bytes(data),
-                source_app=source_app,
                 hash=ClipboardWatcher._digest(bytes(data)),
             )
 
@@ -101,7 +109,6 @@ class ClipboardWatcher(QObject):
                 type=FILE,
                 content=path.name,
                 file_path=str(path),
-                source_app=source_app,
                 hash=ClipboardWatcher._digest(str(path)),
             )
 
@@ -109,7 +116,7 @@ class ClipboardWatcher(QObject):
         url = pb.stringForType_(NSPasteboardTypeURL)
         if url:
             return ClipboardItem(
-                type=URL, content=url, source_app=source_app,
+                type=URL, content=url,
                 hash=ClipboardWatcher._digest(url),
             )
         text = pb.stringForType_(NSPasteboardTypeString)
@@ -118,7 +125,7 @@ class ClipboardWatcher(QObject):
         # 简化启发式：http(s) 开头视为 URL（完整判断可后续加强）
         if text.startswith(("http://", "https://")):
             return ClipboardItem(
-                type=URL, content=text, source_app=source_app,
+                type=URL, content=text,
                 hash=ClipboardWatcher._digest(text),
             )
         # Code Mode（§8）：启发式检测，置信度 >= 0.80 → type=code；
@@ -128,7 +135,7 @@ class ClipboardWatcher(QObject):
         result = detect_code(text)
         if result is not None and result.confidence >= CODE_THRESHOLD:
             return ClipboardItem(
-                type=CODE, content=text, source_app=source_app,
+                type=CODE, content=text,
                 hash=ClipboardWatcher._digest(text),
                 language=result.language,
                 language_confidence=result.confidence,
@@ -137,20 +144,26 @@ class ClipboardWatcher(QObject):
                 is_structured=1 if result.is_structured else 0,
             )
         return ClipboardItem(
-            type=TEXT, content=text, source_app=source_app,
+            type=TEXT, content=text,
             hash=ClipboardWatcher._digest(text),
             language=result.language if result else "",
             language_confidence=result.confidence if result else 0.0,
         )
 
     @staticmethod
-    def _frontmost_app() -> str:
-        """监听时刻的前台应用名（复制动作的发起者），无需额外权限。"""
+    def _frontmost_app() -> tuple[str, str]:
+        """监听时刻的前台应用 (显示名, bundle id)，即复制动作的发起者；无需额外权限。
+
+        两个都取：显示名用于界面展示，bundle id 用于忽略列表匹配——`localizedName()`
+        随系统语言变（中文系统下微信是「微信」，英文系统是 "WeChat"），只存名字的话
+        用户排除过的应用换个语言就漏记了（§9.5）。
+        """
         try:
-            return NSWorkspace.sharedWorkspace().frontmostApplication().localizedName()
+            app = NSWorkspace.sharedWorkspace().frontmostApplication()
+            return app.localizedName() or "", app.bundleIdentifier() or ""
         except Exception:
             logger.exception("获取前台应用失败")
-            return ""
+            return "", ""
 
     @staticmethod
     def _digest(payload: str | bytes) -> str:

@@ -24,14 +24,16 @@ IMAGES_DIR = ROOT_DIR / "images"
 class PrivacyState(QObject):
     """隐私模式运行时状态：暂停监控开关（⌘⇧P / 设置页按钮共用）。
 
-    不是持久化配置——仅本次运行的暂停/恢复（新增.md §9.3/§9.8）。
+    暂停状态**持久化**到 settings.yaml 的 privacy.paused（新增.md §9.3/§9.8）：
+    用户开会前按 ⌘⇧P 暂停、中途重启应用，若这里回到「监控中」，就等于在用户
+    以为没在记录的时候继续记录——隐私模式最不能出的错。故启动时按配置恢复。
     """
 
     changed = Signal(bool)  # 是否已暂停
 
-    def __init__(self, parent: QObject | None = None):
+    def __init__(self, parent: QObject | None = None, paused: bool = False):
         super().__init__(parent)
-        self._paused = False
+        self._paused = paused
 
     @property
     def paused(self) -> bool:
@@ -120,14 +122,24 @@ def start_workspace(app: QApplication) -> None:
     window.show()
 
     # 隐私模式：⌘⇧P 暂停/恢复监听 → watcher 停止保存 + 状态栏指示（§9.3/§9.4）
-    privacy_state = PrivacyState(app)
+    paused = bool(config["privacy"].get("paused", False))
+    privacy_state = PrivacyState(app, paused=paused)
 
-    def on_privacy_changed(paused: bool) -> None:
-        watcher.set_paused(paused)
-        window.set_privacy_status(paused)
+    def on_privacy_changed(is_paused: bool) -> None:
+        watcher.set_paused(is_paused)
+        window.set_privacy_status(is_paused)
+        # 立即落盘：暂停状态要跨重启保持（深度合并，不影响其他设置）
+        config["privacy"]["paused"] = is_paused
+        from app.config import save_user_config
+
+        save_user_config({"privacy": {"paused": is_paused}})
 
     privacy_state.changed.connect(on_privacy_changed)
-    window.set_privacy_status(False)  # 初始「📋 监控中」
+    # 启动即按上次状态生效——只改状态栏而不停 watcher 等于「显示暂停、照旧记录」
+    watcher.set_paused(paused)
+    window.set_privacy_status(paused)
+    if paused:
+        logger.info("隐私模式：按上次设置恢复为「暂停监控」")
 
     # 关窗后（窗口隐藏）点 Dock 图标 → 应用激活 → 重新显示窗口
     from PySide6.QtCore import Qt
@@ -280,6 +292,10 @@ def start_workspace(app: QApplication) -> None:
             elif key == "privacy_ignored":
                 config["privacy"]["ignored_apps"] = list(
                     overrides["privacy"]["ignored_apps"])
+            elif key == "privacy_block_private_key":
+                # 私钥不保存开关即时生效（on_clipboard_changed 读内存 config）
+                config["privacy"]["block_private_key"] = bool(
+                    overrides["privacy"]["block_private_key"])
             elif key == "max_file_size":
                 # 文档大小上限即时生效（on_clipboard_changed 读内存 config）
                 config["history"]["max_file_size_mb"] = int(
@@ -301,28 +317,44 @@ def start_workspace(app: QApplication) -> None:
         {k: apply_setting(k) for k in ("theme", "font", "show_filename",
                                        "autostart", "max_items",
                                        "privacy_policy", "privacy_temp",
-                                       "privacy_ignored", "max_file_size",
+                                       "privacy_ignored",
+                                       "privacy_block_private_key",
+                                       "max_file_size",
                                        "dedupe_scope",
                                        "session_delete_policy")},
         engine=engine,
         privacy_state=privacy_state,
     )
 
-    # 自动删除：每日清扫一次（启动 1 分钟后首扫）
+    # 自动删除（§9.9/§9.10）：两条节奏不同的清扫，别共用一个定时器——
+    #   保留天数（§9.10）是「按天」的粗粒度策略，每日一次足够；
+    #   临时条目过期（§9.9）是按分钟设定的（1/5/10/30 分钟），
+    #   每 24h 才扫一次会让「1 分钟过期」的内容实际留存一整天。
+    #   （即使没扫到，读取路径也会按 expires_at 过滤，见 services/item_filters.py）
     from PySide6.QtCore import QTimer
 
-    def sweep_old_history() -> None:
-        # 按保留天数清扫（置顶豁免，§9.10/§9.22）+ 过期临时条目（§9.9）
-        removed_files: list[str] = []
-        days = int(config["history"]["auto_delete_days"])
-        if days > 0:
-            removed_files += history_service.delete_older_than(engine, days)
-        removed_files += history_service.delete_expired(engine)
-        for path in removed_files:
+    def _purge_files(paths: list[str]) -> None:
+        for path in paths:
             # 仍被引用（其他会话行/收藏快照）的图片保留
             if not history_service.is_path_still_referenced(engine, path):
                 image_service.delete(path)
-        if removed_files:
+
+    def sweep_old_history() -> None:
+        # 按保留天数清扫（置顶豁免，§9.10/§9.22）
+        days = int(config["history"]["auto_delete_days"])
+        removed_files, deleted = (history_service.delete_older_than(engine, days)
+                                  if days > 0 else ([], 0))
+        if deleted:
+            _purge_files(removed_files)
+            window._reload_history()
+
+    def sweep_expired() -> None:
+        # 过期临时条目（§9.9）：到点即删，顺带清图片文件。
+        # 刷新看 deleted 而非 removed_files——到点的多半是文本条目，
+        # 没有文件路径，只看文件的话界面上那条会一直赖着不走。
+        removed_files, deleted = history_service.delete_expired(engine)
+        if deleted:
+            _purge_files(removed_files)
             window._reload_history()
 
     sweep_timer = QTimer(app)
@@ -330,6 +362,12 @@ def start_workspace(app: QApplication) -> None:
     sweep_timer.timeout.connect(sweep_old_history)
     sweep_timer.start()
     QTimer.singleShot(60_000, sweep_old_history)
+
+    expired_timer = QTimer(app)
+    expired_timer.setInterval(60 * 1000)
+    expired_timer.timeout.connect(sweep_expired)
+    expired_timer.start()
+    QTimer.singleShot(10_000, sweep_expired)
 
     # 闭环：监听 → 隐私管线（排除/敏感策略）→ 图片落盘 → 去重落库 → UI 刷新
     def on_clipboard_changed(item: ClipboardItem) -> None:
@@ -999,14 +1037,18 @@ def apply_privacy_policy(item: ClipboardItem, privacy: dict) -> str:
     副作用：按策略修改 item.sensitive / sensitive_type / expires_at。
     日志一律不含剪贴板原文（§9.23）。
     """
-    if item.source_app and item.source_app in privacy["ignored_apps"]:
-        logger.info("Clipboard item ignored source_app=%s"
-                    " reason=application_exclusion", item.source_app)
+    from services.app_identity import matches as app_matches
+
+    if app_matches(privacy["ignored_apps"], item.source_app, item.source_app_id):
+        logger.info("Clipboard item ignored source_app=%s source_app_id=%s"
+                    " reason=application_exclusion",
+                    item.source_app, item.source_app_id)
         return "excluded"
 
     # url 跳过：微信等分享链接的 token=/key= 查询参数是常态（误判修复）；
     # detect() 内还有 http(s) 兜底
     if item.type in ("text", "code") and item.content:
+        from services.sensitive_detector import STRICT_TYPES
         from services.sensitive_detector import detect as detect_sensitive
 
         result = detect_sensitive(item.content)
@@ -1014,6 +1056,15 @@ def apply_privacy_policy(item: ClipboardItem, privacy: dict) -> str:
             item.sensitive = 1
             item.sensitive_type = result.sensitive_type
             policy = privacy.get("policy", "warn")
+            # §9.15：私钥一旦落库就收不回来（能冒充身份、又不像口令能改），
+            # 默认策略下自动升级为「不保存」。用户显式选了别的策略则以其为准，
+            # 这条升级本身也能在设置页关掉（privacy.block_private_key）。
+            if (policy == "warn" and result.sensitive_type in STRICT_TYPES
+                    and privacy.get("block_private_key", True)):
+                logger.info("Sensitive clipboard detected type=%s"
+                            " action=ignore reason=strict_type",
+                            result.sensitive_type)
+                return "sensitive_ignore"
             if policy == "ignore":
                 logger.info("Sensitive clipboard detected type=%s"
                             " action=ignore", result.sensitive_type)

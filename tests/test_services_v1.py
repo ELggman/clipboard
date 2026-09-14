@@ -365,7 +365,8 @@ def test_delete_expired(tmp_path):
             "UPDATE clipboard_items SET expires_at = :t WHERE content = 'still valid'"),
             {"t": datetime.datetime.now() + datetime.timedelta(minutes=30)})
 
-    assert history_service.delete_expired(eng) == []
+    removed_files, deleted = history_service.delete_expired(eng)
+    assert (removed_files, deleted) == ([], 1)  # 文本条目没有文件路径，但过期那条确实删了
     with eng.connect() as conn:
         remaining = [r[0] for r in conn.execute(
             text("SELECT content FROM clipboard_items")).fetchall()]

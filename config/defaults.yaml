@@ -19,7 +19,13 @@ history:
 privacy:
   policy: warn             # warn(提醒,保存但遮蔽显示) / ignore(不保存) / save_temporarily(临时保存)
   temp_minutes: 5          # save_temporarily 的到期分钟数
-  ignored_apps: []         # 来源应用排除列表，如 ["1Password"]（§9.5）
+  block_private_key: true  # 私钥类内容一律不保存（§9.15，默认建议 Do Not Save）
+  paused: false            # 暂停监控（§9.3）：持久化，重启后保持暂停状态
+  ignored_apps: []         # 来源应用排除列表（§9.5）。两种写法都支持，混用亦可：
+                           #   - Code                      （旧格式：只按显示名匹配）
+                           #   - {name: Code, bundle_id: com.microsoft.VSCode}
+                           # 新格式额外记 bundle id——localizedName() 随系统语言变
+                           # （中文系统下微信是「微信」），只存名字的话换个语言就漏记
 
 # 会话（v4）：任务型内容分组。激活会话 = 新复制内容保存目标，重启恢复
 session:

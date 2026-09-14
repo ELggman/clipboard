@@ -14,6 +14,7 @@ from app.types import ClipboardItem
 from database.engine import make_session_factory
 from database.models import ClipboardItem as ItemRow
 from database.models import Session
+from services import item_filters
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +52,7 @@ def list_recent(engine: Engine, limit: int = 500,
       必须走 Session（实测踩坑）
     """
     with make_session_factory(engine)() as session:
-        stmt = select(ItemRow).order_by(
+        stmt = select(ItemRow).where(item_filters.alive_orm()).order_by(
             ItemRow.pinned.desc(), ItemRow.created_at.desc(), ItemRow.id.desc())
         if session_id is not None:
             stmt = stmt.where(ItemRow.session_id == session_id)
@@ -154,6 +155,30 @@ def set_pinned(engine: Engine, item_id: int, pinned: bool) -> bool:
     return True
 
 
+def set_expires(engine: Engine, item_id: int, minutes: int) -> bool:
+    """设置/取消临时条目的到期时间（§9.9，历史页右键逐条设置）。
+
+    `minutes > 0` → `expires_at = now + minutes`；`<= 0` → 清空（回到永久条目）。
+    到期条目由 `delete_expired` 删除，在此之前读取路径就不返回它
+    （判据见 services/item_filters.py）。
+
+    返回是否成功（id=0 的未落库条目跳过）。
+    """
+    if not item_id:
+        return False
+    from datetime import timedelta
+
+    expires = datetime.now() + timedelta(minutes=minutes) if minutes > 0 else None
+    with engine.begin() as conn:
+        conn.execute(
+            text("UPDATE clipboard_items SET expires_at = :t WHERE id = :id"),
+            {"t": expires, "id": item_id},
+        )
+    logger.info("临时保存%s: id=%s",
+                f"已设为 {minutes} 分钟" if expires else "已取消", item_id)
+    return True
+
+
 def set_sensitive(engine: Engine, item_id: int, sensitive: bool) -> bool:
     """手动标记/取消敏感（右键菜单，§9.17 补充）。
 
@@ -174,13 +199,15 @@ def set_sensitive(engine: Engine, item_id: int, sensitive: bool) -> bool:
     return True
 
 
-def delete_older_than(engine: Engine, days: int) -> list[str]:
+def delete_older_than(engine: Engine, days: int) -> tuple[list[str], int]:
     """删除 N 天前且未置顶的记录（自动删除策略，置顶条目豁免）。
 
-    返回被删图片的文件路径，供调用方清理磁盘文件。
+    返回 (被删图片的文件路径, 被删条数)：路径供调用方清理磁盘文件，
+    条数供调用方判断**要不要刷新界面**——文本条目没有文件路径，
+    只看文件列表的话，删掉的全是文本时界面会一直停在旧数据上。
     """
     if days <= 0:
-        return []
+        return [], 0
     from datetime import timedelta
 
     cutoff = datetime.now() - timedelta(days=days)
@@ -192,17 +219,17 @@ def delete_older_than(engine: Engine, days: int) -> list[str]:
         ).fetchall()
         ids = [row[0] for row in rows]
         if not ids:
-            return []
+            return [], 0
     with engine.begin() as conn:
         _delete_rows_and_rebuild(conn, ids)
     logger.info("自动删除 %d 条旧历史（%d 天前）", len(ids), days)
-    return [row[1] for row in rows if row[1]]
+    return [row[1] for row in rows if row[1]], len(ids)
 
 
-def delete_expired(engine: Engine) -> list[str]:
+def delete_expired(engine: Engine) -> tuple[list[str], int]:
     """删除已过期的临时条目（save_temporarily 策略，§9.9）。
 
-    返回图片文件路径供调用方清理磁盘文件。
+    返回 (图片文件路径, 删除条数)，语义同 `delete_older_than`。
     """
     now = datetime.now()
     with engine.connect() as conn:
@@ -213,11 +240,11 @@ def delete_expired(engine: Engine) -> list[str]:
         ).fetchall()
         ids = [row[0] for row in rows]
         if not ids:
-            return []
+            return [], 0
     with engine.begin() as conn:
         _delete_rows_and_rebuild(conn, ids)
     logger.info("已删除 %d 条过期临时条目", len(ids))
-    return [row[1] for row in rows if row[1]]
+    return [row[1] for row in rows if row[1]], len(ids)
 
 
 def trim_history(engine: Engine, max_items: int) -> int:
@@ -254,6 +281,7 @@ def list_favorites(engine: Engine, limit: int = 500) -> list[ClipboardItem]:
         rows = session.execute(
             select(ItemRow)
             .where(ItemRow.favorite == 1)
+            .where(item_filters.alive_orm())
             .order_by(ItemRow.created_at.desc(), ItemRow.id.desc())
             .limit(limit)
         ).scalars().all()
@@ -282,7 +310,7 @@ def list_grouped(engine: Engine, limit: int = 500,
         return f"{dt.year}年{dt.month}月"
 
     with make_session_factory(engine)() as session:
-        stmt = select(ItemRow).order_by(
+        stmt = select(ItemRow).where(item_filters.alive_orm()).order_by(
             ItemRow.created_at.desc(), ItemRow.id.desc())
         if session_id is not None:
             stmt = stmt.where(ItemRow.session_id == session_id)

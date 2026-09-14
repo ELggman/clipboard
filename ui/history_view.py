@@ -43,7 +43,9 @@ from PySide6.QtWidgets import (
 
 logger = logging.getLogger(__name__)
 
+from app.types import TEMP_MINUTE_OPTIONS
 from ui.animations import HoverAnimator
+from ui.fluent_combo import FluentComboBox
 from ui.icons import icon as ui_icon
 
 ROLE_ITEM = Qt.ItemDataRole.UserRole + 1  # QStandardItem 里存 ClipboardItem
@@ -336,7 +338,12 @@ class HistoryDelegate(QStyledItemDelegate):
                    small: bool, avail: int) -> None:
         font = self._font(small=small)
         painter.setFont(font)
-        elided = QFontMetrics(font).elidedText(text, Qt.TextElideMode.ElideRight, avail)
+        # 单行渲染：先按 compute_preview 的同一手法压平空白。遮蔽文本可能是多行的
+        # （多行 .env 会被**逐处**遮蔽、原行结构保留），点式 drawText 虽不会真的
+        # 换行（实测墨迹仍落在一行内），但两行会挤成 `localhostDB_PASSWORD=…`
+        # 这种连读，且换行宽度为 0 → elidedText 低估宽度、省略位置偏后。
+        flat = " ".join(text.split())
+        elided = QFontMetrics(font).elidedText(flat, Qt.TextElideMode.ElideRight, avail)
         painter.drawText(x, baseline_y, elided)
 
     @staticmethod
@@ -567,7 +574,7 @@ class HistoryView(QWidget):
         self._session_tag_label.setSizePolicy(
             QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
         session_row.addWidget(self._session_tag_label)
-        self._session_combo = QComboBox()
+        self._session_combo = FluentComboBox()
         self._session_combo.setObjectName("sessionCombo")
         # 按钮宽度随内容自适应（最宽项；长会话名可能到 170 上限省略号），
         # 弹出列表也随内容。combo 不加 stretch——stretch + maxWidth 会产生
@@ -1005,6 +1012,19 @@ class HistoryView(QWidget):
         menu.addAction(sens_label).triggered.connect(
             lambda: self._toggle_sensitive(item))
 
+        # 临时保存（§9.9）：逐条设置到期时间——全局策略之外的用户主动选择
+        temp_title = (f"临时保存（{item.expires_at[5:16]} 到期）"
+                      if item.expires_at else "临时保存")
+        temp_menu = menu.addMenu(temp_title)
+        self._active_menus.append(temp_menu)
+        for minutes in TEMP_MINUTE_OPTIONS:
+            temp_menu.addAction(f"{minutes} 分钟").triggered.connect(
+                lambda _=False, m=minutes: self._set_temp_expiry(item, m))
+        if item.expires_at:
+            temp_menu.addSeparator()
+            temp_menu.addAction("取消临时保存").triggered.connect(
+                lambda: self._set_temp_expiry(item, 0))
+
         # 收藏：单一入口（快速收藏 ★ / 具体收藏夹 / 新建收藏夹）
         fav_menu = menu.addMenu("收藏")
         self._active_menus.append(fav_menu)
@@ -1076,6 +1096,29 @@ class HistoryView(QWidget):
         if self._refresh_cb:
             self._refresh_cb()  # 先刷新（会重置状态栏），再给反馈
         self.feedback.emit(label)  # 状态栏即时反馈（收藏后可见可感）
+
+    def _set_temp_expiry(self, item, minutes: int) -> None:
+        """设置/取消临时条目（§9.9）：到期由清扫删除，期间也不可见不可搜。
+
+        `minutes <= 0` = 取消临时保存。
+        """
+        if not self._engine or not item.id:
+            logger.warning("条目未落库，无法设置临时保存: id=%s", item.id)
+            return
+        from datetime import datetime, timedelta
+
+        from services import history_service
+
+        history_service.set_expires(self._engine, item.id, minutes)
+        # 内存同步：菜单文案与后续操作都读 item.expires_at，格式与 _to_item 一致
+        item.expires_at = (
+            (datetime.now() + timedelta(minutes=minutes)).strftime("%Y-%m-%d %H:%M:%S")
+            if minutes > 0 else "")
+        label = (f"已设为 {minutes} 分钟临时条目" if minutes > 0 else "已取消临时保存")
+        logger.info("临时保存设置: id=%s minutes=%s", item.id, minutes)
+        if self._refresh_cb:
+            self._refresh_cb()  # 先刷新（会重置状态栏），再给反馈
+        self.feedback.emit(label)
 
     def _toggle_sensitive(self, item) -> None:
         """手动标记/取消敏感：写库 + 内存同步（列表遮蔽立即生效）。"""

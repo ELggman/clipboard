@@ -8,6 +8,10 @@ IMAGE = "image"
 FILE = "file"
 CODE = "code"          # 代码模式：启发式检测置信度 ≥0.80 时标记（§8）
 
+# 临时条目的可选时长（分钟，§9.9）：设置页「临时保存时长」与历史页右键菜单共用，
+# 两处给出的选项必须一致——否则同一句「5 分钟」在两边含义不同。
+TEMP_MINUTE_OPTIONS = (1, 5, 10, 30)
+
 
 @dataclass
 class ClipboardItem:
@@ -18,6 +22,7 @@ class ClipboardItem:
     preview: str = ""         # 列表预览文案
     file_path: str = ""       # image/file 的存储路径
     source_app: str = ""      # 来源应用（监听时刻前台应用）
+    source_app_id: str = ""   # 来源应用 bundle id（不随系统语言变，§9.5 排除匹配用）
     hash: str = ""            # sha256，去重键
     data: bytes = b""         # 图片原始字节（落库前临时持有）
     created_at: str = ""      # 展示用时间戳（"%m-%d %H:%M"，落库后由 list_recent 填充）
