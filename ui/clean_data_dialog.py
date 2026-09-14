@@ -7,7 +7,6 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QComboBox,
     QDialog,
     QHBoxLayout,
     QLabel,
@@ -18,6 +17,7 @@ from PySide6.QtWidgets import (
 )
 
 from ui.dialogs import ConfirmDialog
+from ui.fluent_combo import FluentComboBox
 
 logger = logging.getLogger(__name__)
 
@@ -44,15 +44,15 @@ class CleanDataDialog(QDialog):
         # 筛选行：时间 + 类型 + 会话
         filter_row = QHBoxLayout()
         filter_row.setSpacing(6)
-        self._days = QComboBox()
+        self._days = FluentComboBox()
         for value, label in _CLEAN_OPTIONS:
             self._days.addItem(label, value)
         filter_row.addWidget(self._days)
-        self._types = QComboBox()
+        self._types = FluentComboBox()
         for value, label in _TYPE_OPTIONS:
             self._types.addItem(label, value)
         filter_row.addWidget(self._types)
-        self._sessions = QComboBox()
+        self._sessions = FluentComboBox()
         from services import session_service
 
         self._sessions.addItem("全部会话", None)

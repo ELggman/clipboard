@@ -89,6 +89,18 @@ DARK = {
     "tooltip_bg": "rgba(30, 30, 30, 0.92)",
 }
 
+# 当前生效的调色板（自绘控件取色用）：apply_theme 时更新。
+# 自绘控件（如 ui/fluent_combo.py）不能用 QSS 取色，改读这里；
+# 注意 rgba(...) 只适用于 QSS——QColor 不解析 rgba() 函数串（§9），
+# 自绘请只取十六进制项（content / separator / search_bg / accent_soft / text / secondary …）。
+_CURRENT_PALETTE: dict = LIGHT
+
+
+def current_palette() -> dict:
+    """返回当前生效的调色板字典（自绘控件取色）。"""
+    return _CURRENT_PALETTE
+
+
 _QSS = string.Template("""
 QMainWindow, QDialog {
     background: $window;
@@ -303,6 +315,36 @@ QWidget#itemDetail {
 QLabel#detailMeta { color: $secondary; font-size: 12px; }
 QLabel#detailStats { color: $secondary; font-size: 11px; padding-top: 2px; }
 
+/* 自绘下拉框（ui/fluent_combo.py）：闭合态由 paintEvent 自绘（不用 QSS，
+   规避 §9 的 QComboBox QSS 坑）；只有**弹层**（普通 QWidget/QListWidget）走 QSS。
+   弹层同 Quick Paste 范式：透明容器 + 圆角卡片——非透明顶层窗口直接写
+   border-radius 会露出直角残影，故圆角只画在内层卡片上 */
+QWidget#fluentComboPopup {
+    background: transparent;
+}
+QFrame#fluentComboCard {
+    background: $window;
+    border: 1px solid $separator;
+    border-radius: 8px;
+}
+QListWidget#fluentComboList {
+    background: transparent;
+    border: none;
+    outline: none;
+    font-size: 13px;
+}
+QListWidget#fluentComboList::item {
+    height: 28px;
+    border-radius: 6px;
+    padding: 0 8px;
+    color: $text;
+}
+QListWidget#fluentComboList::item:hover { background: $hover_item; }
+QListWidget#fluentComboList::item:selected {
+    background: $selection_bg;
+    color: $selection_text;
+}
+
 /* 按钮统一：默认 = 浅灰底 + 9px 圆角（设计规范 §5.1）。未指定
    objectName 的按钮（个别「取消」）也落到统一外观；各具名按钮
    （primary/secondary/ghost/…）用 id 规则覆盖默认底。 */
@@ -366,6 +408,9 @@ QScrollArea { background: transparent; border: none; }
 QWidget#settingsContainer { background: transparent; }
 
 /* QComboBox 全部保持 Qt 原生 macOS 外观，不写任何 QSS：
+   ⚠️ 现行做法：本应用已在调用点改用自绘下拉框 ui/fluent_combo.py
+   （Fluent 观感，避开下面的坑），下述约束针对**残留的真 QComboBox**依然成立。
+   ——
    实测（§9）在 macOS 上给 QComboBox 设 QSS 背景/border 会：
    1) 尾部 drop-down 区域渗出原生按钮的灰色矩形块；
    2) `border: 1px solid transparent` 渲染成顶部/边缘灰色线段；
@@ -630,6 +675,7 @@ def apply_theme(app: QApplication, mode: str = "system") -> str:
     Qt 6.8+ 的 QStyleHints.setColorScheme() 从根上切换整个应用的原生外观
     （macOS 上即设置 NSAppearance），原生控件随之正确变深/变浅，且不动 popup。
     """
+    global _CURRENT_PALETTE
     if mode == "system":
         # 跟随系统：先解除可能残留的强制外观，再读系统真实值
         app.styleHints().unsetColorScheme()
@@ -640,6 +686,7 @@ def apply_theme(app: QApplication, mode: str = "system") -> str:
         app.styleHints().setColorScheme(scheme)
         logger.info("强制原生外观: %s", scheme.name)
     palette = LIGHT if resolved == "light" else DARK
+    _CURRENT_PALETTE = palette          # 供自绘控件（fluent_combo 等）取色
     app.setPalette(_build_palette(palette))
     app.setStyleSheet(build_stylesheet(palette))
     logger.info("主题已应用: %s", resolved)

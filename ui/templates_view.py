@@ -16,7 +16,6 @@ from PySide6.QtGui import QCursor, QGuiApplication
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
-    QComboBox,
     QDialog,
     QFormLayout,
     QFrame,
@@ -39,6 +38,7 @@ from services.template.custom_vars import extra_insert_texts
 from services.template.errors import TemplateError
 from services.template.registry import custom_tooltip, is_preset
 from services.template_service import TemplateService
+from ui.fluent_combo import FluentComboBox
 from ui.template_components import (
     ROLE_FOLDER_COUNT,
     ROLE_FOLDER_NAME,
@@ -244,7 +244,7 @@ class TemplateEditorDialog(QDialog):
         l3 = QLabel("分类")
         l3.setObjectName("fieldLabel")
         row2.addWidget(l3)
-        self._folder_combo = QComboBox()
+        self._folder_combo = FluentComboBox()
         self._folder_combo.addItem("未分类", None)
         if self._svc is not None:
             for f in self._svc.list_folders():

@@ -13,7 +13,6 @@ import re
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QComboBox,
     QDialog,
     QFormLayout,
     QHBoxLayout,
@@ -36,6 +35,8 @@ from services.template.registry import (
     CustomVariable,
     names as known_names,
 )
+
+from ui.fluent_combo import FluentComboBox
 
 # 变量名合法性：与 parser 的 \w+ 一致（含中文，不含空格/标点）
 _NAME_RE = re.compile(r"^\w+$")
@@ -77,7 +78,7 @@ class VariableEditDialog(QDialog):
         self._desc.setFixedHeight(64)
         form.addRow("描述", self._desc)
 
-        self._source = QComboBox()
+        self._source = FluentComboBox()
         for src in _SOURCE_ORDER:
             self._source.addItem(SOURCE_LABELS[src], src)
         if variable is not None:
@@ -107,7 +108,7 @@ class VariableEditDialog(QDialog):
         self._command_edit.setPlaceholderText("如 date +%Y-%m-%d")
         self._config_stack.addWidget(self._command_edit)
         # state：状态下拉
-        self._state_combo = QComboBox()
+        self._state_combo = FluentComboBox()
         for label, val in _STATE_OPTIONS:
             self._state_combo.addItem(label, val)
         if variable and variable.source == SOURCE_STATE:
