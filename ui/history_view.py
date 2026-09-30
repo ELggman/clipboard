@@ -24,6 +24,7 @@ from PySide6.QtGui import (
     QStandardItemModel,
 )
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QAbstractScrollArea,
     QComboBox,
     QDialog,
@@ -490,6 +491,11 @@ class HistoryView(QWidget):
         self._list.setObjectName("historyList")
         self._list.setMouseTracking(True)  # hover 态需要
         self._list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # 逐像素滚动（默认 ScrollPerItem 会把触控板的像素级 pixelDelta
+        # 量化成整行，滑动呈「一格一格」无过渡）。像素模式后连续滑动 +
+        # macOS 原生惯性 = 顺滑；不拦截任何 Wheel 事件（横向手势机不受影响）
+        self._list.setVerticalScrollMode(
+            QAbstractItemView.ScrollMode.ScrollPerPixel)
         self._list.setWordWrap(False)
         self._list.setContextMenuPolicy(Qt.ContextMenuPolicy.DefaultContextMenu)
         # 条目间隔：白底下列表更易区分（随窗口缩放，见 resizeEvent）

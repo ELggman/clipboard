@@ -13,6 +13,7 @@ from pathlib import Path
 from PySide6.QtCore import QEvent, QModelIndex, Qt, Signal
 from PySide6.QtGui import QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QLabel,
     QListView,
     QListWidget,
@@ -83,6 +84,10 @@ class TimelineView(QWidget):
         self._list.setObjectName("historyList")
         self._list.setMouseTracking(True)
         self._list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # 逐像素滚动：默认 ScrollPerItem 会把触控板像素 delta 量化成整行
+        # （与历史页一致，见 history_view）
+        self._list.setVerticalScrollMode(
+            QAbstractItemView.ScrollMode.ScrollPerPixel)
         self._list.setSpacing(4)  # 条目间隔（与历史页一致）
         self._list.setModel(self._model)
         self._delegate = HistoryDelegate(self._list)

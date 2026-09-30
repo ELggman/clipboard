@@ -11,6 +11,7 @@ import logging
 from PySide6.QtCore import QEvent, QModelIndex, QPoint, QRect, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QCursor, QPainter, QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QDialog,
     QFrame,
     QHBoxLayout,
@@ -150,6 +151,10 @@ class CollectionsView(QWidget):
         self._items = QListView()
         self._items.setObjectName("historyList")
         self._items.setMouseTracking(True)
+        # 逐像素滚动（与历史页一致，见 history_view）：默认整行模式会把
+        # 触控板像素 delta 量化成整行，滑动一格一格
+        self._items.setVerticalScrollMode(
+            QAbstractItemView.ScrollMode.ScrollPerPixel)
         self._items.setModel(self._model)
         from ui.history_view import HistoryDelegate
 
