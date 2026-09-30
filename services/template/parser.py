@@ -12,7 +12,8 @@ import re
 from dataclasses import dataclass
 
 from .errors import CursorLimitError, InputError, TemplateError, UnknownVariableError
-from .registry import SOURCE_INPUT, names as known_names
+from .registry import SOURCE_COMMAND, SOURCE_INPUT, SOURCE_LABELS
+from .registry import names as known_names
 from .token import Token, TokenType
 
 # {{variable:params}} —— 变量名 \w+，可选 :params（params 不含 }）
@@ -50,7 +51,10 @@ def parse(template: str, custom_names: set[str] | None = None) -> list[Token]:
 
         if name not in _KNOWN:
             if name in custom_names:
-                tokens.append(Token(TokenType.CUSTOM, params=name,
+                # params 存**变量名**（查表键），args 存 `:后面那串`原文。
+                # 此前 params 只放 name、`:args` 直接丢弃——`{{weather:北京}}`
+                # 静默变成 `{{weather}}`（见 validate_template 的保存期校验）。
+                tokens.append(Token(TokenType.CUSTOM, params=name, args=params,
                                     position=m.start()))
                 pos = m.end()
                 continue
@@ -90,13 +94,42 @@ def parse(template: str, custom_names: set[str] | None = None) -> list[Token]:
     return tokens
 
 
-def validate_template(content: str, custom_names: set[str] | None = None) -> str | None:
-    """保存时验证模板内容。返回 None=合法，否则返回用户可读错误消息。"""
+def validate_args(tokens: list[Token],
+                  custom_vars: dict | None = None) -> str | None:
+    """参数用法校验：`{{name:参数}}` 只对 command 来源有意义。
+
+    custom_vars：name → CustomVariable。未知变量已由 parse 拦下，这里只管
+    「参数会不会生效」——其余来源（input/fixed/state）无处可用，此前一律
+    静默丢弃，用户写了 `{{邮件:张三}}` 却什么也没发生。
+    """
+    if not custom_vars:
+        return None
+    for t in tokens:
+        if t.type != TokenType.CUSTOM or not t.args.strip():
+            continue
+        var = custom_vars.get(t.params)
+        source = var.source if var is not None else ""
+        if source != SOURCE_COMMAND:
+            label = SOURCE_LABELS.get(source, source or "未知")
+            return (f"变量「{t.params}」的值来源是「{label}」，"
+                    f"不接受参数（`:{t.args}` 不会生效）——"
+                    f"参数只用于外部命令来源的脚本")
+    return None
+
+
+def validate_template(content: str, custom_names: set[str] | None = None,
+                      custom_vars: dict | None = None) -> str | None:
+    """保存时验证模板内容。返回 None=合法，否则返回用户可读错误消息。
+
+    只返回**消息**（不带异常类型），适合「保存时提示」；需要在解析失败时
+    保留具体异常类型（UnknownVariableError 等）的调用方，改用
+    `parse` + `validate_args`。
+    """
     try:
-        parse(content, custom_names=custom_names)
+        tokens = parse(content, custom_names=custom_names)
     except TemplateError as e:
         return str(e)
-    return None
+    return validate_args(tokens, custom_vars)
 
 
 def collect_inputs(tokens: list[Token], custom_vars: dict | None = None) -> list[InputRequest]:

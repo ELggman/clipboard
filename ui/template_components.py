@@ -46,6 +46,7 @@ from services.template.custom_vars import (
 )
 from services.template.registry import (
     CAT_CUSTOM,
+    CAT_SCRIPT,
     PRESET_VARIABLES,
     CustomVariable,
     VariableMeta,
@@ -636,6 +637,9 @@ class VariableLibraryPopup(QWidget):
       外部处理）
     - 只读数据从 config 读（load_favorite_variables）；外部增删自定义
       变量后调 set_custom_variables 再 rebuild
+    - **脚本变量**（`cw:` 值源，§7.4）由 set_script_variables 注入，单独
+      成组排在最前（内置在前、用户自建在后）；与自定义变量同名时以自定义
+      为准（同 load_custom_vars 的覆盖规则），不重复出现两条
     """
 
     insert_requested = Signal(str)
@@ -646,6 +650,7 @@ class VariableLibraryPopup(QWidget):
         self.setObjectName("variableLibrary")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self._custom: list[CustomVariable] = []
+        self._scripts: list[CustomVariable] = []
         self._rows: list[tuple[QPushButton, str]] = []
         lay = QVBoxLayout(self)
         lay.setContentsMargins(8, 8, 8, 8)
@@ -665,10 +670,18 @@ class VariableLibraryPopup(QWidget):
         """外部注入用户自定义变量（编辑弹窗增删时同步）。"""
         self._custom = list(custom)
 
+    def set_script_variables(self, scripts: list[CustomVariable]) -> None:
+        """外部注入脚本变量（`config/scripts` + `resources/scripts`）。
+
+        调用方应传**未被自定义变量顶掉**的那些（visible_script_variables）；
+        这里再兜一层同名去重，保证「展示的 = 求值生效的」。
+        """
+        self._scripts = list(scripts)
+
     # ---- 内容构建 ----
 
     def rebuild(self) -> None:
-        """按来源类别重排全部变量（内置 + 自定义），刷新 ★ 状态。"""
+        """按来源类别重排全部变量（内置 + 脚本 + 自定义），刷新 ★ 状态。"""
         while self._body_lay.count():
             item = self._body_lay.takeAt(0)
             w = item.widget()
@@ -684,6 +697,16 @@ class VariableLibraryPopup(QWidget):
                                       description="", usage="", example="",
                                       builtin=False))
             tooltips[c.insert()] = custom_tooltip(c)
+        custom_names = {c.insert() for c in self._custom}
+        for s in self._scripts:
+            # 同名自定义变量赢（load_custom_vars 的覆盖规则）——否则库里会
+            # 出现两条同名行，而其中一条求值时根本不生效
+            if is_preset(s.insert()) or s.insert() in custom_names:
+                continue
+            metas.append(VariableMeta(insert=s.insert(), category=CAT_SCRIPT,
+                                      description=s.description, usage="",
+                                      example="", builtin=True))
+            tooltips[s.insert()] = custom_tooltip(s)
         favs = set(load_favorite_variables())
         for cat, group in group_by_category(metas):
             title = QLabel(cat)

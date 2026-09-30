@@ -15,7 +15,8 @@ from sqlalchemy.engine import Engine
 from database.engine import make_session_factory
 from database.models import Snippet, SnippetFolder
 from services.template.custom_vars import load_custom_vars
-from services.template.parser import collect_inputs, parse, validate_template
+from services.template.parser import (collect_inputs, parse, validate_args,
+                                      validate_template)
 from services.template.renderer import render
 from services.template.variables import RenderContext
 
@@ -34,6 +35,39 @@ def _row_to_dict(row: Snippet) -> dict:
         "created_at": row.created_at,
         "updated_at": row.updated_at,
     }
+
+
+# config 键 → 变量关键字（template.date_format 等）
+_CONFIG_FORMAT_KEYS = (
+    ("date_format", "date"),
+    ("time_format", "time"),
+    ("datetime_format", "datetime"),
+)
+
+
+def _default_date_formats() -> dict[str, str]:
+    """config `template.date_format/time_format/datetime_format` → 变量默认格式。
+
+    这三个键此前是**死配置**（defaults.yaml 里有、全仓无人读，渲染走
+    `variables._DEFAULT_FORMATS` 硬编码）。现接上：`{{date}}` 等**无参数**时
+    用它们作全局默认；带参数（`{{date:YYYY年}}`）仍逐次覆盖。
+
+    值按 strftime 解释（与 defaults.yaml 内置值同格式）；读失败/缺键/空值
+    → 不放进结果，provider 回落到内置默认。
+    """
+    try:
+        from app.config import load_config
+
+        tpl = load_config().get("template", {}) or {}
+    except Exception:
+        logger.debug("读取模板默认日期格式失败，用内置默认", exc_info=True)
+        return {}
+    out: dict[str, str] = {}
+    for key, keyword in _CONFIG_FORMAT_KEYS:
+        value = str(tpl.get(key, "") or "").strip()
+        if value:
+            out[keyword] = value
+    return out
 
 
 class TemplateService:
@@ -92,7 +126,15 @@ class TemplateService:
                         trigger_mode: str = "tab") -> int:
         """创建模板。shortcut 冲突抛 ValueError；内容非法抛 TemplateError 子类。"""
         self._validate_new_shortcut(shortcut)
-        parse(content, custom_names=set(load_custom_vars()))  # 内容验证
+        custom_vars = load_custom_vars()
+        # 结构校验用 parse（失败保留具体异常类型，如 UnknownVariableError）；
+        # 参数用法校验用 validate_args（只给消息）。
+        tokens = parse(content, custom_names=set(custom_vars))
+        error = validate_args(tokens, custom_vars)
+        if error:
+            from services.template.errors import TemplateError
+
+            raise TemplateError(error)
         now = datetime.datetime.now()
         with make_session_factory(self._engine)() as session:
             sc = shortcut.strip().lower()
@@ -121,8 +163,10 @@ class TemplateService:
             if name is not None:
                 row.name = name
             if content is not None:
+                custom_vars = load_custom_vars()
                 error = validate_template(
-                    content, custom_names=set(load_custom_vars()))
+                    content, custom_names=set(custom_vars),
+                    custom_vars=custom_vars)
                 if error:
                     from services.template.errors import TemplateError
 
@@ -256,12 +300,30 @@ class TemplateService:
 
     # ---- 渲染流水线 ----
 
+    def collect_inputs_for(self, content: str,
+                           custom_vars: dict | None = None) -> list:
+        """只收集渲染所需输入，**不渲染**（触发链路第一次调用，§43）。
+
+        渲染有副作用：自定义变量的 command 值源会真的执行外部命令（甚至
+        有写文件/发通知这类副作用）。触发链路此前先渲染一次「只为拿
+        input_requests」、拿到用户输入后再渲染第二次——命令因此每次触发
+        执行两遍。而 input_requests 只依赖 token 流，与渲染结果无关，故
+        第一次调用改为纯解析：全程恰好渲染一次。
+
+        返回 list[InputRequest]（与 render_template 第三项同源同序）。
+        """
+        if custom_vars is None:
+            custom_vars = load_custom_vars()
+        tokens = parse(content, custom_names=set(custom_vars))
+        return collect_inputs(tokens, custom_vars)
+
     def render_template(self, content: str,
                         input_values: dict[str, str] | None = None,
                         clipboard_text: str | None = None,
                         selection_text: str | None = None,
                         now: datetime.datetime | None = None,
                         custom_vars: dict | None = None,
+                        app_name: str = "",
                         ) -> tuple[str, int | None, list]:
         """完整渲染：parse → 收集 input → 渲染。
 
@@ -269,6 +331,9 @@ class TemplateService:
         list[InputRequest]（{{input:name}} + 用户输入来源的自定义变量），
         input_values 未提供时供调用方收集用户输入后二次调用。
         custom_vars：name → CustomVariable；None 时读 config。
+        默认日期格式读 config（_default_date_formats）；日期输出靠 now= 注入。
+        app_name：触发瞬间捕获的目标应用名（命令值源的 CW_APP）——本应用
+        会因弹层/对话框夺走前台，渲染时现读 frontmostApplication() 不可靠。
         """
         if custom_vars is None:
             custom_vars = load_custom_vars()
@@ -282,6 +347,9 @@ class TemplateService:
                             else self._read_selection()),
             input_values=input_values or {},
             custom_vars=custom_vars,
+            date_formats=_default_date_formats(),
+            template=content,
+            app_name=app_name,
         )
         text, cursor_pos = render(tokens, ctx)
         return text, cursor_pos, inputs

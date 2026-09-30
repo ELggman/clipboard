@@ -1,4 +1,5 @@
 """模板服务测试：CRUD / shortcut 唯一 / 文件夹 / 搜索排序 / 使用统计。"""
+import datetime
 import sys
 from pathlib import Path
 
@@ -8,6 +9,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from services.template.errors import TemplateError, UnknownVariableError
 from services.template_service import TemplateService
+
+
+def seeded_template_count() -> int:
+    """迁移种入的模板总数（§101 基础模板）。
+
+    从迁移模块取真值（而不是写死魔数），断言「种了几条」的用例跟着走。
+    发货的变换模板已经撤回（v9，见 DEVELOPMENT.md §7.4），不进这里。
+    """
+    from database.migrations import _DEFAULT_TEMPLATES
+    return len(_DEFAULT_TEMPLATES)
 
 
 @pytest.fixture()
@@ -100,7 +111,7 @@ def test_folder_filter(svc):
     svc.create_template("A", "a1", "x", folder_id=fid)
     svc.create_template("B", "b1x", "y")
     assert len(svc.list_templates(folder_id=fid)) == 1
-    # 全部 = 2 个新建 + 4 个默认模板
+    # 全部 = 新建的 + 迁移种入的（基础）
     scs = {t["shortcut"] for t in svc.list_templates()}
     assert scs >= {"a1", "b1x", "shrug", "today", "uuid", "quote"}
 
@@ -136,7 +147,7 @@ def test_search_favorite_and_recent_first(svc):
 
 def test_search_empty_query_returns_all(svc):
     svc.create_template("A", "a1x", "x")
-    assert len(svc.search_templates("")) == 5  # 1 新建 + 4 默认
+    assert len(svc.search_templates("")) == 1 + seeded_template_count()
 
 
 # ---- 快捷操作 ----
@@ -186,6 +197,71 @@ def test_render_template_collects_inputs(svc):
         "Hello {{input:name}}", input_values={"name": "Alice"})
     assert text2 == "Hello Alice"
     assert [r.name for r in inputs2] == ["name"]
+
+
+def test_collect_inputs_for_does_not_render(svc, tmp_path):
+    """触发链路第一次调用只解析、**不渲染**——command 值源不得被执行。
+
+    回归：bootstrap 此前先渲染一次「只为拿 input_requests」、拿到用户输入
+    后再渲染第二次 → 命令值源每次触发执行两遍（副作用重复、随机类结果
+    出错）。input_requests 只依赖 token 流，与渲染结果无关。
+    """
+    from services.template.registry import CustomVariable
+
+    marker = tmp_path / "ran.txt"
+    cv = {"tick": CustomVariable(
+        name="tick", source="command",
+        config={"command": f"echo x >> {marker}; echo T"})}
+
+    inputs = svc.collect_inputs_for("{{input:who}} {{tick}}", custom_vars=cv)
+    assert [r.name for r in inputs] == ["who"]
+    assert not marker.exists()  # ← 收集输入阶段命令一次都没跑
+
+    svc.render_template("{{input:who}} {{tick}}", input_values={"who": "A"},
+                        clipboard_text="", selection_text="", custom_vars=cv)
+    assert marker.read_text().split() == ["x"]  # 渲染一次 = 执行一次
+
+
+def test_collect_inputs_for_matches_render_inputs(svc):
+    """collect_inputs_for 的返回值与 render_template 第三项同源同序。"""
+    from services.template.registry import CustomVariable
+
+    cv = {"ask": CustomVariable(name="ask", source="input")}
+    content = "{{input:a}} {{ask}} {{input:b}}"
+    assert (svc.collect_inputs_for(content, custom_vars=cv)
+            == svc.render_template(content, custom_vars=cv)[2])
+    assert [r.name for r in svc.collect_inputs_for(content, custom_vars=cv)] \
+        == ["a", "ask", "b"]
+
+
+def test_collect_inputs_for_validates_content(svc):
+    """非法内容在收集输入阶段就抛错（与渲染同一种异常，触发链路行为不变）。"""
+    with pytest.raises(UnknownVariableError):
+        svc.collect_inputs_for("{{nope}}")
+
+
+def test_default_date_formats_read_from_config(svc, tmp_path, monkeypatch):
+    """config template.date_format/time_format 曾无人读取（死配置）。
+
+    现接线：{{date}}/{{time}} 无参数时用 config 值；带参数仍逐次覆盖；
+    config 里缺键或空白的 datetime 回落内置默认。
+    """
+    import app.config
+
+    (tmp_path / "defaults.yaml").write_text(
+        "template:\n"
+        '  date_format: "%Y/%m/%d"\n'
+        '  time_format: "%H时%M分"\n'
+        '  datetime_format: "  "\n'      # 空白 → 当缺省处理
+        "  extra_variables: []\n",
+        encoding="utf-8")
+    monkeypatch.setattr(app.config, "CONFIG_DIR", tmp_path)
+    svc._read_clipboard = lambda: ""
+
+    text, _, _ = svc.render_template(
+        "{{date}}|{{time}}|{{datetime}}|{{date:YYYY}}",
+        now=datetime.datetime(2026, 9, 14, 8, 5, 0))
+    assert text == "2026/09/14|08时05分|2026-09-14 08:05:00|2026"
 
 
 def test_default_templates_seeded(svc):
@@ -603,3 +679,60 @@ def test_ax_matcher_include_ascii_still_matches_chinese(tmp_path):
     assert triggered[-1] == "问候"
     assert matcher.match_text("hello now", include_ascii=True) is True
     assert triggered[-1] == "now"
+
+
+# ---- 自定义变量参数：保存期校验（不静默丢弃）----
+
+def _isolate_config(tmp_path, monkeypatch, extra_variables):
+    """把 config 目录指到临时目录（隔离持久化，不触碰真实配置）。"""
+    import app.config
+
+    (tmp_path / "defaults.yaml").write_text(
+        "template:\n  extra_variables: []\n", encoding="utf-8")
+    import yaml
+
+    (tmp_path / "settings.yaml").write_text(
+        yaml.safe_dump({"template": {"extra_variables": extra_variables}},
+                       allow_unicode=True),
+        encoding="utf-8")
+    monkeypatch.setattr(app.config, "CONFIG_DIR", tmp_path)
+
+
+def test_create_template_rejects_args_on_non_command_source(tmp_path, monkeypatch, svc):
+    """`{{邮件:张三}}` 里参数不会生效 → 保存时拒绝（此前静默丢弃）。
+
+    参数是脚本的 `$1`，只有外部命令来源用得上；input/fixed/state 写了参数
+    等于写了句没人读的话——保存时挡掉，别让用户以为它生效了。
+    """
+    _isolate_config(tmp_path, monkeypatch, [
+        {"name": "邮件", "source": "input", "config": {}},
+    ])
+    with pytest.raises(TemplateError) as ei:
+        svc.create_template("T", "tpl1", "你好 {{邮件:张三}}")
+    assert "参数" in str(ei.value) and "邮件" in str(ei.value)
+    # 不带参数照常保存
+    assert svc.create_template("T2", "tpl2", "你好 {{邮件}}") > 0
+
+
+def test_update_template_rejects_args_on_non_command_source(tmp_path, monkeypatch, svc):
+    _isolate_config(tmp_path, monkeypatch, [
+        {"name": "loc", "source": "fixed", "config": {"text": "北京"}},
+    ])
+    tid = svc.create_template("A", "aaa1", "{{loc}}")
+    with pytest.raises(TemplateError):
+        svc.update_template(tid, content="{{loc:上海}}")
+    assert svc.get_template(tid)["content"] == "{{loc}}"   # 未写坏
+
+
+def test_command_var_args_allowed(tmp_path, monkeypatch, svc):
+    """command 来源带参数合法（参数是脚本的 $1..）。"""
+    _isolate_config(tmp_path, monkeypatch, [
+        {"name": "sh", "source": "command", "config": {"command": "echo $1"}},
+    ])
+    assert svc.create_template("S", "sh1", "{{sh:甲 乙}}") > 0
+
+
+def test_create_template_still_raises_specific_errors(svc):
+    """结构错误仍保留具体异常类型（create_template 契约不变）。"""
+    with pytest.raises(UnknownVariableError):
+        svc.create_template("Bad", "badx", "Hello {{abc}}")

@@ -6,19 +6,26 @@
 - 「变量库」全量弹层按来源类别分组
 - `{{` 自动补全候选
 
-**值源分类**（扩展性设计，见 DEVELOPMENT.md §变量）：
-每次渲染时一个变量的值只能来自一个源头——`系统状态`（OS 给的）、
-`用户输入`（弹窗问）、`上下文标记`（插入位置）、`外部计算`（命令/脚本，
-未实现）。`VariableMeta.value_source` 记录该分类；用户自定义变量当前
-只能走「用户输入」（见 custom_default_tooltip），未来可扩展 value_source
-声明外部计算值源（接口已预留，执行未实现）。
+**两个独立维度**（见 DEVELOPMENT.md §变量）：
+- `category`（CAT_*）——**UI 分组**用，决定胶囊区/变量库的展示顺序
+- `value_source`（SRC_*）——**值源分类**，记录「这个变量的值由谁产生」：
+  `系统状态`（OS 给的）/`用户输入`（弹窗问）/`上下文标记`（插入位置）/
+  `外部计算`（命令/脚本）。内置变量目前没有「外部计算」实例——`SRC_EXTERNAL`
+  只登记了分类、无 `PRESET_VARIABLES` 使用它。
+
+自定义变量的值来源走**另一套运行时注册表**：`SOURCE_*` 四种（input/fixed/
+command/state），由 `services/template/value_sources.py` 的 provider 求值——
+即内置变量的 `value_source` 是**只读元数据**，不参与求值分发。
 """
 from dataclasses import dataclass, field
+
+from .scripts import SCRIPT_PREFIX
 
 # 来源类别（分组/筛选用；顺序即 UI 展示顺序）
 CAT_SYSTEM = "系统"
 CAT_INPUT = "用户输入"
 CAT_CONTEXT = "上下文"
+CAT_SCRIPT = "脚本"          # 脚本变量（cw: 值源，`config/scripts` + `resources/scripts`）
 CAT_CUSTOM = "自定义"
 
 # 值源分类（文档化；与 category 对应但独立维度）
@@ -81,14 +88,20 @@ class CustomVariable:
 
 
 def custom_tooltip(var: CustomVariable) -> str:
-    """自定义变量悬停多行说明：描述 + 值来源 + （按来源）配置摘要。"""
+    """自定义/脚本变量悬停多行说明：描述 + 值来源 + （按来源）配置摘要。
+
+    `cw:<名>`（脚本通道，§7.4）不算第五种值源——它仍是 `command`，只是
+    指向一个**文件**。文案上分开说，否则用户会去别处找一个叫 `cw` 的命令。
+    """
+    cmd = var.config.get("command", "") if var.source == SOURCE_COMMAND else ""
+    is_script = cmd.startswith(SCRIPT_PREFIX)
     desc = var.description or "自定义变量"
-    label = SOURCE_LABELS.get(var.source, var.source)
+    label = "脚本" if is_script else SOURCE_LABELS.get(var.source, var.source)
     lines = [desc, f"值来源：{label}"]
     if var.source == SOURCE_FIXED:
         lines.append(f"固定值：{var.config.get('text', '')}")
     elif var.source == SOURCE_COMMAND:
-        lines.append(f"命令：{var.config.get('command', '')}")
+        lines.append(f"脚本：{cmd}" if is_script else f"命令：{cmd}")
     elif var.source == SOURCE_STATE:
         lines.append(f"状态：{var.config.get('state', '')}")
     return "\n".join(lines)
@@ -172,11 +185,12 @@ def all_insert_texts() -> list[str]:
 
 def group_by_category(
         metas: list[VariableMeta]) -> list[tuple[str, list[VariableMeta]]]:
-    """按来源类别分组，保持固定顺序：系统 → 用户输入 → 上下文 → 自定义。
+    """按来源类别分组，保持固定顺序：系统 → 用户输入 → 上下文 → 脚本 → 自定义。
 
-    「变量库」弹层按此渲染分组标题。空组不出现。
+    「变量库」弹层按此渲染分组标题。空组不出现。脚本排在自定义之前——
+    内置的（含随应用发货的脚本）在前，用户自己写的在后。
     """
-    order = [CAT_SYSTEM, CAT_INPUT, CAT_CONTEXT, CAT_CUSTOM]
+    order = [CAT_SYSTEM, CAT_INPUT, CAT_CONTEXT, CAT_SCRIPT, CAT_CUSTOM]
     buckets: dict[str, list[VariableMeta]] = {c: [] for c in order}
     for m in metas:
         buckets.setdefault(m.category, []).append(m)
@@ -184,8 +198,12 @@ def group_by_category(
 
 
 def custom_default_tooltip() -> str:
-    """用户自定义变量的默认 tooltip（当前值源只能「用户输入」）。"""
-    return "自定义变量：触发时弹窗询问值"
+    """自定义变量的**兜底** tooltip（正常路径用 custom_tooltip，带值来源摘要）。
+
+    只在拿不到变量定义时用（tooltips 未注入 / 引用了已删除的变量），故不能
+    写死某种值来源——自定义变量有 input/fixed/command/state 四种（v8）。
+    """
+    return "自定义变量（值来源见「变量库」）"
 
 
 def next_input_insert(content: str, base: str) -> str:

@@ -153,6 +153,65 @@ def test_validate_template_custom_names():
     assert "未知变量" in validate_template("{{location}}")
 
 
+# ---- 自定义变量的参数（{{name:参数}}）----
+
+def test_parse_custom_args_carried():
+    """`{{weather:北京 上海}}`：params 仍是查表用的变量名，args 是参数原文。
+
+    此前 `:后面那串` 在解析期就被丢弃（token 只留 name）→ 命令来源的脚本
+    收不到任何参数，且完全没有提示。
+    """
+    tokens = parse("{{weather:北京 上海}}", custom_names={"weather"})
+    assert tokens[0].type == TokenType.CUSTOM
+    assert tokens[0].params == "weather"
+    assert tokens[0].args == "北京 上海"
+
+
+def test_parse_custom_without_args():
+    tokens = parse("{{weather}}", custom_names={"weather"})
+    assert tokens[0].args == ""
+
+
+def test_validate_args_rejects_non_command_source():
+    """参数只对 command 来源有意义：其余来源写了参数 → 保存期报错（不静默丢）。"""
+    from services.template.parser import validate_args
+    from services.template.registry import (
+        SOURCE_COMMAND,
+        SOURCE_FIXED,
+        SOURCE_INPUT,
+        CustomVariable,
+    )
+
+    vars_ = {
+        "who": CustomVariable(name="who", source=SOURCE_INPUT),
+        "loc": CustomVariable(name="loc", source=SOURCE_FIXED,
+                              config={"text": "北京"}),
+        "sh": CustomVariable(name="sh", source=SOURCE_COMMAND,
+                             config={"command": "echo hi"}),
+    }
+    tokens = parse("{{who:张三}}", custom_names=set(vars_))
+    msg = validate_args(tokens, vars_)
+    assert msg and "参数" in msg and "用户输入" in msg
+    # command 来源：参数合法（它是脚本的 $1）
+    assert validate_args(parse("{{sh:甲}}", custom_names=set(vars_)),
+                         vars_) is None
+    # 无参数：任何来源都合法
+    assert validate_args(parse("{{who}}", custom_names=set(vars_)),
+                         vars_) is None
+    # 不知道变量定义（custom_vars 缺省）→ 不误报
+    assert validate_args(tokens, None) is None
+
+
+def test_validate_template_with_custom_vars():
+    from services.template.registry import SOURCE_INPUT, CustomVariable
+
+    vars_ = {"who": CustomVariable(name="who", source=SOURCE_INPUT)}
+    assert validate_template("{{who:张三}}", custom_names={"who"},
+                             custom_vars=vars_) is not None
+    assert validate_template("{{who}}", custom_names={"who"},
+                             custom_vars=vars_) is None
+
+
 # ---- Renderer（§117-120）----
 
 def test_render_date_default():
@@ -179,6 +238,45 @@ def test_render_uuid():
 def test_render_date_custom_format():
     text, _ = _render("今天是 {{date:YYYY年MM月DD日}}")
     assert text == "今天是 2026年08月07日"
+
+
+# ---- 全局默认格式（config template.date_format 等，经 ctx.date_formats 注入）----
+
+def test_render_uses_context_default_formats():
+    """ctx.date_formats 作**无参数**时的全局默认（config 接线路径）。"""
+    text, _ = _render("{{date}} / {{time}} / {{datetime}}",
+                      date_formats={"date": "%d.%m.%Y",
+                                    "time": "%H时%M分",
+                                    "datetime": "%Y%m%d-%H%M"})
+    assert text == "07.08.2026 / 17时40分 / 20260807-1740"
+
+
+def test_token_params_override_context_default_formats():
+    """带参数逐次覆盖全局默认（{{date:YYYY/MM}} 无视 config 的 date_format）。"""
+    text, _ = _render("{{date:YYYY/MM}} vs {{date}}",
+                      date_formats={"date": "%d.%m.%Y"})
+    assert text == "2026/08 vs 07.08.2026"
+
+
+def test_context_default_formats_fall_back_when_empty():
+    """缺键/空串/None → 回落内置默认（不传 ctx.date_formats 的行为不回归）。
+
+    纯空白的值由调用方负责过滤（template_service._default_date_formats
+    会 strip 后跳过空值），provider 只认「假值」。
+    """
+    for formats in ({}, {"date": ""}, {"time": None}):
+        text, _ = _render("{{date}}", date_formats=formats)
+        assert text == "2026-08-07", formats
+
+
+def test_context_format_is_strftime_not_template_syntax():
+    """config 值按 **strftime** 解释，不过 map_format——`%a`/`%p` 不被改写。
+
+    若误走 map_format，「a」会被替换成「%P」→ 输出字面量「%P」而非周几缩写。
+    期望值现算（%a/%p 随系统 locale 变，不能写死 "Fri PM"）。
+    """
+    text, _ = _render("{{date}}", date_formats={"date": "%a %p"})
+    assert text == NOW.strftime("%a %p")
 
 
 def test_render_clipboard():
@@ -687,9 +785,17 @@ def test_tooltip_format():
 
 
 def test_custom_default_tooltip():
+    """兜底 tooltip 不得写死「用户输入」——自定义变量有四种值来源（v8）。
+
+    旧文案「触发时弹窗询问值」只对 input 来源成立，fixed/command/state
+    三种来源下是错的（该文案在 v8 值源重构后过期）。
+    """
     from services.template.registry import custom_default_tooltip
 
-    assert "弹窗" in custom_default_tooltip()
+    text = custom_default_tooltip()
+    assert "自定义变量" in text
+    assert "弹窗" not in text
+    assert "用户输入" not in text
 
 
 def test_custom_tooltip_by_source():
@@ -710,23 +816,53 @@ def test_custom_tooltip_by_source():
     assert "自定义变量" in custom_tooltip(CustomVariable(name="x"))
 
 
+def test_custom_tooltip_script_command():
+    """`cw:<名>` 的 tooltip 说「脚本」而不是「命令」——它指一个文件。
+
+    文案错了用户会去别处找一个叫 `cw` 的命令（§7.4 脚本通道）。
+    """
+    from services.template.registry import (SOURCE_COMMAND, CustomVariable,
+                                            custom_tooltip)
+
+    script = CustomVariable(name="upper", description="整段字母转大写",
+                            source=SOURCE_COMMAND,
+                            config={"command": "cw:upper"})
+    tip = custom_tooltip(script)
+    assert "整段字母转大写" in tip
+    assert "值来源：脚本" in tip
+    assert "脚本：cw:upper" in tip
+    # 普通 shell 命令仍是「命令」文案（来源没变，仍是 command）
+    shell = CustomVariable(name="d", source=SOURCE_COMMAND,
+                           config={"command": "date +%F"})
+    assert "值来源：外部命令" in custom_tooltip(shell)
+    assert "命令：date +%F" in custom_tooltip(shell)
+
+
 def test_group_by_category_order():
-    """分组顺序固定：系统 → 用户输入 → 上下文 → 自定义；空组不出现。"""
+    """分组顺序固定：系统 → 用户输入 → 上下文 → 脚本 → 自定义；空组不出现。"""
     from services.template.registry import (
+        CAT_CUSTOM,
+        CAT_SCRIPT,
         PRESET_VARIABLES,
         VariableMeta,
         group_by_category,
     )
 
-    custom = VariableMeta(insert="{{loc}}", category="自定义",
+    custom = VariableMeta(insert="{{loc}}", category=CAT_CUSTOM,
                           description="", usage="", example="", builtin=False)
-    groups = group_by_category(list(PRESET_VARIABLES) + [custom])
+    script = VariableMeta(insert="{{upper}}", category=CAT_SCRIPT,
+                          description="", usage="", example="", builtin=True)
+    groups = group_by_category(list(PRESET_VARIABLES) + [custom, script])
     cats = [c for c, _ in groups]
-    assert cats == ["系统", "用户输入", "上下文", "自定义"]
-    # 系统组包含 selection（新增），自定义组包含 loc
+    assert cats == ["系统", "用户输入", "上下文", "脚本", "自定义"]
+    # 系统组包含 selection（新增），脚本组含 upper，自定义组含 loc
     sys_vars = [m.insert for m in dict(groups)["系统"]]
     assert "{{selection}}" in sys_vars
+    assert dict(groups)["脚本"] == [script]
     assert dict(groups)["自定义"] == [custom]
+    # 只给预设 → 空组（脚本/自定义）不出现
+    assert [c for c, _ in group_by_category(list(PRESET_VARIABLES))] == [
+        "系统", "用户输入", "上下文"]
 
 
 def test_next_input_insert_auto_suffix():

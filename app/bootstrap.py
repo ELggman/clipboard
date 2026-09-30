@@ -642,6 +642,13 @@ def start_workspace(app: QApplication) -> None:
         except Exception:
             logger.exception("激活目标应用失败（继续尝试粘贴）")
 
+    def _localized_name(app) -> str:
+        """NSRunningApplication → 显示名（命令值源的 CW_APP）。取不到给空串。"""
+        try:
+            return (app.localizedName() or "") if app is not None else ""
+        except Exception:
+            return ""
+
     def _render_and_insert_impl(template: dict, delete_count: int = 0,
                                 cancel_ime: bool = False) -> None:
         """模板渲染 → （输入变量对话框）→ 模拟粘贴插入。
@@ -669,15 +676,22 @@ def start_workspace(app: QApplication) -> None:
         _trigger_ctx["app"] = None
         _trigger_ctx["selection"] = None
 
-        text, _cursor, inputs = template_service.render_template(
-            content, selection_text=selection)
+        # 只解析收集输入，**不渲染**：渲染会真执行 command 值源的命令，而
+        # 此前这里渲染一遍、拿到输入值后再渲染一遍 → 每次触发命令跑两遍
+        # （「随机抽一个」「生成密码」这类脚本结果随之出错、有副作用的重复
+        # 执行）。收集输入只依赖 token 流，与渲染结果无关。
+        inputs = template_service.collect_inputs_for(content)
+        # 目标应用（命令值源的 CW_APP + 粘贴前的焦点归还）：picker 流程在
+        # 热键瞬间捕获；tab 流程前台就是目标。**必须在弹层/对话框接管前台
+        # 之前定**——之后 frontmostApplication() 读到的是本应用自己。
+        target = (trigger_app
+                  or NSWorkspace.sharedWorkspace().frontmostApplication())
+        app_name = _localized_name(target)
         if inputs:
             # 全局触发：应用可能未激活，先激活再弹输入框（§40-41）。
             # ⚠️ 弹框会把前台让给本应用（对话框要可见），关框后必须把
             # 焦点还给目标应用再粘贴——否则 ⌘V 打进本应用自己。目标应用
             # 优先用触发时捕获的（picker 流程）；tab 流程前台就是目标。
-            target = (trigger_app
-                      or NSWorkspace.sharedWorkspace().frontmostApplication())
             # 激活本应用只为让输入框可见，但会连带触发 on_app_state 把隐藏
             # 的主窗口带出来——置 _suppress_window_show 抑制，只弹输入框。
             nonlocal _suppress_window_show
@@ -696,11 +710,17 @@ def start_workspace(app: QApplication) -> None:
                 _suppress_window_show = False
             _activate_target(target)
             text, _, _ = template_service.render_template(
-                content, input_values=values, selection_text=selection)
-        elif trigger_app is not None:
-            # 无 input 变量的 picker 流程：弹层关闭后前台可能仍是本应用 →
-            # 粘贴前先把焦点还给目标应用（tab 流程无需——前台本就是目标）。
-            _activate_target(trigger_app)
+                content, input_values=values, selection_text=selection,
+                app_name=app_name)
+        else:
+            # 无输入变量：此处才渲染（位置与原先一致——渲染在还焦点之前，
+            # 保证 {{clipboard}}/{{selection}} 读到的是触发时的值）。
+            text, _, _ = template_service.render_template(
+                content, selection_text=selection, app_name=app_name)
+            if trigger_app is not None:
+                # 无 input 变量的 picker 流程：弹层关闭后前台可能仍是本应用
+                # → 粘贴前先把焦点还给目标应用（tab 流程无需——前台本就是目标）。
+                _activate_target(trigger_app)
         template_service.record_usage(template["id"])
         # §95 日志安全：只记 id/shortcut，不记展开内容
         logger.info("模板触发: id=%s shortcut=%s",
@@ -1003,6 +1023,16 @@ def start_workspace(app: QApplication) -> None:
     act_pause.triggered.connect(privacy_state.toggle)
     privacy_state.changed.connect(
         lambda paused: act_pause.setText("恢复监控" if paused else "暂停监控"))
+
+    # 变量取值失败 → 系统通知（services 层不依赖 Qt，故注入回调）。
+    # 此前失败只写日志：用户看到插入了半句话，却不知道是脚本坏了。
+    def _report_var_failure(name: str, reason: str) -> None:
+        tray.showMessage(f"变量 {{{{{name}}}}} 取值失败", reason,
+                         QSystemTrayIcon.MessageIcon.Warning, 6000)
+
+    from services.template.value_sources import set_error_reporter
+
+    set_error_reporter(_report_var_failure)
     act_quit.triggered.connect(app.quit)
 
     # ⚠️ 点击托盘图标本身不显示主窗口（用户要求）：macOS 菜单栏 item 点击

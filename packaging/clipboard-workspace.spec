@@ -17,6 +17,9 @@ a = Analysis(
         ("../actions", "actions"),
         # 应用图标 PNG（运行时 setWindowIcon；icns 供 BUNDLE icon= 用）
         ("../resources/icon.png", "resources"),
+        # 随应用发货的脚本（`cw:<名>` 值源，见 DEVELOPMENT.md §7.4）。
+        # 漏了这行 → 打包版里写 {{脚本名}} 的模板全部 UnknownVariableError。
+        ("../resources/scripts", "resources/scripts"),
     ],
     hiddenimports=collect_submodules("actions"),
     hookspath=[],

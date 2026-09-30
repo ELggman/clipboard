@@ -23,3 +23,11 @@ class InputError(TemplateError):
 
 class RenderError(TemplateError):
     """渲染阶段错误（剪贴板读取失败等）。"""
+
+
+class VariableValueError(TemplateError):
+    """变量取值失败且策略为「放弃本次插入」（§变量-值源 on_error=cancel）。
+
+    由值源 provider 抛出、穿透渲染到触发链路——调用方据此**整次不插入**
+    （半句话插进正文比什么都不插更糟）。抛错前必经错误通道上报，用户看得见。
+    """

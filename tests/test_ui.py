@@ -641,7 +641,7 @@ def test_history_item_clicked_signal(tmp_path):
 def test_templates_view_save_and_validate(tmp_path):
     """模板页：编辑弹窗新建保存 → 列表出现；shortcut 冲突/变量错误提示。"""
     from database.engine import create_db_engine
-    from database.migrations import migrate
+    from database.migrations import _DEFAULT_TEMPLATES, migrate
     from services.template_service import TemplateService
     from ui.templates_view import TemplateEditorDialog, TemplatesView
 
@@ -651,7 +651,8 @@ def test_templates_view_save_and_validate(tmp_path):
     view = TemplatesView()
     view.set_context(engine)
     base_count = view._list.count()
-    assert base_count == 4  # 默认模板（§101）
+    # 基础模板（§101）——发货的变换模板已撤回（v9，见 §7.4）
+    assert base_count == len(_DEFAULT_TEMPLATES)
 
     # 新建弹窗 + 保存（含 shortcut/文件夹/触发方式）→ accept 后视图 reload
     dlg = TemplateEditorDialog(view, svc, None)
@@ -3031,3 +3032,55 @@ def test_main_window_search_only_on_history_page(tmp_path):
     pytest_app.processEvents()
     assert w._search.isVisible()          # 回到历史页恢复
     w.close()
+
+
+def test_editor_dialog_variable_library_scripts(tmp_path):
+    """模板编辑弹窗：「变量库」列出脚本变量，补全候选也含它们。
+
+    回归两处：① 发货脚本带来的变量最初只在补全候选里，变量库/胶囊区看不到
+    ——用户「看不到这些变量以及对应的描述信息」；② 注入原来只在变量增删时
+    发生，弹窗**刚打开**时补全与变量库都是空的。
+    """
+    from database.engine import create_db_engine
+    from database.migrations import migrate
+    from services.template.custom_vars import visible_script_variables
+    from services.template_service import TemplateService
+    from ui.templates_view import TemplateEditorDialog
+
+    engine = create_db_engine(tmp_path / "vl.db")
+    migrate(engine)
+    svc = TemplateService(engine)
+    dlg = TemplateEditorDialog(None, svc, None)   # None = 新建模板
+    try:
+        scripts = {v.insert() for v in visible_script_variables()}
+        assert "{{upper}}" in scripts
+        # ① 变量库拿到脚本变量（构造时即注入）
+        assert scripts <= {v.insert() for v in dlg._lib_popup._scripts}
+        # ② 补全候选含脚本变量（打开就能补出 {{upper}}）
+        assert "{{upper}}" in dlg._content._custom
+        # 悬停说明来自脚本自述
+        assert "转大写" in dlg._custom_tooltip_map()["{{upper}}"]
+    finally:
+        dlg.close()
+
+
+def test_script_variable_menu_is_readonly(tmp_path):
+    """右键脚本变量：不给编辑/删除，给的是「改脚本目录里的文件」的指引。"""
+    from database.engine import create_db_engine
+    from database.migrations import migrate
+    from services.template_service import TemplateService
+    from ui.templates_view import TemplateEditorDialog
+
+    engine = create_db_engine(tmp_path / "vm.db")
+    migrate(engine)
+    dlg = TemplateEditorDialog(None, TemplateService(engine), None)
+    try:
+        dlg._show_variable_menu("{{upper}}")
+        menu = dlg._menus[-1]
+        texts = [a.text() for a in menu.actions()]
+        assert len(texts) == 1
+        assert "脚本" in texts[0]
+        assert not menu.actions()[0].isEnabled()
+        menu.close()
+    finally:
+        dlg.close()

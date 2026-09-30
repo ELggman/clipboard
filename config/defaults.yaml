@@ -42,8 +42,8 @@ hotkey:
 template:
   picker_keycode: 1             # ⌘⇧S 打开模板 Picker（S = 1）
   default_trigger_mode: tab     # tab(Tab 触发) / boundary(词边界触发)
-  date_format: "%Y-%m-%d"
-  time_format: "%H:%M"
+  date_format: "%Y-%m-%d"       # {{date}}/{{time}}/{{datetime}} **无参数**时的默认格式
+  time_format: "%H:%M"          #   （strftime；带参数如 {{date:YYYY年MM月}} 逐次覆盖）
   datetime_format: "%Y-%m-%d %H:%M:%S"
   extra_variables: []           # 用户自定义变量（结构化：{name, description, source, config}）
                                 #   source: input(用户输入) / fixed(固定值) / command(外部命令) / state(系统状态)

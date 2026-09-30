@@ -22,5 +22,6 @@ class Token:
     type: TokenType
     value: str = ""                # TEXT 的文本内容
     params: str = ""               # INPUT 的 name / DATE 等的格式
+    args: str = ""                 # CUSTOM 的 `{{name:args}}` 参数原文
     position: int = 0              # 在原模板中的起始位置（错误定位）
     _extra: dict = field(default_factory=dict, repr=False)

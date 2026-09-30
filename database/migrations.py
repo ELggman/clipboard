@@ -12,7 +12,7 @@ from .models import Base
 
 logger = logging.getLogger(__name__)
 
-_SCHEMA_VERSION = 7
+_SCHEMA_VERSION = 9
 
 # 幂等扩展 DDL（FTS5 全文索引 + 常用索引）
 _EXTRA_DDL = [
@@ -43,6 +43,8 @@ def migrate(engine: Engine) -> None:
         _upgrade_v6_snippets_to_templates(engine)
     if current < 7:
         _upgrade_v7_image_hash_normalize(engine)
+    if current < 9:
+        _upgrade_v9_withdraw_shipped_templates(engine)
 
     with engine.begin() as conn:
         for ddl in _EXTRA_DDL:
@@ -225,6 +227,41 @@ _DEFAULT_TEMPLATES = [
     ("Markdown Quote", "quote", "> {{clipboard}}"),
 ]
 
+# v8 曾铺过、v9 撤回的变换模板（配 resources/scripts/ 里的脚本，见 §7.4）
+# (name, shortcut, content, description)
+#
+# ⚠️ 这段数据现在**只给 v9 清理用**，不要再拿去种模板。这批模板的输入是
+# 「选中的文本」，触发方式却是「在输入框里打 shortcut 词 + Tab」——第一个
+# 字母就会把选中的文本覆盖掉，输入从来拿不到；且结果又插回原处，原文没了
+# 也没法对照验证。形态本身不成立，变换类要重做成「对剪贴板条目执行」。
+WITHDRAWN_TEMPLATES_FOLDER = "变换"
+_WITHDRAWN_TEMPLATES = [
+    ("转大写", "up", "{{upper}}", "整段字母转大写"),
+    ("转小写", "lo", "{{lower}}", "整段字母转小写"),
+    ("标题化", "ti", "{{title}}", "每词首字母大写"),
+    ("清理空白", "cl", "{{trim}}", "去掉每行首尾空白与空行"),
+    ("去重行", "dd", "{{dedupe}}", "删掉重复行（保留首次出现的顺序）"),
+    ("行排序", "so", "{{sort}}",
+     "行排序；参数 desc 逆序 / num 按数值 / uniq 去重"),
+    ("加引号列表", "qt", "{{quote}}",
+     '每行变成 "a", "b"——拼 SQL IN / 代码数组用'),
+    ("CSV 转表格", "tb", "{{csv_table}}",
+     "逗号分隔转 Markdown 表格；参数 tab 用于制表符分隔"),
+    ("JSON 美化", "jp", "{{json_pretty}}", "2 空格缩进，中文不转义"),
+    ("JSON 抽字段", "jk", "{{json_pick:data.id}}",
+     "把参数 data.id 换成你的路径（如 items.0.name）"),
+    ("字符串转义", "es", "{{escape}}",
+     "转成能粘进 JSON/代码的形式；参数 unescape 反向还原"),
+    ("抽邮箱", "em", "{{extract}}", "把文本里的邮箱提取成列表"),
+    ("抽网址", "lu", "{{extract:url}}", "把文本里的 http(s) 链接提取成列表"),
+    ("抽数字", "nm", "{{extract:num}}", "把文本里的数字提取成列表"),
+    ("抽 IP", "ip", "{{extract:ip}}", "把文本里的 IPv4 提取成列表"),
+    ("天气", "wt", "{{weather}}",
+     "按 IP 定位的天气；参数写城市名，如 {{weather:北京}}"),
+    ("正在播放", "np", "{{now_playing}}",
+     "Spotify / 音乐 App 的当前曲目（首次会请求「自动化」权限）"),
+]
+
 
 def _upgrade_v6_snippets_to_templates(engine: Engine) -> None:
     """v5 → v6：模板模块——snippets 表重建 + snippet_folders 新表。
@@ -355,3 +392,43 @@ def _upgrade_v7_image_hash_normalize(engine: Engine) -> None:
             conn.execute(text("INSERT INTO items_fts(items_fts) VALUES('rebuild')"))
         if fixed or dropped:
             logger.info("v7：图片 hash 修正 %d 行，清理重复 %d 行", fixed, dropped)
+
+
+def _upgrade_v9_withdraw_shipped_templates(engine: Engine) -> None:
+    """v8 → v9：撤回发货的变换模板（形态不成立，见 §7.4）。
+
+    v8 曾把 17 个「内容变换」模板铺进「变换」文件夹，但它们拿不到输入：
+    触发靠打字，而打字的第一个字母就把要变换的选中文本覆盖掉了。改触发方式
+    也救不了（换成「抢在按键送达前读一次选中」只是让一个不合理的交互勉强
+    跑通），所以整批撤掉，变换类以后按「对剪贴板条目执行」重做。
+
+    **只删 v8 原样铺进去、之后没被动过的行**——name/shortcut/content 三项都
+    与当初一致才删。用户改过任何一个字，那一行就留下：迁移的整洁不该覆盖
+    用户的工作。同理，文件夹里若还有别的内容（用户自己往里加的）就保留文件
+    夹，清空了才删。
+
+    幂等：删干净后第二次跑找不到文件夹，直接返回。
+    """
+    removed = 0
+    left = 0
+    with engine.begin() as conn:
+        folder_id = conn.execute(text(
+            "SELECT id FROM snippet_folders WHERE name = :n"),
+            {"n": WITHDRAWN_TEMPLATES_FOLDER}).scalar()
+        if folder_id is None:
+            return
+        for name, shortcut, content, _description in _WITHDRAWN_TEMPLATES:
+            result = conn.execute(text(
+                "DELETE FROM snippets WHERE folder_id = :f AND shortcut = :sc"
+                " AND name = :n AND content = :c"),
+                {"f": folder_id, "sc": shortcut, "n": name, "c": content})
+            removed += result.rowcount or 0
+        left = conn.execute(text(
+            "SELECT COUNT(*) FROM snippets WHERE folder_id = :f"),
+            {"f": folder_id}).scalar() or 0
+        if not left:
+            conn.execute(text("DELETE FROM snippet_folders WHERE id = :f"),
+                         {"f": folder_id})
+    logger.info("v9 迁移：撤回发货变换模板（删除 %d 个，文件夹「%s」%s）",
+                removed, WITHDRAWN_TEMPLATES_FOLDER,
+                "一并删除" if not left else f"保留（里面还有 {left} 个模板）")

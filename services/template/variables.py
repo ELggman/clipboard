@@ -41,6 +41,16 @@ class RenderContext:
     selection_text: str = ""
     input_values: dict[str, str] = field(default_factory=dict)
     custom_vars: dict = field(default_factory=dict)  # name → CustomVariable
+    # 全局默认日期格式：关键字（date/time/datetime）→ **strftime** 串，来自
+    # config `template.date_format` 等（template_service 注入）。留空/缺键 →
+    # provider 回落到 _DEFAULT_FORMATS，故不传即旧行为。
+    date_formats: dict[str, str] = field(default_factory=dict)
+    # 触发时正在编辑的模板原文 / 目标应用名（命令值源的 CW_TEMPLATE/CW_APP）。
+    # app_name 必须由**触发瞬间**捕获：picker 流程弹出弹层/对话框后本应用会
+    # 夺走前台，此时再读 frontmostApplication() 拿到的是我们自己（见
+    # bootstrap._capture_trigger_context 的同源注释）。
+    template: str = ""
+    app_name: str = ""
 
 
 class VariableProvider(ABC):
@@ -52,13 +62,26 @@ class VariableProvider(ABC):
 
 
 class DateTimeProvider(VariableProvider):
-    """{{date}}/{{time}}/{{datetime}}，支持 {{date:YYYY-MM-DD}} 格式（§33-34）。"""
+    """{{date}}/{{time}}/{{datetime}}，支持 {{date:YYYY-MM-DD}} 格式（§33-34）。
 
-    def __init__(self, token_type: TokenType):
+    格式取值三级：token 参数（逐次覆盖）> `ctx.date_formats[关键字]`（config
+    全局默认）> `_DEFAULT_FORMATS`（内置兜底）。
+
+    config 里的值按 **strftime** 解释（defaults.yaml 里就是 `"%Y-%m-%d"`），
+    因此**不过 map_format**——用户的 `%a`/`%p` 不会被「模板格式」规则改写；
+    参数形态（`{{date:YYYY年MM月}}`）才走 map_format。
+    """
+
+    def __init__(self, token_type: TokenType, keyword: str):
         self._type = token_type
+        self._keyword = keyword
 
     def render(self, token: Token, ctx: RenderContext) -> str:
-        fmt = map_format(token.params or _DEFAULT_FORMATS[self._type])
+        if token.params:
+            fmt = map_format(token.params)
+        else:
+            fmt = (ctx.date_formats.get(self._keyword)
+                   or _DEFAULT_FORMATS[self._type])
         return ctx.now.strftime(fmt)
 
 
@@ -102,6 +125,9 @@ class CustomProvider(VariableProvider):
 
     变量定义从 ctx.custom_vars[token.params] 取（缺省 → 空串），再按
     var.source 查 value_sources 注册表求值。
+
+    token.args（`{{name:参数}}`）原样透传——此前解析期就被丢弃，命令来源
+    的脚本因此收不到参数（见 parser.validate_template 的保存期校验）。
     """
 
     def render(self, token: Token, ctx: RenderContext) -> str:
@@ -113,15 +139,15 @@ class CustomProvider(VariableProvider):
         provider = build_value_sources().get(getattr(var, "source", ""))
         if provider is None:
             return ""
-        return provider.render(var.name, var.config, ctx)
+        return provider.render(var.name, var.config, ctx, args=token.args)
 
 
 def build_providers() -> dict[TokenType, VariableProvider]:
-    """provider 注册表（文档 §64）。"""
+    """provider 注册表（文档 §64）。keyword 与 registry 的解析关键字一致。"""
     return {
-        TokenType.DATE: DateTimeProvider(TokenType.DATE),
-        TokenType.TIME: DateTimeProvider(TokenType.TIME),
-        TokenType.DATETIME: DateTimeProvider(TokenType.DATETIME),
+        TokenType.DATE: DateTimeProvider(TokenType.DATE, "date"),
+        TokenType.TIME: DateTimeProvider(TokenType.TIME, "time"),
+        TokenType.DATETIME: DateTimeProvider(TokenType.DATETIME, "datetime"),
         TokenType.UUID: UUIDProvider(),
         TokenType.CLIPBOARD: ClipboardProvider(),
         TokenType.SELECTION: SelectionProvider(),

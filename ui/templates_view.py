@@ -34,7 +34,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from services.template.custom_vars import extra_insert_texts
+from services.template.custom_vars import (extra_insert_texts,
+                                           script_insert_texts,
+                                           script_variables,
+                                           visible_script_variables)
 from services.template.errors import TemplateError
 from services.template.registry import custom_tooltip, is_preset
 from services.template_service import TemplateService
@@ -279,8 +282,8 @@ class TemplateEditorDialog(QDialog):
         vrow = QHBoxLayout()
         vrow.setSpacing(8)
         # 胶囊创建时即注入自定义变量悬停说明（否则 tooltips 为空，自定义
-        # 变量胶囊会回退到默认「触发时弹窗询问值」——与「变量库」里正确的
-        # 值来源说明不一致，实测 bug）。
+        # 变量胶囊会回退到兜底 tooltip——与「变量库」里正确的值来源说明
+        # 不一致，实测 bug）。
         self._var_tags = VariableTagBar(
             variables=load_favorite_variables(),
             tooltips=self._custom_tooltip_map())
@@ -326,7 +329,6 @@ class TemplateEditorDialog(QDialog):
         # 「变量库」弹层（Qt.Popup）：点击切换展开；点击外部/Esc 由
         # Popup 自带关闭（macOS 悬停计时器方案不可靠，退回点击切换）。
         self._lib_popup = VariableLibraryPopup(self)
-        self._lib_popup.set_custom_variables(load_extra_variables())
         self._lib_popup.insert_requested.connect(self._insert_variable)
         self._lib_popup.favorites_changed.connect(self._refresh_var_tags)
         self._lib_btn.clicked.connect(self._toggle_library)
@@ -336,7 +338,6 @@ class TemplateEditorDialog(QDialog):
         self._content.setObjectName("templateEditor")
         self._content.setPlaceholderText("模板内容…（{{date}} 等变量自动高亮，{{ 自动补全）")
         self._content.textChanged.connect(self._schedule_highlight)
-        self._content.set_custom_variables(extra_insert_texts())
         vbox.addWidget(self._content, 1)
 
         # 启用 + 删除 / 保存 / 取消
@@ -367,6 +368,11 @@ class TemplateEditorDialog(QDialog):
         self._hl_timer.setSingleShot(True)
         self._hl_timer.setInterval(400)
         self._hl_timer.timeout.connect(self._update_highlighter)
+
+        # 变量集（自定义 + 脚本）注入补全候选与变量库——**构造时就要注入**，
+        # 否则弹窗一打开 `{{up` 补不出 `{{upper}}`、变量库也是空的，要等
+        # 用户先增删一次变量才出现（_sync_custom_variables 只在变更时调过）。
+        self._sync_custom_variables()
 
     def showEvent(self, event) -> None:
         """弹窗显示后延迟一轮日志右侧三按钮几何（诊断问题2「按钮重叠」）。
@@ -442,6 +448,12 @@ class TemplateEditorDialog(QDialog):
         if any(v.name == var.name for v in extras):
             self._warn(f"变量「{var.name}」已存在")
             return
+        # 与脚本变量同名 → 用户定义赢（load_custom_vars 的覆盖规则），但发货
+        # 模板引用的正是那个脚本，会静默改行为。这里只警告、不拦（覆盖是
+        # 明确允许的能力），至少让用户知道自己在顶掉什么。
+        if any(v.name == var.name for v in script_variables()):
+            self._warn(f"变量名「{var.name}」与内置脚本同名，"
+                       "将顶掉该脚本（引用它的模板会改用这个变量的值）")
         extras.append(var)
         save_extra_variables(extras)
         favs = load_favorite_variables()
@@ -467,11 +479,18 @@ class TemplateEditorDialog(QDialog):
         if is_preset(var):
             act = menu.addAction("预设变量不可编辑")
             act.setEnabled(False)
-        else:
+        elif any(v.insert() == var for v in load_extra_variables()):
             menu.addAction("编辑变量…").triggered.connect(
                 lambda: self._edit_variable(var))
             menu.addAction("删除变量…").triggered.connect(
                 lambda: self._remove_variable(var))
+        elif any(v.insert() == var for v in script_variables()):
+            # 脚本变量随文件来去：应用里没有可编辑的配置，删也要删文件
+            act = menu.addAction("内置脚本变量（改脚本目录里的文件）")
+            act.setEnabled(False)
+        else:
+            act = menu.addAction("变量不存在")
+            act.setEnabled(False)
         menu.popup(QCursor.pos())
 
     def _edit_variable(self, var: str) -> None:
@@ -530,10 +549,17 @@ class TemplateEditorDialog(QDialog):
         self._refresh_var_tags()
 
     def _sync_custom_variables(self) -> None:
-        """自定义变量变更 → 同步到补全编辑器与变量库弹层。"""
+        """变量集变更 → 同步到补全编辑器、变量库弹层、胶囊区悬停说明。
+
+        补全候选含**脚本变量**（`{{up` → `{{upper}}`，否则脚本目录里的名字在
+        编辑器里无从补全）；胶囊区/变量库同样列脚本变量（带 `# cw:` 描述），
+        只是它们不能在应用里编辑删除——右键菜单给的是「改文件」的指引。
+        """
         extras = load_extra_variables()
-        self._content.set_custom_variables(extra_insert_texts())
+        self._content.set_custom_variables(
+            extra_insert_texts() + script_insert_texts())
         self._lib_popup.set_custom_variables(extras)
+        self._lib_popup.set_script_variables(visible_script_variables())
 
     def _refresh_var_tags(self) -> None:
         """常用变量变更 → 胶囊区整体重建（只显常用）+ 按钮同步。"""
@@ -542,13 +568,23 @@ class TemplateEditorDialog(QDialog):
         self._sync_var_buttons()
 
     def _custom_tooltip_map(self) -> dict[str, str]:
-        """自定义变量 insert → 悬停说明（描述 + 值来源）。"""
-        return {v.insert(): custom_tooltip(v) for v in load_extra_variables()}
+        """变量 insert → 悬停说明（描述 + 值来源）：自定义 + 脚本。
+
+        脚本变量进这份表是因为它可能被 ★ 放进胶囊区（常用）——没有说明就
+        会回退成兜底 tooltip「自定义变量（值来源见变量库）」，与变量库里
+        的真实描述不一致（这正是此前实测过的 bug）。同名时用户的自定义
+        变量赢（setdefault）。
+        """
+        out = {v.insert(): custom_tooltip(v) for v in load_extra_variables()}
+        for v in visible_script_variables():
+            out.setdefault(v.insert(), custom_tooltip(v))
+        return out
 
     # ---- 「变量库」弹层开关（点击切换；Qt.Popup 点击外部/Esc 自带关闭）----
 
     def _open_library(self) -> None:
         self._lib_popup.set_custom_variables(load_extra_variables())
+        self._lib_popup.set_script_variables(visible_script_variables())
         self._lib_popup.rebuild()
         # 下拉式定位：右缘贴「＋ 新增」按钮列右缘、顶部在按钮列下方——
         # 彻底不遮挡右侧任一按钮（旧定位贴「变量库」按钮左侧，300px 高

@@ -454,6 +454,7 @@ def ensure_accessibility() -> bool:
 2. PyInstaller 打包：**用 onedir**（onefile 冷启动解压慢，冲击 <1s 目标）；spec 里：
    - `collect_submodules('actions')` 内置插件
    - 排除用户插件目录（运行时加载）
+   - **`datas` 带上 `resources/scripts`**（发货脚本；与 `resources/icon.png` 同一约定）与 `config`/`actions`
    - `LSUIElement=1`、bundle id 固定、版本号
 3. 自签名证书签名 + entitlements.plist（Hardened Runtime）
 4. 验证：
@@ -567,17 +568,34 @@ CREATE INDEX ix_items_session ON clipboard_items (session_id);
 - **分层**（§83-89）：`services/template/`（errors/token/parser/variables/renderer/matcher/registry/custom_vars/value_sources/ax_text）+ `template_service.py`（CRUD/文件夹/搜索评分排序）+ `insertion.py`（粘贴模拟）
 - **变量系统（v7，唯一事实源 = `services/template/registry.py`）**：
   - `VariableMeta`：`insert`/`category`/`description`/`usage`/`example`/`keyword`/`value_source`/`builtin`。内置 8 个变量（date/time/datetime/uuid/clipboard/**selection**/input/cursor），description/usage/example **必填**（悬停 tooltip 三行组装）
-  - **值源分类**（每次渲染一个变量的值只能来自一个源头）：`系统状态`（OS 给的：date/uuid/clipboard/selection）、`用户输入`（弹窗问：input）、`上下文标记`（插入位置：cursor）、`外部计算`（命令/脚本）
+  - **值源分类**（`VariableMeta.value_source`，**只读元数据**、不参与求值分发）：`系统状态`（OS 给的：date/uuid/clipboard/selection）、`用户输入`（弹窗问：input）、`上下文标记`（插入位置：cursor）、`外部计算`（命令/脚本——**内置变量无实例**，仅登记分类，`SRC_EXTERNAL` 当前零引用）。自定义变量的值来源走**另一套**运行时注册表 `SOURCE_*`（见下）
+  - **默认日期格式（config 接线，2026-09）**：`config template.date_format/time_format/datetime_format`（**strftime** 串，defaults.yaml:45-47）作 `{{date}}`/`{{time}}`/`{{datetime}}` **无参数**时的全局默认；带参数（`{{date:YYYY年MM月}}`，模板格式）逐次覆盖；config 缺键/空白 → 回落内置默认。三级取值在 `DateTimeProvider.render`（参数 > `ctx.date_formats` > `_DEFAULT_FORMATS`），config 值**不过 `map_format`**（否则用户的 `%a`/`%p` 会被「模板格式」规则改写）。这三个键此前是**死配置**（defaults.yaml 有、全仓无人读，硬编码生效）
   - **消费者**：parser 合法性校验（`_KNOWN` ← registry.names()）、胶囊悬停 tooltip、`{{` 自动补全候选（`filter_candidates`：常用在前、其余按类别）、「变量库」弹层分组（`group_by_category`：系统→用户输入→上下文→自定义）、常用变量持久化（config `template.favorite_variables`，null=全部预设）
   - **重复 input 自动编号**：`next_input_insert`——模板已含 `{{input:name}}` 再插入同名 → `{{input:name2}}`/`{{input:name3}}`（每次独立输入，避免去重只问一次）；胶囊点击与自动补全 accept 都走此规则
   - **自定义变量值来源（v8）**：`extra_variables` 由 `list[str]` 迁为结构化 `{name, description, source, config}`（`services/template/custom_vars.py` 读写 + 旧格式自动迁移，剥 `{{}}`、默认 input 来源）。四种来源（`registry.SOURCE_*`）：
     - `input`：触发时弹窗询问（值在 `ctx.input_values[name]`；与 `{{input:name}}` 共享同名去重键——模板里 `{{name}}` 与 `{{input:name}}` 视为同一个输入，只问一次）
     - `fixed`：`config.text` 原样插入（严格固定，不做替换）
-    - `command`：`config.command` 经 `/bin/sh -c` **同步执行**，`stdout.strip()` 作结果，**5s 超时 / 非零退出 → 空串 + 日志警告**（渲染失败不崩插入）
+    - `command`：`config.command` 经 `/bin/sh -c` **同步执行**，`stdout.strip()` 作结果。失败（空命令 / 非零退出 / 超时 / 异常）按 **`config.on_error`** 处理：`empty` 留空（默认 = 旧行为）/ `text` 插 `config.on_error_text`（缺省 `[变量取值失败]`）/ `cancel` 抛 `VariableValueError` → **整次插入放弃**（半句话插进正文比什么都不插更糟）。失败一律**记日志（含 stderr，截断 300 字）+ 走可见通道**（`value_sources.set_error_reporter` 注入，bootstrap 接托盘通知）——此前 stderr 被 `capture_output` 收走却从不记录、失败只剩空串，用户分不清「功能坏了」还是「脚本写错了」。超时 `config.timeout` 秒（夹到 1–60，默认 5）
     - `state`：`config.state`（v1 仅 `frontmost_app` 前台应用名），框架预留更多系统状态
+    - **命令值源的三个上下文通道（2026-09 加）**：脚本据此「知道现在是什么情况」，不必自己去猜/去重新读系统状态。`CommandValueSource.render` 把 `RenderContext` 翻译成三样东西一起喂给 `run_command`：
+      - **环境变量 `CW_*`**（`build_command_env`，在 `os.environ` 上**叠加**——脚本仍该能用自己的 PATH/HOME）：`CW_VAR` 变量名 / `CW_TEMPLATE` 模板原文 / `CW_CLIPBOARD` 剪贴板 / `CW_SELECTION` 选中文本 / `CW_APP` 目标应用名 / `CW_NOW` 触发时间（ISO 8601）/ `CW_ARGS` 参数原文 / `CW_INPUT_<名>` 每个输入变量的值（名大写，如 `{{input:who}}` → `CW_INPUT_WHO`）。表在 `value_sources.ENV_HELP`（编辑器提示与文档共用一份事实源）
+      - **stdin = 选中文本，无选中则剪贴板**（`stdin_for`）——「把选中的东西交给脚本处理」的最短路径：脚本 `cat` 就读到了。**恒以管道喂入（默认空串），不继承本进程 stdin**——否则脚本里一个 `cat` 会挂在终端上等输入、把触发链路整个卡住
+      - **`$1..$@` = 模板里 `{{变量:参数}}` 的参数**（`split_args`，shlex 按 shell 习惯切分：`{{sum:1 2}}` → `$1=1 $2=2`，`{{say:"你好 世界"}}` → `$1=你好 世界`；引号不成对不报错、整串当一个参数）。经 `sh -c 'cmd' cw arg1 arg2…` 传入——`$0` 用占位名 `cw`，否则第一个参数会跑到 `$0` 上、脚本里 `$1` 恒为空
+      - `CW_APP` 必须由**调用方在触发瞬间捕获**（`bootstrap._render_and_insert_impl` 传 `app_name=`）：picker 流程弹层/对话框已把前台让给本应用，此时脚本自读 `frontmostApplication()` 拿到的是我们自己（与 §触发 那段同源根因）
+    - **脚本通道 `cw:<脚本名>`（2026-09 加，见 §7.4）**：`config.command` 写成 `cw:upper` 即「跑脚本目录里那个文件」，不必再手写绝对路径 + 自己挑解释器。用户目录 `config/scripts/` 优先，同名覆盖内置 `resources/scripts/`。脚本**参数写在模板里**（`{{upper:x}}` → `$1`），不写在命令串里——`cw:extract url` 这种写法会被显式拦下并报「参数请写在模板里」（否则参数静默丢失，正是最难查的那类坑）
     - 值源 provider 注册表 `services/template/value_sources.py`：新增值源 = 加一个 `ValueSourceProvider` 子类 + `build_value_sources()` 登记一行；`command` 来源本身即「脚本扩展」通道（不写 Python 也能接任意命令）。语义：`{{name}}` = 自定义变量直接求值；`{{input:name}}` = 临时输入，**§43 旧配对已移除（彻底解耦）**
-  - **自定义变量编辑**：`VariableEditDialog`（变量名/描述/值来源下拉/配置区按来源切换）；右键胶囊弹菜单（编辑/删除）；**改名扫描模板引用并警告但不自动替换**（避免静默改坏历史模板）
-- **数据**：snippets 表（shortcut UNIQUE/folder_id/enabled/favorite/trigger_mode/usage_count/last_used_at）+ snippet_folders；旧数据迁移 shortcut=name 小写（冲突加 `_<id>`）；默认文件夹（个人/工作/开发/模板）+ 默认模板（shrug/today/uuid/quote）幂等插入
+  - **自定义变量编辑**：`VariableEditDialog`（变量名/描述/值来源下拉/配置区按来源切换）；`command` 来源的编辑区是**多行框**（`QPlainTextEdit`，多步脚本/pipeline 写得下）+ **「试运行」**（`run_command` 同一条执行路径、同一超时，就地显示 stdout / 退出码 / stderr / 耗时；不套 `on_error`——作者要看真实退出码而非被策略替换的兜底文案）；右键胶囊弹菜单（编辑/删除）；**改名扫描模板引用并警告但不自动替换**（避免静默改坏历史模板）
+  - **每次触发只渲染一次（2026-09 修）**：`TemplateService.collect_inputs_for(content)` 纯解析收集输入，替代触发链路原先的「先渲染一遍只为拿 input_requests、拿到用户输入后再渲染第二遍」。渲染有副作用——`command` 值源会真执行外部命令，双渲染使其**每次触发执行两遍**（`echo x >> f`、`say`、随机类脚本结果随之出错）。input_requests 只依赖 token 流，与渲染结果无关，故第一次调用不需要渲染；顺带修掉「用户取消输入框时命令已跑过一遍」（现为 0 次）。副作用：含 input 变量时 `{{clipboard}}` 的读取时机从「弹框前」移到「弹框后」（用户若在弹框期间复制，取到的是新值；不复制则无差别）
+  - **自定义变量的 `:params` 接上了（2026-09 修）**：`parse` 命中自定义变量时同时保留 `params`（查表键 = 变量名）与 `args`（新增 `Token.args`），`CustomProvider` 把 `token.args` 透传给值源 → **命令来源的参数成为脚本的 `$1..$@`**（见上条「三个上下文通道」）。此前参数在解析期就无声消失（既是数据丢失，也让「脚本传参」这个通道无从做起）。其余来源（input/fixed/state）写了参数无处可用 → 保存期由 `parser.validate_args` 挡下并给出消息（`validate_template(..., custom_vars=)` / `create_template` / `update_template` 都走它）
+  - **已知缺口（2026-09 逐条核对代码后记录，均未实现）**：
+    - **`{{cursor}}` 位置产出即被丢弃**：renderer 正确返回 `cursor_pos`，但 `bootstrap._render_and_insert_impl` 两处渲染都接 `text, _, _ = …` → 插入后光标恒在末尾（与下方「插入」行「第一阶段不定位」一致，仍是现状）
+    - `state` 值源只有 `frontmost_app` 一个状态；`command` 值源**同步跑在触发链路上**（超时默认 5s / 可配 1–60s，期间 UI 不响应；且此时焦点已还给目标应用 → 超时表现为目标应用卡住后才出现文本）
+    - **内置变量的参数静默丢弃**：`{{uuid:x}}`/`{{clipboard:x}}`/`{{selection:x}}`/`{{cursor:x}}` 的 params 在 `parse` 里根本没保留（自定义变量那条已修，内置这条未改——它们本就不接受参数，但也没有保存期提示）
+    - **命令值源 cwd 固定为应用启动目录**（脚本通道除外——`cw:` 跑脚本时 cwd = 脚本所在目录，见 §7.4）
+    - **`jq` 这类外部工具仍无 PATH 保障**：`build_command_env` 只**追加**缺失的标准目录（`/usr/local/bin`、`/opt/homebrew/bin`、`/usr/bin`、`/bin`、`/usr/sbin`、`/sbin`，`ensure_path`，不前置、不改动已有条目的优先级），因此 launchd 启动的实例至少能看到系统与 homebrew 的二进制。但**非标准前缀（用户机器上 `jq` 在 `/opt/anaconda3/bin`）仍看不到**——所以发货脚本一律只用 Python 标准库、用应用自己的解释器跑（§7.4），不依赖 PATH 里有什么。`services/autostart.py` 的 plist 依旧不设 `EnvironmentVariables`
+    - **高级语法全无**：默认值/回退（`{{x|默认}}`）、select 枚举、过滤器管道、日期偏移（`{{date:+1d}}`）、字面量转义（`\{\{`）。结构上受限于 `_VAR_RE = \{\{(\w+)(?::([^}]*))?\}\}`——只支持「一个 `\w+` + 一段不含 `}` 的 params」，params 目前三种语义：日期格式 / input 标签 / 自定义变量参数（`{{name:参数}}` → 脚本 `$1..`）
+    - 内置变量没有「外部计算」值源（`SRC_EXTERNAL` 零引用）；`VariableMeta.value_source` 无代码读取（纯文档元数据，见上）
+- **数据**：snippets 表（shortcut UNIQUE/folder_id/enabled/favorite/trigger_mode/usage_count/last_used_at）+ snippet_folders；旧数据迁移 shortcut=name 小写（冲突加 `_<id>`）；默认文件夹（个人/工作/开发/模板）+ 默认模板（shrug/today/uuid/quote）幂等插入；**v9 撤回 v8 种入的 17 个发货变换模板**（形态不成立，见 §7.4）——只删 name/shortcut/content 三项都与当初一致的行（用户改过任何一个字就留下），文件夹清空才删
 - **触发**（§7）：HotkeyManager 扩展 `raw_key_down` 信号转发无 ⌘⌃⌥ 修饰的按键（字符用 `CGEventKeyboardGetUnicodeString` 跟随布局，回退 vk 映射表），事件透传不消费；matcher 主线程维护输入缓冲，tab 模式 Tab 触发 / automatic 模式输完立即触发，匹配从缓冲末尾扫最长后缀
   - **输入法策略（用户要求：无论哪种输入法，必须完整 shortcut 彻底输入文本框后才触发）**：
     - **英文输入法**：无组合，按键即上屏 → 输完最后一个字符**延迟确认**触发：命中后挂起 pending（缓冲快照），**200ms 内缓冲变化（还在输更长的词，如 signature 的 sig）取消；词边界键（空格/标点 = 词完整）或 200ms 超时确认触发**——防 prefix 误触（用户实测：想打 signature，输到 sig 就被替换）
@@ -590,6 +608,72 @@ CREATE INDEX ix_items_session ON clipboard_items (session_id);
 - **插入**（§70-72）：保存原剪贴板 → `watcher.set_paused(True)`（临时内容不进历史）→ 写入 → CGEventPost ⌘V → 恢复 → 恢复监听；`{{cursor}}` 第一阶段不定位（光标停末尾）
 - **Picker**（§16）：⌘⇧S 全局弹窗（搜索排序：shortcut 精确>name 精确>shortcut 前缀>name 前缀>content>最近使用）
 - **兼容**：`snippet_service.py` 代理到 TemplateService（旧 `render_snippet` 保留：未知变量原样保留不抛错）
+
+### 7.4 脚本通道（`cw:` 值源）
+
+**目标**：让「一段文本进来 → 处理过的东西出去」这类玩法靠**内容**扩展，不必改代码——用户往脚本目录里丢一个文件，就多一个模板变量。
+
+> **⚠️ 2026-09-20：随应用发货的 17 个「变换」模板已整批撤回（v9 迁移）。**
+>
+> 它们当初这么设计：「选中一段文本 → ⌘⇧S → 选「转大写」→ 回车 → 变了」。
+> 但触发靠**打字**，而打字的第一个字母就把要变换的选中文本覆盖掉了——
+> **输入从来拿不到**（`{{selection}}` 读空 → `stdin_for` 退回剪贴板；用户
+> 实际体验是「选中文本 → 输 `lu` → Tab → 什么都没提取出来」）。
+>
+> 换触发方式也救不了：抢在按键送达目标应用之前用 AX 读一次选中文本
+> 技术上可行（事件 tap 是 `kCGHeadInsertEventTap`，回调早于事件送达），
+> 但那只是让一个**不合理的交互勉强跑通**——而且结果又插回原处、原文没了，
+> **没法对照验证**。用户已经指出更根本的一点：内容本来就在文本框/剪贴板
+> 里，复制一下就行，多这一步是绕路。
+>
+> 结论：这批模板**形态不成立**。「打字展开」（打一个词、它变成别的字，如
+> `shrug<Tab>` → ¯\\_(ツ)_/¯）与「内容变换」（输入在别处、输出是它的派生）
+> 是两类东西，**不该共用一条触发通道**——前者没有「外部输入」这个概念。
+> 变换类以后重做成「对剪贴板条目执行，结果回剪贴板」（原文不动，可对照）。
+>
+> **脚本本身保留**：它们正是将来那条路的引擎，`cw:` 求值通道完全不变。
+
+**两个目录**（`services/template/scripts.py`，**用户优先 → 同名覆盖内置**）：
+
+| 目录 | 归属 | 用途 |
+|---|---|---|
+| `config/scripts/` | 用户可写 | drop-in：丢个文件进去就多一个 `{{文件名}}` 变量，无需任何设置页 |
+| `resources/scripts/` | 随应用发货、只读 | 内置变换；随版本更新 |
+
+**脚本 = 模板变量（按合并，不按配置）**：`script_variables()` 把每个脚本合成一个 `CustomVariable(name=文件名, source="command", config={"command": "cw:<名>"})`；`load_custom_vars()` = 脚本变量打底，用户的 `extra_variables` 按名覆盖。**零改动** parser/renderer/引擎——`CustomProvider` 本来就读 `ctx.custom_vars` 并按 `var.source` 分发。
+
+**脚本变量在界面上怎么出现**：进**变量库**（`CAT_SCRIPT`「脚本」分组，排在「上下文」与「自定义」之间）、进**模板编辑器的 `{{` 自动补全**、进**胶囊区**（★ 过才进）。三条都由 `services/template/custom_vars.py::visible_script_variables()` 供数——它只给「没被同名用户变量顶掉」的脚本变量，因为**展示与求值必须是同一份真相**：否则库里会出现两条同名行，其中一条点了根本没效果。库里脚本行的描述取自脚本头部的 `# cw:` 自述，悬停说明由 `registry.custom_tooltip()` 生成，值来源写「**脚本**」而不是「外部命令」——`cw:upper` 不是命令，写成「命令」用户会去别处找一个叫 `cw` 的命令。
+
+**哪些文件算脚本**：后缀白名单 `(.py, .sh, "")`，且排除 `.`/`_` 开头的名字 —— 这样脚本可以带同目录的数据文件（`data.txt`）与被 import 的辅助模块（`_common.py`），不会被误注册成变量。
+
+**脚本自述元数据**（扫文件开头 5 行，避免读整个大脚本）：
+
+```
+# cw: 一句话说明          → 变量描述 / 模板 tooltip / 错误提示里的可用清单
+# cw-timeout: 10         → 覆盖命令默认超时（活数据脚本要联网，5s 不够）
+```
+
+**解释器与执行**：
+
+- `.py` → **应用自己的解释器**（`sys.executable`，venv python，依赖齐全）；其余（含 `.sh`、无后缀）→ `/bin/sh`
+- 打包版（PyInstaller）`sys.executable` 是应用二进制、**不能**执行 `.py` → 退到系统 python3（`/usr/bin/python3` → `/opt/homebrew/bin/python3` → `/usr/local/bin/python3` → `which python3`）。本机 `/usr/bin/python3` 是 **3.9.6**，因此**发货脚本只用标准库、且必须 3.9 兼容**（不用 `match`、不在会被求值的位置用 `X | Y` 注解）
+- **cwd = 脚本所在目录** → 脚本可以带同目录数据文件一起发货，也能 `open("data.txt")`
+- **`CW_SCRIPT_DIR`**（`os.pathsep` 分隔，用户目录在前）= 脚本互调的入口
+- **参数**：`{{名:甲 乙}}` → `sys.argv[1:]` = `["甲","乙"]`（比 `sh -c` 少一层，没有 `$0` 占位问题）
+- 环境变量、stdin（选中文本）等上下文通道与命令值源共用，见 §7.3
+
+**坑（已踩）**：
+
+- **`PYTHONDONTWRITEBYTECODE=1` 必须设**（`script_env()`）：cwd = 发货目录时 Python 会往里写 `__pycache__/`，打包版那是只读的
+- **脚本名不能与标准库同名**：`sys.path[0]` = 脚本目录 → 叫 `csv.py` 的脚本 `import csv` 会导入**它自己**，整个脚本崩在 import 上。故内置的是 `csv_table.py`。`tests/test_shipped_scripts.py::test_shipped_scripts_avoid_stdlib_name_shadowing` 用 `importlib.util.find_spec` 拦住这类命名
+- **AppleScript 术语是「按 App + 编译期」的**：`name of current track` 在 App 没装时**编译不过**（`-2741`），而 `try` 抓不住编译错误。`now_playing.py` 先用只用基础术语的 `application "X" is running` 探测，只对**正在运行**的 App 编译那段脚本
+- **参数写进命令串会被拦**：`cw:extract url` 报「参数请写在模板里 `{{变量名:参数}}`」，不静默丢参数
+
+**打包**：spec 的 `datas` 必须含 `("../resources/scripts", "resources/scripts")`（与 `resources/icon.png` 同一约定）。漏了这行 → 打包版里写 `{{脚本名}}` 的模板全部 `UnknownVariableError`，变量库里也没有这些脚本变量。
+
+**回归测试**：`tests/test_scripts.py`（解析/优先级/执行/注入/元数据）、`tests/test_shipped_scripts.py`（**发货脚本内容也是要防回归的代码**：24 条 `parametrize` 走真实 `parse`→`render`→`cw:` 链路）、`tests/test_services_v1.py::test_migration_v9_*`（撤回/幂等/不删用户改过的行）、`tests/test_variables_ux.py::test_variable_library_lists_script_variables`（变量库「脚本」分组 + 描述）、`tests/test_ui.py::test_editor_dialog_variable_library_scripts`（弹窗一打开变量库与补全里就有脚本变量）。
+
+**已知缺口（未实现）**：`resources/scripts/` 若丢失而用户的模板仍写 `{{upper}}` → 渲染抛 `UnknownVariableError`（走失败通道，不静默）；脚本目录无 UI 管理（要加脚本就手动放文件）；**变换类玩法整体未落地**——「对剪贴板条目执行 + 结果回剪贴板」还没做，眼下这些脚本只能被用户自己写进模板里用。
 
 ---
 
@@ -655,6 +739,12 @@ CREATE INDEX ix_items_session ON clipboard_items (session_id);
 | 右键变量后整页按钮无反应 | 右键胶囊在 `customContextMenuRequested`（鼠标按下）里同步 `QMenu.exec()` / 弹模态 `QMessageBox`，macOS 上嵌套事件循环残留鼠标 grab，菜单/弹窗关闭后整个编辑面板（含取消/保存）点击失效 | 整条右键链路只用非阻塞 `QMenu.popup()` + `QTimer.singleShot(0)` 延后；预设变量显示置灰菜单项「不可编辑」，不再弹模态框（§7.3） |
 | 关窗后触发 input 模板连带打开主窗口 | 输入框前 `activateIgnoringOtherApps_(True)` 激活本应用 → 触发 `on_app_state(ApplicationActive)` 把隐藏的主窗口 show 出来 | 弹框期间置 `_suppress_window_show` 标志，`on_app_state` 跳过 re-show；取消路径也 `_activate_target` 把焦点还给目标应用（§7.3） |
 | 自定义胶囊悬停说明与变量库不一致 | 胶囊区构造时未注入 tooltips → 自定义变量回退默认「触发时弹窗询问值」；变量库在 `rebuild()` 现算 `custom_tooltip` | 构造时 `VariableTagBar(tooltips=_custom_tooltip_map())` 注入值来源说明（§7.3） |
+| 脚本 `import csv` 崩在 import 上 | `cw:` 脚本 cwd = 脚本目录 → `sys.path[0]` 也是它，`csv.py` 导入的是**它自己** | 脚本名不与标准库同名（内置 `csv_table.py`）+ `test_shipped_scripts_avoid_stdlib_name_shadowing` 用 `find_spec` 拦住（§7.4） |
+| 发货目录里冒出 `__pycache__/` | cwd = 发货目录，Python 写字节码；打包版那是只读目录 | `script_env()` 设 `PYTHONDONTWRITEBYTECODE=1`（§7.4） |
+| `-2741 syntax error` 编译不过（未安装的 App） | `name of current track` 要查该 App 的术语字典——**编译期**失败，`try` 抓不住 | 先用只用基础术语的 `application "X" is running` 探测，只对运行中的 App 编译（§7.4） |
+| `cw:extract url` 静默没结果 | 参数写在命令串里 → 解析不出脚本名，参数还会被丢弃 | 显式拦截并报「参数请写在模板里 `{{变量名:参数}}`」（§7.3/§7.4） |
+| 打包版写 `{{脚本名}}` 的模板全部 UnknownVariableError | spec `datas` 漏了 `resources/scripts` → `load_custom_vars()` 里没有这些脚本变量 | spec 加 `("../resources/scripts", "resources/scripts")`（§7.4） |
+| 变换模板「选中文本 → 输 shortcut → Tab」提取不出任何东西（**设计错误，已撤回**） | 触发靠打字，第一个字母就把要变换的选中文本覆盖掉了——`{{selection}}` 永远读空，退回剪贴板 | v9 撤回整批模板（§7.4）：打字展开与内容变换是两类东西，不该共用触发通道；变换类改做「对剪贴板条目执行，结果回剪贴板」 |
 
 ---
 

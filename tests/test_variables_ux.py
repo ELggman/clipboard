@@ -39,6 +39,21 @@ def _isolate_config(tmp_path, monkeypatch):
     monkeypatch.setattr(app.config, "CONFIG_DIR", tmp_path)
 
 
+def _group_titles(popup) -> list[str]:
+    """变量库弹层里的分组标题（按出现顺序）。"""
+    titles = []
+    for i in range(popup._body_lay.count()):
+        w = popup._body_lay.itemAt(i).widget()
+        if isinstance(w, QLabel) and w.objectName() == "groupHeader":
+            titles.append(w.text())
+    return titles
+
+
+def _row_tooltip(popup, insert: str) -> str:
+    btn = next(b for b, ins in popup._rows if ins == insert)
+    return btn.toolTip()
+
+
 def test_filter_candidates_prefix_and_order():
     """前缀过滤 + 排序：常用在前，其余按来源类别。"""
     from services.template.registry import filter_candidates
@@ -241,13 +256,8 @@ def test_variable_library_popup_rebuild_and_star(tmp_path, monkeypatch):
         popup.rebuild()
         rows = [ins for _btn, ins in popup._rows]
         assert "{{date}}" in rows and "{{location}}" in rows  # 内置+自定义
-        # 类别分组标题（固定顺序：系统 → 用户输入 → 上下文 → 自定义）
-        titles = []
-        for i in range(popup._body_lay.count()):
-            w = popup._body_lay.itemAt(i).widget()
-            if isinstance(w, QLabel) and w.objectName() == "groupHeader":
-                titles.append(w.text())
-        assert titles == ["系统", "用户输入", "上下文", "自定义"]
+        # 类别分组标题（固定顺序：系统 → 用户输入 → 上下文 → 脚本 → 自定义）
+        assert _group_titles(popup) == ["系统", "用户输入", "上下文", "自定义"]
         # 自定义变量排最后（类别序）
         assert rows[-1] == "{{location}}"
         # ★ 移除常用（默认全预设 → {{date}} 是常用）→ 持久化 + 信号
@@ -324,10 +334,11 @@ def test_var_tag_pill_min_height_no_vertical_overlap():
 
 
 def test_var_tag_bar_custom_pill_tooltip_reflects_source(tmp_path, monkeypatch):
-    """回归：自定义胶囊悬停须显示值来源（固定值），而非默认「弹窗询问」。
+    """回归：自定义胶囊悬停须显示值来源（固定值），而非兜底 tooltip。
 
     初始构造未注入 tooltips 时，自定义胶囊回退 custom_default_tooltip
-    （「触发时弹窗询问值」），与「变量库」里正确的值来源说明不一致。
+    （v8 前写死「触发时弹窗询问值」，对 fixed/command/state 来源是错的），
+    与「变量库」里正确的值来源说明不一致。
     """
     _isolate_config(tmp_path, monkeypatch)
     from services.template.registry import (SOURCE_FIXED, CustomVariable,
@@ -348,6 +359,154 @@ def test_var_tag_bar_custom_pill_tooltip_reflects_source(tmp_path, monkeypatch):
         assert "弹窗" not in tip
     finally:
         bar.close()
+
+
+def test_edit_dialog_failure_policy_round_trip():
+    """命令变量的「取值失败时」策略：预填、联动、回写 config。"""
+    from services.template import value_sources
+    from services.template.registry import SOURCE_COMMAND, CustomVariable
+    from ui.variable_edit_dialog import VariableEditDialog
+
+    var = CustomVariable(name="d", source=SOURCE_COMMAND,
+                         config={"command": "exit 1",
+                                 "on_error": value_sources.ERROR_TEXT,
+                                 "on_error_text": "（失败）"})
+    dlg = VariableEditDialog(variable=var)
+    try:
+        assert dlg._source.currentData() == SOURCE_COMMAND
+        assert dlg._error_policy.currentData() == value_sources.ERROR_TEXT
+        assert dlg._error_text.text() == "（失败）"
+        assert dlg._error_text.isVisibleTo(dlg)   # 兜底策略下要填文案
+        got = dlg.result_variable()
+        assert got.config["command"] == "exit 1"
+        assert got.config["on_error"] == value_sources.ERROR_TEXT
+        assert got.config["on_error_text"] == "（失败）"
+        # 切到「放弃本次插入」→ 文案框隐藏，且不再写入 config
+        idx = dlg._error_policy.findData(value_sources.ERROR_CANCEL)
+        dlg._error_policy.setCurrentIndex(idx)
+        assert not dlg._error_text.isVisibleTo(dlg)
+        assert "on_error_text" not in dlg.result_variable().config
+    finally:
+        dlg.close()
+
+
+def test_edit_dialog_failure_policy_defaults_to_empty():
+    """新命令变量默认「留空」——旧行为不变（既有用户不受新策略影响）。"""
+    from services.template import value_sources
+    from services.template.registry import SOURCE_COMMAND, CustomVariable
+    from ui.variable_edit_dialog import VariableEditDialog
+
+    dlg = VariableEditDialog(variable=CustomVariable(
+        name="d", source=SOURCE_COMMAND, config={"command": "date"}))
+    try:
+        assert dlg._error_policy.currentData() == value_sources.ERROR_EMPTY
+        assert not dlg._error_text.isVisibleTo(dlg)
+        assert dlg.result_variable().config["on_error"] == value_sources.ERROR_EMPTY
+    finally:
+        dlg.close()
+
+
+def test_edit_dialog_failure_policy_only_for_command():
+    """固定值/用户输入来源不涉及失败策略（不属于该来源的配置项）。"""
+    from services.template.registry import SOURCE_FIXED, CustomVariable
+    from ui.variable_edit_dialog import VariableEditDialog
+
+    dlg = VariableEditDialog(variable=CustomVariable(
+        name="x", source=SOURCE_FIXED, config={"text": "hi"}))
+    try:
+        assert not dlg._error_text.isVisibleTo(dlg)
+        assert "on_error" not in dlg.result_variable().config
+    finally:
+        dlg.close()
+
+
+def test_edit_dialog_try_run_shows_output():
+    """试运行就地显示结果（作者侧唯一的调试手段）。"""
+    from services.template.registry import SOURCE_COMMAND, CustomVariable
+    from ui.variable_edit_dialog import VariableEditDialog
+
+    dlg = VariableEditDialog(variable=CustomVariable(
+        name="t", source=SOURCE_COMMAND, config={"command": "printf hi"}))
+    try:
+        dlg._try_run()
+        assert dlg._run_status.text().startswith("退出码 0")
+        assert dlg._run_output.toPlainText() == "hi"
+        assert dlg._run_output.isVisibleTo(dlg)
+    finally:
+        dlg.close()
+
+
+def test_edit_dialog_try_run_shows_failure_reason():
+    """失败要显示退出码与 stderr——而不是像触发链路那样只剩空串。"""
+    from services.template.registry import SOURCE_COMMAND, CustomVariable
+    from ui.variable_edit_dialog import VariableEditDialog
+
+    dlg = VariableEditDialog(variable=CustomVariable(
+        name="t", source=SOURCE_COMMAND,
+        config={"command": "echo 'no such file' >&2; exit 3"}))
+    try:
+        dlg._try_run()
+        assert "退出码 3" in dlg._run_status.text()
+        assert "no such file" in dlg._run_output.toPlainText()
+    finally:
+        dlg.close()
+
+
+def test_edit_dialog_try_run_empty_command():
+    from services.template.registry import SOURCE_COMMAND, CustomVariable
+    from ui.variable_edit_dialog import VariableEditDialog
+
+    dlg = VariableEditDialog(variable=CustomVariable(
+        name="t", source=SOURCE_COMMAND, config={"command": "  "}))
+    try:
+        dlg._try_run()
+        assert dlg._run_status.text() == "命令为空"
+    finally:
+        dlg.close()
+
+
+def test_edit_dialog_command_hint_names_context_channels():
+    """命令页要写出三个上下文通道（否则作者无从知道脚本能读到什么）。"""
+    from PySide6.QtWidgets import QLabel
+
+    from services.template.registry import SOURCE_COMMAND, CustomVariable
+    from ui.variable_edit_dialog import VariableEditDialog
+
+    dlg = VariableEditDialog(variable=CustomVariable(
+        name="t", source=SOURCE_COMMAND, config={"command": "echo hi"}))
+    try:
+        texts = [w.text() for w in dlg.findChildren(QLabel)]
+        hint = next(t for t in texts if "stdin" in t)
+        assert "$1" in hint and "CW_SELECTION" in hint and "CW_INPUT" in hint
+        # 切到固定值来源 → 命令页（含提示）不再显示
+        idx = dlg._source.findData("fixed")
+        dlg._source.setCurrentIndex(idx)
+        assert not any(w.isVisibleTo(dlg) and "stdin" in w.text()
+                       for w in dlg.findChildren(QLabel))
+    finally:
+        dlg.close()
+
+
+def test_edit_dialog_multiline_command_round_trip(tmp_path, monkeypatch):
+    """多行命令：编辑框→config→YAML 落盘→读回，换行不丢。"""
+    _isolate_config(tmp_path, monkeypatch)
+    from services.template.registry import SOURCE_COMMAND, CustomVariable
+    from ui.template_components import (load_extra_variables,
+                                        save_extra_variables)
+    from ui.variable_edit_dialog import VariableEditDialog
+
+    script = "a=1\nb=2\necho $((a+b))"
+    dlg = VariableEditDialog(variable=CustomVariable(
+        name="m", source=SOURCE_COMMAND, config={"command": "x"}))
+    try:
+        assert dlg._command_edit.toPlainText() == "x"   # 预填既有命令
+        dlg._command_edit.setPlainText(script)
+        var = dlg.result_variable()
+        assert var.config["command"] == script
+        save_extra_variables([var])
+        assert load_extra_variables()[0].config["command"] == script
+    finally:
+        dlg.close()
 
 
 def test_library_row_button_star_zone(tmp_path, monkeypatch):
@@ -376,5 +535,77 @@ def test_library_row_button_star_zone(tmp_path, monkeypatch):
         # 行区（x=80）→ 插入
         _press(btn, 80)
         assert inserted == ["{{location}}"]
+    finally:
+        popup.close()
+
+
+# ---- 脚本变量进变量库（回归：用户「看不到这些变量和描述」）----
+
+def test_variable_library_lists_script_variables(tmp_path, monkeypatch):
+    """脚本变量（cw: 值源）在变量库里单列「脚本」组，带脚本自述的描述。
+
+    回归：这批变量最初只进了模板编辑器补全，变量库/胶囊区看不到——用户
+    装完应用发现「多了一堆模板，但变量库没有对应变量和说明」。
+    """
+    _isolate_config(tmp_path, monkeypatch)
+    from services.template.custom_vars import visible_script_variables
+    from services.template.registry import CustomVariable
+    from ui.template_components import VariableLibraryPopup
+
+    scripts = visible_script_variables()
+    assert len(scripts) >= 14          # 发货脚本全部登记
+    popup = VariableLibraryPopup()
+    popup.set_custom_variables([CustomVariable(name="loc")])
+    popup.set_script_variables(scripts)
+    try:
+        popup.rebuild()
+        rows = [ins for _btn, ins in popup._rows]
+        for v in scripts:
+            assert v.insert() in rows, f"{v.insert()} 没出现在变量库"
+        # 分组：脚本排在自定义之前（内置在前、用户自建在后）
+        assert _group_titles(popup) == ["系统", "用户输入", "上下文",
+                                       "脚本", "自定义"]
+        assert rows.index("{{upper}}") < rows.index("{{loc}}")
+        # 描述来自脚本 `# cw:` 自述，不是「自定义变量」兜底文案
+        tip = _row_tooltip(popup, "{{upper}}")
+        assert "转大写" in tip
+        assert "值来源：脚本" in tip
+        assert "cw:upper" in tip
+        assert "自定义变量" not in tip
+    finally:
+        popup.close()
+
+
+def test_script_variable_yields_to_same_named_custom(tmp_path, monkeypatch):
+    """同名自定义变量赢（同 load_custom_vars）：库里不出现两条同名行。
+
+    展示与求值必须是同一份真相——否则用户看到两行 `{{upper}}`，其中一行
+    点了根本没有效果。
+    """
+    _isolate_config(tmp_path, monkeypatch)
+    from services.template.custom_vars import (save_extra_variables,
+                                               script_variables,
+                                               visible_script_variables)
+    from services.template.registry import SOURCE_FIXED, CustomVariable
+    from ui.template_components import VariableLibraryPopup
+
+    save_extra_variables([CustomVariable(name="upper", description="我的大写",
+                                         source=SOURCE_FIXED,
+                                         config={"text": "我说了算"})])
+    # 生效列表里脚本那条已被顶掉
+    assert "upper" not in {v.name for v in visible_script_variables()}
+
+    popup = VariableLibraryPopup()
+    popup.set_custom_variables([CustomVariable(name="upper",
+                                               description="我的大写",
+                                               source=SOURCE_FIXED,
+                                               config={"text": "我说了算"})])
+    # 故意传全体脚本（调用方已过滤时这里也兜得住）
+    popup.set_script_variables(script_variables())
+    try:
+        popup.rebuild()
+        rows = [ins for _btn, ins in popup._rows]
+        assert rows.count("{{upper}}") == 1
+        assert "我说了算" in _row_tooltip(popup, "{{upper}}")  # 生效的那个
     finally:
         popup.close()

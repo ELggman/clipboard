@@ -508,7 +508,7 @@ def test_migration_v6_snippets_to_templates(tmp_path):
 def test_migration_v6_idempotent(tmp_path):
     """v6 迁移幂等：重复运行不崩、数据不重复。"""
     from database.engine import create_db_engine
-    from database.migrations import migrate
+    from database.migrations import _SCHEMA_VERSION, migrate
 
     eng = create_db_engine(tmp_path / "idem.db")
     migrate(eng)
@@ -518,8 +518,144 @@ def test_migration_v6_idempotent(tmp_path):
         count = conn.execute(text(
             "SELECT COUNT(*) FROM snippets WHERE shortcut='shrug'")).scalar()
         assert count == 1
-        assert conn.execute(text("PRAGMA user_version")).scalar() == 7
+        assert conn.execute(text(
+            "PRAGMA user_version")).scalar() == _SCHEMA_VERSION
     eng.dispose()
+
+
+# ---- v9 迁移：撤回发货的变换模板 ----
+
+def _seed_v8_shipped(eng) -> int:
+    """造出「库里已经有 v8 那批发货变换模板」的状态，返回「变换」文件夹 id。
+
+    迁移链里**已经不会**再种这批模板了（v8 那一步整个删掉），所以想测 v9 的
+    撤回行为只能手工把它摆回来——真实用户库正是这个状态。
+    """
+    from database.migrations import (WITHDRAWN_TEMPLATES_FOLDER,
+                                     _WITHDRAWN_TEMPLATES)
+
+    with eng.begin() as conn:
+        conn.execute(text(
+            "INSERT INTO snippet_folders (name, created_at, updated_at)"
+            " VALUES (:n, datetime('now'), datetime('now'))"),
+            {"n": WITHDRAWN_TEMPLATES_FOLDER})
+        fid = conn.execute(text(
+            "SELECT id FROM snippet_folders WHERE name = :n"),
+            {"n": WITHDRAWN_TEMPLATES_FOLDER}).scalar()
+        for name, sc, content, desc in _WITHDRAWN_TEMPLATES:
+            conn.execute(text(
+                "INSERT INTO snippets (name, shortcut, content, description,"
+                " folder_id, enabled, favorite, trigger_mode, usage_count,"
+                " last_used_at, created_at, updated_at)"
+                " VALUES (:n, :sc, :c, :d, :f, 1, 0, 'tab', 0, NULL,"
+                " datetime('now'), datetime('now'))"),
+                {"n": name, "sc": sc, "c": content, "d": desc, "f": fid})
+        conn.execute(text("PRAGMA user_version = 8"))
+    return fid
+
+
+def test_migration_fresh_db_has_no_shipped_templates(tmp_path):
+    """全新库只有默认模板：发货变换模板不再种入（v8 那一步已整个删掉）。"""
+    from database.engine import create_db_engine
+    from database.migrations import (WITHDRAWN_TEMPLATES_FOLDER,
+                                     _DEFAULT_TEMPLATES, _SCHEMA_VERSION,
+                                     migrate)
+
+    eng = create_db_engine(tmp_path / "fresh.db")
+    migrate(eng)
+    with eng.connect() as conn:
+        assert conn.execute(text(
+            "PRAGMA user_version")).scalar() == _SCHEMA_VERSION
+        assert conn.execute(text(
+            "SELECT COUNT(*) FROM snippet_folders WHERE name = :n"),
+            {"n": WITHDRAWN_TEMPLATES_FOLDER}).scalar() == 0
+        got = {r[0] for r in conn.execute(
+            text("SELECT shortcut FROM snippets")).fetchall()}
+        assert got == {t[1] for t in _DEFAULT_TEMPLATES}
+    eng.dispose()
+
+
+def test_migration_v9_withdraws_shipped_templates(tmp_path):
+    """v8 → v9：整批撤回（连「变换」文件夹一起删），且可重复跑。"""
+    from database.engine import create_db_engine
+    from database.migrations import (WITHDRAWN_TEMPLATES_FOLDER,
+                                     _DEFAULT_TEMPLATES, _SCHEMA_VERSION,
+                                     _WITHDRAWN_TEMPLATES, migrate)
+
+    eng = create_db_engine(tmp_path / "v9.db")
+    migrate(eng)
+    fid = _seed_v8_shipped(eng)
+    with eng.connect() as conn:
+        assert conn.execute(text(
+            "SELECT COUNT(*) FROM snippets WHERE folder_id = :f"),
+            {"f": fid}).scalar() == len(_WITHDRAWN_TEMPLATES)
+
+    migrate(eng)
+    migrate(eng)   # 第二遍：找不到文件夹，直接返回（幂等）
+    with eng.connect() as conn:
+        assert conn.execute(text(
+            "PRAGMA user_version")).scalar() == _SCHEMA_VERSION
+        assert conn.execute(text(
+            "SELECT COUNT(*) FROM snippet_folders WHERE name = :n"),
+            {"n": WITHDRAWN_TEMPLATES_FOLDER}).scalar() == 0
+        got = {r[0] for r in conn.execute(
+            text("SELECT shortcut FROM snippets")).fetchall()}
+        assert got == {t[1] for t in _DEFAULT_TEMPLATES}
+    eng.dispose()
+
+
+def test_migration_v9_keeps_user_edits_and_own_rows(tmp_path):
+    """只删「原样没动过」的行——用户改过的、自己在「变换」里加的都留下。
+
+    迁移的整洁不该覆盖用户的工作：判据是 name/shortcut/content 三项都与当初
+    一致才删（改过一个字就留），文件夹里还有东西就不删文件夹。
+    """
+    from database.engine import create_db_engine
+    from database.migrations import (
+        _SCHEMA_VERSION, _WITHDRAWN_TEMPLATES, migrate)
+
+    eng = create_db_engine(tmp_path / "v9keep.db")
+    migrate(eng)
+    fid = _seed_v8_shipped(eng)
+    taken = _WITHDRAWN_TEMPLATES[0][1]          # 第一个发货模板的 shortcut
+    edited = _WITHDRAWN_TEMPLATES[1][1]         # 第二个：留着改成用户自己的
+    with eng.begin() as conn:
+        # ① 用户改过一个发货模板（改名字）
+        conn.execute(text(
+            "UPDATE snippets SET name = '我的小写' WHERE folder_id = :f"
+            " AND shortcut = :sc"), {"f": fid, "sc": edited})
+        # ② 用户在「变换」文件夹里自建了一个
+        conn.execute(text(
+            "INSERT INTO snippets (name, shortcut, content, folder_id,"
+            " created_at, updated_at) VALUES ('我加的', 'mine', '内容', :f,"
+            " datetime('now'), datetime('now'))"), {"f": fid})
+        # ③ 用户早占了这个 shortcut（v8 当年就得让位），且不在「变换」里
+        conn.execute(text("DELETE FROM snippets WHERE shortcut = :sc"),
+                     {"sc": taken})
+        conn.execute(text(
+            "INSERT INTO snippets (name, shortcut, content, created_at,"
+            " updated_at) VALUES ('我的 up', :sc, '用户内容',"
+            " datetime('now'), datetime('now'))"), {"sc": taken})
+
+    migrate(eng)
+    with eng.connect() as conn:
+        assert conn.execute(text(
+            "PRAGMA user_version")).scalar() == _SCHEMA_VERSION
+        # ①②：文件夹还在，里面剩两行
+        assert conn.execute(text(
+            "SELECT COUNT(*) FROM snippet_folders WHERE id = :f"),
+            {"f": fid}).scalar() == 1
+        left = {r[0] for r in conn.execute(text(
+            "SELECT shortcut FROM snippets WHERE folder_id = :f"),
+            {"f": fid}).fetchall()}
+        assert left == {edited, "mine"}
+        # ③：用户的 up 一个字符没动
+        row = conn.execute(text(
+            "SELECT name, content FROM snippets WHERE shortcut = :sc"),
+            {"sc": taken}).fetchone()
+        assert row[0] == "我的 up" and row[1] == "用户内容"
+    eng.dispose()
+
 
 
 def test_migration_v7_image_hash_normalize(tmp_path):
