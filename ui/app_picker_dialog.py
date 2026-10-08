@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
 )
 
 from services import app_identity
+from ui.animations import enable_smooth_wheel
 
 logger = logging.getLogger(__name__)
 
@@ -201,6 +202,7 @@ class AppPickerDialog(QDialog):
         self._list.setObjectName("historyList")
         self._list.setIconSize(QSize(20, 20))
         self._list.setSpacing(1)
+        enable_smooth_wheel(self._list)  # 应用多时列表内滚动缓动
         for entry in self._all:
             self._list.addItem(self._make_item(entry))
         self._list.itemDoubleClicked.connect(lambda _: self.accept())

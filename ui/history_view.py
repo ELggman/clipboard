@@ -10,6 +10,7 @@
 TODO: 右键菜单（Copy / Pin / Favorite / Add To Collection / Action 子菜单）。
 """
 import logging
+from collections import OrderedDict
 
 from PySide6.QtCore import QEvent, QModelIndex, QRect, QSize, Qt, Signal
 from PySide6.QtGui import (
@@ -45,9 +46,10 @@ from PySide6.QtWidgets import (
 logger = logging.getLogger(__name__)
 
 from app.types import TEMP_MINUTE_OPTIONS
-from ui.animations import HoverAnimator
+from ui.animations import HoverAnimator, ListEnterAnimator, enable_smooth_wheel
 from ui.fluent_combo import FluentComboBox
 from ui.icons import icon as ui_icon
+from ui.scroll_fx import LIFT_ALPHA, enable_scroll_fx
 
 ROLE_ITEM = Qt.ItemDataRole.UserRole + 1  # QStandardItem 里存 ClipboardItem
 ROLE_HEADER = Qt.ItemDataRole.UserRole + 2  # 时间线月份标题（无条目数据）
@@ -56,6 +58,20 @@ ROLE_HEADER = Qt.ItemDataRole.UserRole + 2  # 时间线月份标题（无条目�
 TYPE_FILTERS = [("", "全部"), ("text", "文本"), ("url", "URL"),
                 ("image", "图片"), ("file", "文件"), ("code", "代码")]
 
+# ---- 触控板双指横滑切类型：灵敏度阈值（**要调手感就改这三个数字**）----
+# 判定一次横滑要求**同时**满足「手势累计横向位移 ≥ SWIPE_MIN_DX」和
+# 「累计横向 ≥ 累计纵向 × SWIPE_DOMINANCE」。
+#
+# 为什么不能只看「横向 > 纵向」：macOS 纵向滚动时手指会带手抖，每个事件
+# dx=2/dy=1 也会被判成横向 → 下滑经常误切类型（用户实测反馈）。而且纵向滚动
+# 的**末尾**最危险：dy 衰减到 0，只剩横向抖动。
+#
+# 用**累计**（带符号求和）而不是单事件：手抖左右抵消 → 纵向滚动累计横向≈0；
+# 真实的横向滑动是单向的 → 累计稳定增长。手抖再抖也抖不出 40px 的单向位移。
+SWIPE_MIN_DX = 40          # 累计横向位移下限（px）：调大 = 更迟钝
+SWIPE_DOMINANCE = 1.6      # 累计横向须 ≥ 累计纵向的多少倍：调大 = 更迟钝
+SWIPE_MIN_DY = 12          # 累计纵向到这条线即**锁定本次手势为纵向**，不再切换
+
 # ---- 基准尺寸（scale=1，即窗口宽度 380px 初始/最小档）----
 # 所有几何值 = 基准 × scale，随窗口宽度等比例放大（HistoryView.resizeEvent 驱动）
 # UI 优化（历史页 Refinement）：行高 44→64、圆角 12、正文 15px，
@@ -63,8 +79,17 @@ TYPE_FILTERS = [("", "全部"), ("text", "文本"), ("url", "URL"),
 BASE_WIDTH = 380            # 基准宽度（与 main_window 初始/最小宽度一致）
 BASE_FONT_PX = 15           # 主文字像素（14 → 15，正文 1~2 行 elide）
 BASE_FONT_SMALL_PX = 12     # 次要文字像素（时间/类型/文件名）
+_PIXMAP_CACHE_MAX = 256     # 缩略图 QPixmap 缓存上限（≈50MB；仅需盖住视口及邻近行）
+# 内容指纹取这几个字段：任一变化都会改变行的外观（文本/缩略图/置顶星标/会话标签/
+# 敏感遮蔽）。只用来判「要不要重播入场」——模型始终照常重建，所以漏判只是少一次
+# 动画，不会显示错数据。
+_CONTENT_KEY_FIELDS = ("id", "type", "preview", "content", "file_path", "pinned",
+                       "favorite", "session_name", "language", "sensitive",
+                       "expires_at")
 ROW_HEIGHT_BASE = 64        # 文本条目行高（两行舒展：meta + 正文）
-THUMB_SIZE_BASE = 68        # 图片条目缩略图边长
+THUMB_SIZE_BASE = 68        # 图片条目缩略图框**高**（宽按原图比例，上限见下）
+_THUMB_ASPECT = 2.5         # 缩略图框最大宽高比（16:9=1.78、21:9=2.33 都装得下；
+                            # 超宽图按上限缩窄，居中留白，不溢出列表宽度）
 _CAPTION_LINE_H = 18        # 文件名行高（换行按行数累加）
 _TOP_PAD = 10               # 缩略图顶部间距
 _TIME_GAP = 4               # 缩略图与时间·类型行间距
@@ -100,11 +125,15 @@ class HistoryDelegate(QStyledItemDelegate):
         self._provider = None        # ImageService（缩略图来源，懒加载）
         self.show_image_filename = True  # 配置开关（DEVELOPMENT.md 设置项）
         self._scale = 1.0            # 响应式缩放（窗口宽度 / BASE_WIDTH）
-        self._pixmap_cache: dict[str, QPixmap] = {}
+        # 缩略图 QPixmap 缓存：**有界** LRU。一张 256px 缩略图 ≈196KB，无界 dict
+        # 在长会话里能攒到上百 MB（实测）。256 条 ≈50MB，足够盖住当前视口 + 邻近行。
+        self._pixmap_cache: OrderedDict[str, QPixmap] = OrderedDict()
         self._main_font_px = BASE_FONT_PX        # 基准字号（设置页可调）
         self._small_font_px = BASE_FONT_SMALL_PX
         self._view_session_id: int | None = None  # 当前视图会话（None=全局搜索）
         self.animator = None  # HoverAnimator（hover 背景过渡，view 装配）
+        self.enter_animator = None  # ListEnterAnimator（逐项入场，view 装配）
+        self.scroll_fx = None  # ScrollFx（视差 + 卡片抬升，view 装配）
 
     def set_image_service(self, service) -> None:
         self._provider = service
@@ -177,7 +206,15 @@ class HistoryDelegate(QStyledItemDelegate):
             return
 
         item = index.data(ROLE_ITEM)
+        self._note_visible(index.row())
+        enter = self._enter_fx(index.row())
         painter.save()
+        if enter is not None:
+            dy, alpha = enter
+            painter.setOpacity(alpha)
+            # 裁剪到本行：入场时行内容下移，不越界压到相邻行
+            painter.setClipRect(option.rect)
+            painter.translate(0, dy)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
         rect = QRect(option.rect).adjusted(1, 1, -1, -1)
@@ -202,6 +239,31 @@ class HistoryDelegate(QStyledItemDelegate):
 
         painter.restore()
 
+    def _note_visible(self, row: int) -> None:
+        """上报「这一行此刻被画出来了」——逐项入场由绘制驱动（见
+        `ListEnterAnimator.observe`）：只有**首次填充**那一屏的行才入场，
+        滚动露面的行一律静止（滚动中每行都会「初次露面」，逐条播就是让整个
+        视口常驻半透明中间态，读起来就是掉帧）。"""
+        if self.enter_animator is not None:
+            self.enter_animator.observe(row)
+
+    def _enter_fx(self, row: int):
+        """逐项入场的行内形变：返回 `(下移像素, 透明度)`，静止态返回 None。
+
+        位移与透明度同源（都从进度 v 推出）：`dy = 该行起始位移 × (1 - v)`。
+
+        静止态（未播放 / 已播完 / 减少动效）**返回 None**，paint 完全走原路径
+        ——这是「动画结束后与无动画时逐像素一致」的保证，也避免常驻的 clip
+        改变既有绘制（选中胶囊等本来就贴合行矩形，但不必依赖这一点）。
+        """
+        anim = self.enter_animator
+        if anim is None:
+            return None
+        v = anim.local(row)
+        if v >= 1.0:
+            return None
+        return (anim.offset_for(row) * (1.0 - v), v)
+
     def _draw_header(self, painter, rect, option, label: str) -> None:
         """时间线月份标题：加粗次要色文字，不画卡片底色。"""
         painter.setPen(option.palette.placeholderText().color())
@@ -221,6 +283,7 @@ class HistoryDelegate(QStyledItemDelegate):
 
     def _draw_background(self, painter, rect, option, selected,
                          hover_alpha) -> None:
+        self._draw_lift(painter, rect, option)
         path = QPainterPath()
         path.addRoundedRect(rect, self._s(_RADIUS), self._s(_RADIUS))
         if selected:
@@ -244,6 +307,43 @@ class HistoryDelegate(QStyledItemDelegate):
                 bg = QColor(option.palette.base().color())
                 bg.setAlpha(round(255 * hover_alpha))
             painter.fillPath(path, bg)
+
+    def _draw_lift(self, painter, rect, option) -> None:
+        """卡片抬升：滚动时行像被抬起来，底下补一层近似高斯阴影。
+
+        用三层同心圆角矩形叠出阴影（alpha 由外到内递增），比
+        `QGraphicsDropShadowEffect` 便宜两个数量级，也免了每行一个图元对象。
+        alpha 与 `ScrollFx.lift()` 同源——滚动停下就归零，静止态与没有本
+        装饰时逐像素一致。深色主题下阴影几乎不可见，用高光替代（抬升感来自
+        与背景的明度差，而不是黑）。
+
+        ⚠️ 取强度要用 `fx.lift()` 而**不是** `fx.activity()`：后者只由「视差或
+        抬升任一开着」驱动，只开视差时它照样是 1.0，直接读它会让「卡片抬升」
+        这个勾选框完全失效（用户实测报的「开关不明显」）。
+        """
+        fx = getattr(self, "scroll_fx", None)
+        if fx is None:
+            return
+        act = fx.lift()
+        if act <= 0.001:
+            return
+        dark = option.palette.window().color().lightness() < 128
+        painter.save()
+        painter.setPen(Qt.PenStyle.NoPen)
+        base = QPainterPath()
+        base.addRoundedRect(rect, self._s(_RADIUS), self._s(_RADIUS))
+        # 四层**同心环**（每层 = 外圈减掉内圈，所以只画到行外、不动行内），
+        # 越外越淡；整体再往下偏一点，读起来是投影而不是描边
+        for grow, frac in ((4, 0.20), (3, 0.35), (2, 0.55), (1, 0.8)):
+            g = self._s(grow)
+            c = QColor(255, 255, 255) if dark else QColor(0, 0, 0)
+            c.setAlpha(int(round(LIFT_ALPHA * frac * act)))
+            outer = QPainterPath()
+            outer.addRoundedRect(rect.adjusted(-g, -g, g, g + self._s(2)),
+                                 self._s(_RADIUS + grow),
+                                 self._s(_RADIUS + grow))
+            painter.fillPath(outer.subtracted(base), c)
+        painter.restore()
 
     def _draw_text_row(self, painter, rect, option, item) -> None:
         # QPalette 颜色取值返回 QBrush，setPen 只收 QColor → 统一 .color()
@@ -277,13 +377,27 @@ class HistoryDelegate(QStyledItemDelegate):
                         avail=rect.width() - mx - (content_x - rect.left()))
 
     def _draw_image_row(self, painter, rect, option, item) -> None:
-        # 缩略图水平居中
+        # 缩略图：等比缩放进 `THUMB_SIZE_BASE` 高、最多 `_THUMB_ASPECT` 倍宽的框，
+        # 水平居中。⚠️ **不能**直接 drawPixmap(x, y, size, size, pix) 塞进正方形
+        # ——宽截图（256×115）会被纵向拉长、竖屏截图被横向压扁，字全糊（用户实测
+        # 反馈「缩略图看不清」）。开 SmoothPixmapTransform 走抗锯齿降采样，否则
+        # 512→136 这种大幅缩小会锯齿一片。
         pix = self._thumbnail(item.file_path)
         size = self._s(THUMB_SIZE_BASE)
-        x = rect.center().x() - size // 2
         y = rect.top() + self._s(_TOP_PAD)
+        # 视差：滚动时缩略图相对行做一点反向位移（越靠视口边缘让得越多）。
+        # 行高留白够（68px 的图 + 时间行），±6px 不会切到图；只在滚动中非零
+        fx = getattr(self, "scroll_fx", None)
+        if fx is not None:
+            y += fx.parallax_for(rect)
         if pix is not None:
-            painter.drawPixmap(x, y, size, size, pix)
+            box_w = self._s(round(THUMB_SIZE_BASE * _THUMB_ASPECT))
+            target = pix.size().scaled(box_w, size,
+                                       Qt.AspectRatioMode.KeepAspectRatio)
+            w = max(1, target.width())
+            h = max(1, target.height())
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+            painter.drawPixmap(rect.center().x() - w // 2, y, w, h, pix)
 
         font = self._font(small=True)
         painter.setFont(font)
@@ -471,13 +585,17 @@ class HistoryDelegate(QStyledItemDelegate):
         return lines
 
     def _thumbnail(self, file_path: str) -> QPixmap | None:
-        if file_path in self._pixmap_cache:
-            return self._pixmap_cache[file_path]
+        cached = self._pixmap_cache.get(file_path)
+        if cached is not None:
+            self._pixmap_cache.move_to_end(file_path)  # LRU：标记为最近使用
+            return cached
         qimg = self._provider.thumbnail(file_path)
         if qimg is None:
             return None
         pix = QPixmap.fromImage(qimg)
         self._pixmap_cache[file_path] = pix
+        if len(self._pixmap_cache) > _PIXMAP_CACHE_MAX:
+            self._pixmap_cache.popitem(last=False)  # 淘汰最久未用
         return pix
 
 
@@ -504,10 +622,17 @@ class HistoryView(QWidget):
         # 触控板双指横滑是 viewport 上的 Wheel 事件，需对 viewport 也安装过滤器
         self._list.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._list.installEventFilter(self)
+        # 滚轮接管（缓动 + 速度倍率）**必须先装**：Qt 的多个 eventFilter 是
+        # 「后装的先跑」，手势机（下一行）要比它先看到原始事件——否则纵向事件
+        # 被缩放层先消费掉，手势机就判不出「本次是纵向」，末尾的手抖又会误切类型。
+        enable_smooth_wheel(self._list)
         self._list.viewport().installEventFilter(self)
         # 触控板手势状态机：以 ScrollEnd 为手势边界（一次滑动可能多个 Begin）
         self._gesture_ended = True     # 上次手势已结束（允许下一次 Begin 切换）
         self._gesture_switched = False  # 当前手势是否已切换类型
+        self._gesture_axis = ""        # 当前手势主导轴：""/horizontal/vertical
+        self._dx_sum = 0               # 当前手势累计横向位移（带符号，手抖自抵）
+        self._dy_sum = 0               # 当前手势累计纵向位移
 
         self._model = QStandardItemModel(self._list)
         self._list.setModel(self._model)
@@ -515,6 +640,9 @@ class HistoryView(QWidget):
         self._list.setItemDelegate(self._delegate)
         # hover 背景过渡（150-200ms，QTimer 驱动；list 已开 MouseTracking）
         self._delegate.animator = HoverAnimator(self._list, self._delegate)
+        self._delegate.enter_animator = ListEnterAnimator(self._list)
+        # 滚动装饰：悬浮滚动条 + 边缘渐隐（挂在列表上）+ 视差/抬升（经 delegate）
+        enable_scroll_fx(self._list, self._delegate)
         self._list.clicked.connect(self._on_item_clicked)  # 单击展开详情
 
         # 空态提示：覆盖列表视口，无内容时居中显示（搜索无匹配 / 会话暂无内容 /
@@ -531,6 +659,8 @@ class HistoryView(QWidget):
         # → _apply_type_filter → _update_list_empty，需这些状态已存在（实测崩）
         self._filter_type = ""  # 当前类型筛选
         self._all_items: list = []  # set_items 传入的完整数据（筛选前）
+        self._content_keys: list = []  # 上一次的内容指纹（判「要不要重播入场」）
+        self._image_service = None  # ImageService（后台预热缩略图用）
         self._view_session_id: int | None = 1  # 当前视图会话（None=全局搜索）
         self._search_query = ""          # 当前搜索关键词（空态文案用；随会话切换清空）
         self._type_tabs = QListWidget()
@@ -693,10 +823,15 @@ class HistoryView(QWidget):
         + **动量段** `Begin→Momentum×N→End`（动量开始也被系统标成
         ScrollBegin，段间 End→Begin 间隔 <65ms——无法用时间区分）。
         可靠判定 = **Begin 后第一个非 Begin 事件**：
-        - `Update` → 手指段（用户滑动）→ 切 1 格
+        - `Update` → 手指段（用户滑动）→ 判定为横向才切 1 格
         - `Momentum` → 动量段 → 不切（锁死）
         连续 Begin（实测 `Begin(-16)→Begin(0)→Update(-34)`）吞；
-        Begin dx=0 由首个非零 Update 补切。无阶段信息（鼠标滚轮等）放行。
+        Begin dx=0 由后续首个达标的 Update 补判。无阶段信息（鼠标滚轮）放行。
+
+        灵敏度阈值见文件头 `SWIPE_MIN_DX` / `SWIPE_DOMINANCE` / `SWIPE_MIN_DY`
+        （横向必须是**累计够长 + 明显压过纵向**的单向位移）。另外**一旦判定为
+        纵向就锁定本次手势**：纵向滚动末尾 dy 衰减到 0、只剩横向抖动，正是
+        误切类型的高发点；锁定后本次手势再怎么抖都不切。
         """
         pd = event.pixelDelta()
         dx = pd.x() if not pd.isNull() else 0
@@ -711,39 +846,62 @@ class HistoryView(QWidget):
         if phase == Qt.ScrollPhase.ScrollBegin:
             if not self._gesture_ended:
                 return True  # 连续 Begin（同一次滑动）：吞
-            if abs(dx) <= abs(dy) and (dx != 0 or dy != 0):
-                return False  # 纵向主导：放行，不改变手势状态
-            # 横向手势开始（含 dx=dy=0）：等待首个 Update（手指段）或
-            # Momentum（动量段）判定
             self._gesture_ended = False
             self._gesture_switched = False
-            return True
+            self._dx_sum, self._dy_sum = dx, dy
+            # Begin 只用来**分类**，不用来切换：单个 Begin 的 delta 可能是噪声
+            # （实测有过 Begin(-16)→Begin(0)→Update(-34)），切换留给 Update。
+            self._gesture_axis = self._axis_of(abs(self._dx_sum),
+                                               abs(self._dy_sum))
+            return self._gesture_axis != "vertical"  # 纵向：Begin 也放行
         if phase == Qt.ScrollPhase.ScrollUpdate:
-            if not self._gesture_switched:
-                if abs(dx) <= abs(dy):
-                    return False  # 纵向主导：放行
+            self._dx_sum += dx
+            self._dy_sum += dy
+            if self._gesture_axis == "vertical":
+                return False  # 本次手势已锁定纵向：放行，不再判定
+            if self._gesture_axis == "":
+                self._gesture_axis = self._axis_of(abs(self._dx_sum),
+                                                   abs(self._dy_sum))
+                if self._gesture_axis == "vertical":
+                    return False
+            if self._gesture_axis == "horizontal" and not self._gesture_switched:
                 if dx != 0:
                     # 手指段：双指向左滑（dx<0）→ 下一类型；向右滑 → 上一类型
                     self._gesture_switched = True
                     self._step_type_filter(-(1 if dx > 0 else -1))
             return True
         if phase == Qt.ScrollPhase.ScrollMomentum:
-            if abs(dx) <= abs(dy):
-                # 纵向动量：放行——惯性滚动必须交给列表（曾无条件吞掉，
-                # 手指一停列表就停，下滑变成「一格一格」）
+            if self._gesture_axis != "horizontal":
+                # 纵向动量（含尚未判定的）：放行——惯性滚动必须交给列表
+                # （曾无条件吞掉，手指一停列表就停，下滑变成「一格一格」）
                 return False
             if not self._gesture_switched:
                 self._gesture_switched = True  # 横向动量段：不切，锁死本次滑动
             return True
         if phase == Qt.ScrollPhase.ScrollEnd:
-            self._gesture_ended = True  # 手势边界：允许下一次 Begin 判定
+            self._gesture_ended = True   # 手势边界：允许下一次 Begin 判定
+            self._gesture_axis = ""
             return False  # 放行（End 无 delta，对滚动无害）
         return True
+
+    @staticmethod
+    def _axis_of(adx: float, ady: float) -> str:
+        """手势主导轴："" 未定 / "horizontal" / "vertical"。
+
+        横向要求**够长且明显压过纵向**（阈值见文件头），避免纵向滚动的手抖
+        被判成横滑；纵向到 `SWIPE_MIN_DY` 就直接锁定，不留给手抖再翻盘的机会。
+        """
+        if adx >= SWIPE_MIN_DX and adx >= ady * SWIPE_DOMINANCE:
+            return "horizontal"
+        if ady >= SWIPE_MIN_DY:
+            return "vertical"
+        return ""
 
     # ---- 注入 ----
 
     def set_image_service(self, service) -> None:
-        """注入图片服务：image 条目懒加载缩略图（内存 LRU 缓存）。"""
+        """注入图片服务：image 条目懒加载缩略图（磁盘缩略图 + 内存 LRU 两级）。"""
+        self._image_service = service
         self._delegate.set_image_service(service)
 
     def set_show_image_filename(self, show: bool) -> None:
@@ -1217,9 +1375,34 @@ class HistoryView(QWidget):
     # ---- 数据 ----
 
     def set_items(self, items: list) -> None:
-        """整体替换列表（启动恢复 / 搜索结果），items 最新在前。"""
-        self._all_items = list(items)
-        self._apply_type_filter()
+        """整体替换列表（启动恢复 / 搜索结果 / 会话切换），items 最新在前。
+
+        **内容与上次完全一致时不重播逐项入场**（回归）：早先每次 `set_items` 都无条件
+        `_play_enter()`，于是「在几个视图之间快速来回切换」时，只要回到历史页就把整表
+        瀑布重播一遍（800ms 内每 16ms 一次全视口重绘），读起来就是卡。数据没变就不该动。
+        模型仍然重建 —— 500 行只要 0.5ms，没必要为省它引入缓存失效的风险。
+        """
+        items = list(items)
+        keys = [tuple(getattr(it, f, "") for f in _CONTENT_KEY_FIELDS)
+                for it in items]
+        changed = keys != self._content_keys
+        self._content_keys = keys
+        self._all_items = items
+        self._apply_type_filter(animate=changed)
+        self._prefetch_images(items)
+
+    def _prefetch_images(self, items: list) -> None:
+        """后台预热列表里图片条目的缩略图。
+
+        老条目（升级前就存在、没有落盘缩略图）第一次被滚到仍要付一次原图解码，
+        预热把它挪到后台线程，避免「升级后第一次滚图片」的那一下卡顿。
+        """
+        if self._image_service is None:
+            return
+        paths = [it.file_path for it in items
+                 if it.type == "image" and it.file_path]
+        if paths:
+            self._image_service.prefetch(paths)
 
     def add_item(self, clipboard_item) -> None:
         """追加一条实时捕获（置顶优先：插到置顶组之后，最新在上）。
@@ -1241,6 +1424,8 @@ class HistoryView(QWidget):
                 1 for it in self._all_items[:pos]
                 if not self._filter_type or it.type == self._filter_type)
             self._model.insertRow(visible_before, self._make_row(clipboard_item))
+            # 逐项入场的行号记录跟着后移（新行本身不播入场）
+            self._delegate.enter_animator.rows_inserted(visible_before)
             self._update_list_empty()  # 有内容了 → 收起空态提示
 
     # ---- 类型筛选 ----
@@ -1250,12 +1435,38 @@ class HistoryView(QWidget):
             self._filter_type = TYPE_FILTERS[row][0]
             self._apply_type_filter()
 
-    def _apply_type_filter(self) -> None:
+    def _apply_type_filter(self, animate: bool = True) -> None:
+        """按当前类型筛选重建模型。
+
+        `animate=False` 用于「内容其实没变」的重填路径（见 `set_items`）：重建照做，
+        但不重播 800ms 瀑布。用户真的点了类型 tab 走默认 `True` —— 那个动画是要的。
+        """
+        rows = [self._make_row(item) for item in self._all_items
+                if not self._filter_type or item.type == self._filter_type]
         self._model.clear()
-        for item in self._all_items:
-            if not self._filter_type or item.type == self._filter_type:
-                self._model.appendRow(self._make_row(item))
+        if rows:
+            # 一次性批量追加。逐行 appendRow 每行都发一次 rowsInserted、触发一轮
+            # 视图布局失效，数千条时是实打实的掉帧来源（实测 8000 条省 ~4ms，
+            # 且把 N 次信号收敛成 1 次）。
+            self._model.invisibleRootItem().appendRows(rows)
         self._update_list_empty()
+        if animate:
+            self._play_enter()
+
+    def _play_enter(self) -> None:
+        """整表重建后播一次逐项入场（瀑布感）。
+
+        播放点是本方法而非 `set_items`：`_apply_type_filter` 是**所有**整表填充
+        的唯一汇合处（启动恢复 / 会话切换 / 搜索结果 / 类型标签切换 / 各种刷新
+        回调都经此），一处接入即全覆盖。
+
+        **不播**的路径：`add_item`（实时捕获单条插入，走 `insertRow` 不重建整表，
+        见 `ListEnterAnimator.rows_inserted`），**滚动露面**的行
+        （`HistoryDelegate._note_visible` 会在用户滚动后直接不排入场），以及
+        **内容没变的重新填充**（`set_items` 指纹一致 → `animate=False`；快速来回
+        切页时每次都重播整表瀑布会让切页看着很卡）。
+        """
+        self._delegate.enter_animator.play(self._model.rowCount())
 
     def _update_list_empty(self) -> None:
         """列表空态：有行隐藏；否则按上下文显示提示（搜索无匹配/会话为空/筛选滤空）。"""

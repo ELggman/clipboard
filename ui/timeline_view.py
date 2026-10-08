@@ -22,7 +22,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app import events
 from services import history_service
+from ui.animations import enable_smooth_wheel
+from ui.scroll_fx import enable_scroll_fx
 from ui.history_view import (
     BASE_WIDTH,
     ROLE_HEADER,
@@ -43,6 +46,7 @@ class TimelineView(QWidget):
         super().__init__(parent)
         self._engine = None
         self._groups: list[tuple[str, list]] = []
+        self._loaded_rev = -1  # 上次装载的数据修订号（showEvent 判脏用，见 app/events.py）
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -92,6 +96,8 @@ class TimelineView(QWidget):
         self._list.setModel(self._model)
         self._delegate = HistoryDelegate(self._list)
         self._list.setItemDelegate(self._delegate)
+        enable_smooth_wheel(self._list)  # 鼠标滚轮缓动（触控板不介入）
+        enable_scroll_fx(self._list, self._delegate)  # 滚动装饰（悬浮条/渐隐/视差/抬升）
         self._list.clicked.connect(self._on_item_clicked)
         layout.addWidget(self._list, 1)
 
@@ -106,7 +112,9 @@ class TimelineView(QWidget):
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
-        if self._engine is not None:
+        # 只在数据真的变过时重查：四个页面原先每次显示都无条件 reload()，快速来回
+        # 切视图时每切一次就白查一遍库（实测 5.4ms）。见 app/events.py。
+        if self._engine is not None and self._loaded_rev != events.revision():
             self.reload()
 
     def resizeEvent(self, event) -> None:
@@ -136,6 +144,7 @@ class TimelineView(QWidget):
             return
         self._groups = history_service.list_grouped(self._engine)
         self._on_bucket_selected(self._tabs.currentRow())
+        self._loaded_rev = events.revision()  # 在装载**之后**记，免得漏掉装载中的提交
 
     # ---- 渲染 ----
 
@@ -158,6 +167,7 @@ class TimelineView(QWidget):
         counts = self._bucket_counts()
         self._count_label.setText(f"{counts[_BUCKETS[row][0]]} 条")
         self._position_count_label()  # QLabel 不随文本变宽，须重算并贴右
+        shown: list = []
         if match is None:
             # 更早：所有月份桶，带月份标题
             for label, items in self._groups:
@@ -165,11 +175,20 @@ class TimelineView(QWidget):
                     self._model.appendRow(self._make_header(label))
                     for item in items:
                         self._model.appendRow(self._make_row(item))
+                    shown.extend(items)
         else:
             for label, items in self._groups:
                 if label == match:
                     for item in items:
                         self._model.appendRow(self._make_row(item))
+                    shown.extend(items)
+        # 后台预热缩略图：老条目首次解码别落在绘制路径上（见 ImageService.prefetch）
+        svc = getattr(self._delegate, "_provider", None)
+        if svc is not None:
+            paths = [it.file_path for it in shown
+                     if it.type == "image" and it.file_path]
+            if paths:
+                svc.prefetch(paths)
 
     @staticmethod
     def _make_header(label: str) -> QStandardItem:

@@ -4,6 +4,14 @@
 app:
   theme: system            # system / light / dark
   font_size: 14            # 历史列表基准字号（12-16）
+  scroll_speed: 0.5        # 滚动速度倍率（0.2-3.0，1.0 = Qt 原生距离）。
+                           # 触控板与鼠标滚轮共用：Qt 把一次输入的位移再乘
+                           # wheelScrollLines 行，macOS 上偏快，0.5 ≈ 原生一半
+  scroll_effects:          # 滚动视觉装饰（逐项开关，见 ui/scroll_fx.py）
+    scrollbar: true        # 悬浮滚动条（浮在内容上方，闲置自动淡出）
+    edge_fade: true        # 上下边缘渐隐（还有内容的那一侧）
+    parallax: true         # 缩略图视差（滚动时图与行轻微错位）
+    lift: true             # 卡片抬升阴影（滚动时行像被抬起）
   launch_at_login: false   # 开机启动（写入 LaunchAgent）
 
 history:

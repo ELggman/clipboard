@@ -27,6 +27,7 @@ from services.template.registry import (
     filter_candidates,
     next_input_insert,
 )
+from ui.animations import enable_smooth_wheel
 from ui.template_components import load_favorite_variables
 
 _TRIGGER_RE = re.compile(r"\{\{(\w*)$")
@@ -55,6 +56,7 @@ class _CandidatePopup(QWidget):
         self._list.setObjectName("historyList")
         self._list.setUniformItemSizes(True)
         self._list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        enable_smooth_wheel(self._list)  # 候选多时列表内滚动缓动
         lay.addWidget(self._list)
 
     def show_at(self, inserts: list[str], global_pos) -> None:

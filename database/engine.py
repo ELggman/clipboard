@@ -41,6 +41,19 @@ def create_db_engine(db_path: Path) -> Engine:
         cursor.execute("PRAGMA busy_timeout=5000")
         cursor.close()
 
+    @event.listens_for(engine, "commit")
+    def _bump_revision(_conn):  # noqa: ANN001
+        """任何提交都算「数据变了」→ 页面下次显示时重查（见 app/events.py）。
+
+        挂在 commit 事件上而不是逐个写函数手动调用：服务层有十几个写函数
+        （save/delete/pin/favorite/trim/clear/session/collection…），逐个加
+        `bump()` 一定会漏，而漏掉的表现是「页面显示旧数据」这种难查的 bug。
+        提交是唯一的事实来源，只读查询不提交、也就不会误 bump。
+        """
+        from app.events import bump
+
+        bump()
+
     logger.info("SQLite 引擎就绪: %s", db_path)
     return engine
 

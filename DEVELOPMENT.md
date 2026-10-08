@@ -113,6 +113,8 @@ clipboard-workspace/
 │   ├── settings_view.py     # 设置（含隐私区：策略/忽略应用/暂停监控）
 │   ├── clean_data_dialog.py # 清理数据弹窗（时间+类型筛选删除）
 │   ├── app_picker_dialog.py # 已安装应用选择器（忽略列表）
+│   ├── animations.py        # 动画/滚动基础设施（滚轮缓动、逐项入场、帧率时钟）
+│   ├── scroll_fx.py         # 滚动视觉装饰（悬浮滚动条/边缘渐隐/视差/抬升）
 │   └── theme.py             # 浅色/深色/跟随系统（QPalette + Stylesheet）
 ├── resources/               # 图标、qss
 ├── config/
@@ -258,7 +260,25 @@ def load_actions(extra_dirs: list[Path] = ()) -> list[ClipboardAction]:
 ### 3.5 图片处理
 
 - 图片不入库：落盘 `ApplicationData/Images/<hash>.png`，DB 只存 `file_path`
-- 缩略图：生成 <256px 缓存到内存 LRU（QImage），列表展示用
+- 缩略图：长边 **512px**（`THUMB_SIZE`），落盘 + 内存 LRU 两级缓存，列表展示用。
+  **2026-09-30 由 256 提到 512**（用户报「缩略图看不清」）：列表行已改 68px 高、
+  缩略图框最宽 2.5×68=170 逻辑 px，Retina 下要 340 物理 px，256px 源已经不够。
+  后缀里带尺寸（`.t512.png`），将来再调只改 `THUMB_SIZE` 常量、老文件自动失效
+  重生成；旧 256px 文件（`.thumb.png`）在重写/删除时顺手清掉
+  （`_LEGACY_THUMB_SUFFIX`）。**只修分辨率、不动行高**（用户确认档位）
+- **缩略图两级缓存（关键，2026-09-30）**：① 磁盘级 `images/<digest>.t512.png`
+  ——`save()` 时顺手落盘（此处原图已解码在手，边际 ~0.5ms），老条目首次用到时
+  懒回填；② 内存级 `@lru_cache(maxsize=128)`（同一屏反复绘制免重复读盘）。
+  为什么两级都要：`lru_cache` 与 delegate 的 QPixmap 缓存**都只活在当前进程**，
+  每次冷启动第一次滚到图片都要重解原图。实测解码 3.04ms vs 读落盘小文件 0.149ms
+  （**差 20×**），而图片列表首轮滚动中位 9.77ms / p95 16.23ms / 最大 29.64ms
+  ——**直接吃掉 60fps 的 16.7ms 预算**。落盘后同场景中位 1.28ms、零帧超预算。
+  落盘缩略图与直接解码**逐像素一致**（读回后统一 `convertToFormat(RGBA8888)`，
+  同一格式契约），像素缓存刷掉不能改变画出来的东西。
+  只对**受管**路径落盘（`is_managed` 守卫）——FILE 条目指向用户原始文档，绝不
+  往用户目录写 `.t512.png`。`delete()` 连带删掉小文件。预热
+  `ImageService.prefetch(paths)` 用后台守护线程（纯 PIL + 文件 I/O，**不碰任何
+  Qt 对象**，故无线程亲和性问题）把老条目成批转成小文件
 - 懒加载：滚动到可视区域才生成/读取缩略图（`setItemPrototype` + 手动触发）
 - **失败不缓存（关键）**：`@lru_cache` 会缓存 None 返回值——文件缺失的失败被永久缓存，文件重建后永远返回 None（实测：历史/收藏全部缩略图消失，重启才恢复）。解码走 `_thumbnail_cached`（lru_cache 只缓存成功），失败抛异常走未缓存入口重试
 - **删除保护（关键）**：`delete()` 只允许删除 `images/` 目录内文件（`is_managed` 守卫）。
@@ -376,6 +396,101 @@ def load_actions(extra_dirs: list[Path] = ()) -> list[ClipboardAction]:
 - **调色板取色**：自绘 delegate 用 `option.palette`（accent 走 Link 角色，
   深浅主题自适应）；**QImage.constBits() 是 BGRA 字节序**——像素分析
   脚本按 RGBA 读会 R/B 反转（调试血泪）
+- **图片行缩略图：等比、不压扁、开抗锯齿**（2026-09-30，用户报「缩略图看不清」）。
+  缩略图框 **高固定 68px**（`THUMB_SIZE_BASE`，行高不变——用户确认档位），
+  **宽度按原图比例**、上限 2.5×68=170px（`_THUMB_ASPECT`，21:9 也装得下）；
+  用 `QPixmap.scaled(..., KeepAspectRatio)` 缩到框内，**不是**塞进 68×68 方框
+  ——后者把宽图压成方图，横竖都糊。再开 `SmoothPixmapTransform` 抗锯齿降采样
+  （512→136 这种大幅缩小不开就是锯齿一片）。源缩略图提到 512px（§3.5）也是为配
+  Retina 下 340 物理 px 的需求
+- **滚动观感 = 原生顺滑**（用户确认档位：不做回弹、不做夸张惯性滑行）。
+  按输入设备分流，这是唯一可靠判据 `QWheelEvent.phase()`：
+  **触控板**（带 Begin/Update/Momentum/End）——系统自带惯性曲线，我们**只按
+  倍率缩放距离、不补动画**（自己再叠时间轴会和系统惯性抢方向盘）；
+  **鼠标滚轮**（`NoScrollPhase`）——Qt 原生无任何缓动，由
+  `ui.animations.SmoothWheelScroller` 补一层 OutCubic 减速（140–320ms）。
+  两者的距离都照抄 Qt 的 `(angleDelta/120) × wheelScrollLines × singleStep`
+  （不另拍步长），再乘**滚动速度倍率**（设置页「滚动速度」→ `app.scroll_speed`；
+  1.0 = 原生，默认 0.5——Qt 会再乘 `wheelScrollLines` 行，macOS 上偏快）。
+  ⚠️ 实测（2026-09-30 离屏探针）`QListView`/`QScrollArea`/`QPlainTextEdit`/
+  `QTextEdit` **一律只看 `angleDelta`，`pixelDelta` 被完全忽略**——「像素模式让
+  pixelDelta 生效」是错的，`ScrollPerPixel` 只解决**定位**精度（别量化成整行），
+  距离始终由 `angleDelta` 决定。接入一行：
+  `enable_smooth_wheel(任意 QAbstractScrollArea)`。
+  与自带手势机的页面（历史页横滑切类型、模板页横滑平移）同装 viewport 时，
+  **手势过滤器必须后装**——Qt 的多个 eventFilter 是「后装的先跑」，手势机要先
+  看到原始事件才锁得住纵向；否则缩放层先吃掉纵向事件（`_dy_sum` 恒为 0），
+  滚动末尾的手抖又会误切类型。系统「减少动效」开启时完全不介入，退回原生瞬时
+  （§9 两条坑）
+- **列表逐项入场 = 只播首次填充的瀑布**（历史页，对齐 iOS / Flutter
+  AnimatedList 默认观感）：行从下方 64px 滑入 + 透明度 0→1，单行 300ms
+  OutCubic；相邻行按下标错峰 50ms、末行延迟封顶 500ms（整段 ≤800ms，与行数
+  无关），已露过面的行不重播。**错峰基准是「本轮首个绘制的可见行」（视口顶行），
+  不是行号 0**（2026-09-30 回归，用户实测报「滚动条停在中间时切视图先白屏半秒
+  再出数据」）：模型重建只改 range 不改 value，滚动位置被保留，可见行都在 30 号
+  开外，按绝对行号算会**全部撞上 500ms 封顶** → 整屏 alpha=0 白等半秒。
+  **滚动一律不动画**（关键取舍，别再加回来）：
+  滚动时几乎每一行都是「初次露面」，逐条播就是让**整个视口常驻中间态**——实测
+  连续滚动时 100% 的可见行 `alpha < 0.9`（中位仅 0.37）、位移中位 15px，读起来
+  就是「帧率低、不丝滑」（用户实测报的正是这个）。同一轮实测里 delegate 单帧
+  绘制只要 ~2.3ms（p95 2.8ms、零次超 16.7ms 预算），**根本不是帧率问题**，
+  是常驻半透明。故 `observe` 只在**首次填充尚未结束**时为可见行排队，用户一
+  滚动（`verticalScrollBar().valueChanged`）瀑布立即收摊——否则装载后 800ms 内
+  滚到的行会按 `MAX_DELAY_MS` 排队，位移一整行高、alpha 0，**隐身半秒**。
+  **只维护 `{行号: 起始时刻}` 一张表 + 一个 16ms QTimer**
+  （`ui.animations.ListEnterAnimator`），每行进度按单调时钟现算，偏移/透明度由
+  `HistoryDelegate.paint` 应用——上千项也不建 per-item 动画对象、不用
+  QGraphicsEffect。**入场由绘制驱动**：delegate 在 paint 顶部上报可见
+  （`_note_visible` → `observe`），故「首次可见」与「首次绘制」等价，滚动/改尺寸
+  /重排都不用接信号。整表填充的播放点在 `_apply_type_filter`（唯一汇合处）；
+  `add_item` 单条插入**不播**（`rows_inserted` 把新行记为已就位）。静止态
+  delegate 走原路径（`_enter_fx` 返回 None），收尾帧与无动画逐像素一致
+- **切页不重做已经做过的事**（2026-09-30，用户报「快速在几个视图之间切换能感受到
+  卡顿／数据加载较慢」）。根因是每次进入页面都完整做一遍「查库 + 重建 + 重播动画 +
+  整页淡入」，四个都要治：
+  ① **数据修订号**（`app/events.py`，模块级 `bump()/revision()`，**不引入 Qt 信号**）
+  ——挂在 SQLAlchemy 的 `engine "commit"` 事件上（`database/engine.py`），
+  任何提交都算「数据变了」，只读查询不算。四个页面 `showEvent` 改成
+  `if self._loaded_rev != events.revision(): self.reload()`，装载**之后**再记，
+  免得漏掉装载过程中的提交。挂 commit 事件而非散在各写入点，是为了**漏不掉写路径**；
+  失败方向也是保守的（多查一次）。切页的 4-5ms 同步查库由此变成「几乎不查」
+  ② **内容指纹**：`set_items` 先算 `[(id,type,preview,content,file_path,pinned,
+  favorite,session_name,language,sensitive,expires_at)…]`（**别用 `(id,pinned,
+  favorite)` 三元组**——测试里构造的条目 `id` 默认 0 会撞键，实测动画被误跳过），
+  与上次相同则 `_apply_type_filter(animate=False)`——模型照旧重建（0.53ms），
+  但**不重播 800ms 瀑布**。用户真的点类型 tab 时仍 `animate=True`
+  ③ **淡入节流**：`_fade_in_page` 距上次切页 <250ms 直接显示不淡入
+  （每次淡入是 140ms 整页离屏渲染，连点会一段没走完就叠下一段；中途重启的淡入
+  读起来就是闪）
+  ④ 顺带把 delegate 的 `_pixmap_cache` 从无界 dict 改成 `OrderedDict` LRU（上限
+  256）——一张 256×192 的 QPixmap ≈ 196KB，长会话/多会话切换会累积到上百 MB
+- **滚动视觉装饰**（`ui/scroll_fx.py`，2026-09-30，用户要「更多视觉装饰」）。
+  四件套由 `enable_scroll_fx(area, delegate=None)` 装配，**逐项可开关**（设置页
+  「滚动效果」→ `app.scroll_effects`，键名与 `_EFFECTS` 一致）：
+  ① **悬浮滚动条**（`OverlayScrollBar`）——原生条 QSS 上样式后变占位（吃 10px
+  布局宽，见 §9），故设 `ScrollBarAlwaysOff` + 自绘一条**浮在内容上方**的细条，
+  滚动时淡入、闲置 ~0.9s 淡出、可直接拖拽；完全透明时置
+  `WA_TransparentForMouseEvents`（否则右侧 10px 的条目永远点不到）。内容区因此
+  宽 10px ② **上下边缘渐隐**（`EdgeFade`）——只在**还有内容**的那一侧盖「列表
+  底色 → 透明」的渐变，高度随离端点距离增长（滚到端点自然收成 0）③ **缩略图
+  视差**（`ScrollFx.parallax_for`，±6px，delegate 画缩略图时读）④ **卡片抬升**
+  （`ScrollFx.lift()` + delegate `_draw_lift`：四层同心圆角矩形叠出近高斯阴影，
+  比 QGraphicsDropShadowEffect 便宜两个数量级）。**3/4 只在滚动进行中非零**：
+  `activity()` 滚动后为 1.0、停止约 330ms 内衰减到 0，两者都乘它——静止时
+  delegate 走**与无装饰逐像素相同**的绘制路径。3/4 的绘制留在 delegate（要知道
+  行矩形与 `_s` 缩放），`scroll_fx` 只提供 `activity()`/`lift()`/`parallax_for()`。
+  ⚠️ **delegate 取强度必须走各自的 `lift()` / `parallax_for()`，别读 `activity()`**
+  ——`activity` 只由「视差**或**抬升任一开着」驱动，只开视差时它照样是 1.0，
+  直接读它会让「卡片抬升」勾选框完全失效（用户实测报的「开关不明显」）。
+  系统「减少动效」开启时 3/4 整体关掉（悬浮条与渐隐是静态装饰，保留）
+- **装饰的静止判据要连淡出一起等**（`ScrollFx._tick`，实测踩坑）：activity 比
+  滚动条先归零（330ms vs 900ms idle + 300ms 淡出），只判 activity 会在浮层条
+  还是 1.0 时就停表，**条卡在画面上不消失**。判据须含
+  `idle_ms >= _BAR_IDLE_MS and bar_alpha == 0.0`
+- **调色板颜色串不能直接喂 QColor**（`scroll_fx.parse_color`，§9）：调色板里半透明
+  项是 `"rgba(0, 0, 0, 0.22)"` 这种 QSS 函数串，`QColor` 构造出来是无效色；8 位
+  十六进制又是 AARRGGBB（alpha 在前），当 RRGGBB 用会串位。自绘控件取
+  `scrollbar` 这类项必须自己解一次（解不出退回兜底色，**绝不返回无效色**——那是黑块）
 
 ### 4.1 单实例与常驻
 
@@ -745,6 +860,18 @@ CREATE INDEX ix_items_session ON clipboard_items (session_id);
 | `cw:extract url` 静默没结果 | 参数写在命令串里 → 解析不出脚本名，参数还会被丢弃 | 显式拦截并报「参数请写在模板里 `{{变量名:参数}}`」（§7.3/§7.4） |
 | 打包版写 `{{脚本名}}` 的模板全部 UnknownVariableError | spec `datas` 漏了 `resources/scripts` → `load_custom_vars()` 里没有这些脚本变量 | spec 加 `("../resources/scripts", "resources/scripts")`（§7.4） |
 | 变换模板「选中文本 → 输 shortcut → Tab」提取不出任何东西（**设计错误，已撤回**） | 触发靠打字，第一个字母就把要变换的选中文本覆盖掉了——`{{selection}}` 永远读空，退回剪贴板 | v9 撤回整批模板（§7.4）：打字展开与内容变换是两类东西，不该共用触发通道；变换类改做「对剪贴板条目执行，结果回剪贴板」 |
+| 列表滑动「直上直下」、一格一格跳 | `QListView`/`QListWidget` 默认 `ScrollPerItem`（整行模式），触控板递来的 `pixelDelta` 被量化成整行，macOS 的连续滚动被砸碎 | 主列表一律 `setVerticalScrollMode(ScrollPerPixel)`（触控板原生连续 + 惯性即自然顺滑，不需自己补动画）（§4.0） |
+| 鼠标滚轮一格瞬移一大段、无过渡 | Qt 滚轮路径不做任何缓动（`wheelScrollLines(3) × singleStep` 一次到位；像素模式主列表 = 192px/格） | `ui.animations.SmoothWheelScroller`：纵向滚轮事件动 `QScrollBar.value`，OutCubic 140–320ms；Shift+纵向/横向/无可滚范围/已在边界/减少动效 全部放行（§4.0） |
+| 滚轮缓动「一顿一顿、掉帧」，同样距离明显不如触控板顺 | **不是绘制慢**（delegate 单帧 ~2.3ms）：`QPropertyAnimation` 走 Qt 的 `QUnifiedTimer`——**粗粒度、不锁 vsync** 的 ~16ms 时钟，一段 140ms 的滚动实测有 48ms 空档、σ≈12ms 抖动 | 换 `Qt.PreciseTimer` + `QElapsedTimer` 单调时钟自算进度（仍 OutCubic，仍可打断）：同样距离同样时长 **7 帧 / max 间隔 17.4ms / σ=0.8ms，零掉帧**。`frame_interval_ms()` = 一个屏幕刷新周期（§4.0） |
+| 触控板「轻微一划就滑过好几屏」 | Qt 把一次输入的位移**再乘 `wheelScrollLines`（默认 3）行**；且实测 `QListView`/`QScrollArea`/`QPlainTextEdit`/`QTextEdit` **一律只看 `angleDelta`、`pixelDelta` 被完全忽略**——所以能改的只有这一条换算，不能靠像素模式 | 设置页「滚动速度」→ `app.scroll_speed`（默认 0.5 ≈ 原生一半）；缩放在 `SmoothWheelScroller` 里对**距离**乘系数，触控板仍不补动画（系统惯性曲线照旧）。倍率 1.0 = 原生，触控板原样放行（§4.0） |
+| 滑动「帧率很低、肉眼可见不丝滑」 | **不是帧率问题**（实测 delegate 单帧只要 ~2.3ms、零次超 16.7ms 预算）：滚动时几乎每行都是「初次露面」，逐条播入场 → 100% 的可见行 `alpha < 0.9`（中位 0.37）、位移中位 15px，**整个视口常驻半透明中间态** | 入场只播**首次填充**那一屏；`observe` 在非 `_active and _waterfall` 时直接返回，用户一滚动（`valueChanged`）瀑布立即收摊。**别再给滚动加逐条入场**（§4.0） |
+| 图片多的列表滚动超 60fps 预算（中位 9.77ms / p95 16.23ms / 最大 29.64ms） | 缩略图解码**同步压在 `HistoryDelegate.paint()` 里**（冷路径 3ms/张），而 `@lru_cache` 与 QPixmap 缓存**都只活在当前进程**→每次冷启动第一次滚到图片都要重解原图 | 缩略图在 `save()` 时顺手落盘 `images/<digest>.t512.png`，`thumbnail()` 优先读小文件（0.149ms，**快 20×**），老条目懒回填 + `prefetch()` 后台成批预热。同场景降到中位 1.28ms、零帧超预算（§3.5） |
+| 滚动条停在列表中间时切换视图，**先白屏半秒再出数据**（看着像「加载慢」） | 整表重建只改 range 不改 value，**滚动位置被保留**；可见行是 30 号开外，而入场错峰延迟按**绝对行号** `min(row×50, 500)` 算 → 全屏都撞 500ms 封顶，整屏 `alpha=0`（实测切回历史页后可见行延迟 `[499,499,499,500,500,500]`） | 错峰基准改成**本轮首个绘制的可见行**（绘制顺序自上而下，首个 `observe` 就是视口顶行）：`min(max(0, row - base_row) × 50, 500)`。停在顶部时基准 = 0（与旧行为等价）；停在中间则顶行立即入场。`play()`/`stop()` 重置基准（§4.0） |
+| 取消勾选「卡片抬升」画面毫无变化 | `_draw_lift` 读的是 `fx.activity()`，而 activity 只由「视差**或**抬升任一开着」驱动——只开视差时它照样 1.0，于是抬升永远在画 | delegate 改用 `fx.lift()`（该项关闭时恒 0），与 `parallax_for()` 检查 `_EFFECTS["parallax"]` 对称。顺手把阴影从三层/`LIFT_ALPHA=26` 提到四层/44：实测贡献从「最大差 35/255、16434 像素」升到「74/255、23252 像素」（§4.0） |
+| 老条目首见仍要付一次全解码 | 落盘缩略图是后来才加的，已入库的图没有小文件 | `ImageService.prefetch(paths)`：页面装载时把当前列表的图片路径丢进后台守护线程，几秒内整库转成小文件。降级路径（不预热）也只是「首次 3ms、之后 0.15ms」，仍比「每次启动都 3ms」好一个量级（§3.5） |
+| 缩略图缓存刷掉后画出来的东西变了 | 落盘读回的 QImage 与解码路径的格式不一致（`Format_RGBA8888` vs PNG 原生格式） | 两条路径统一 `convertToFormat(Format_RGBA8888)`，测试用 `fast == slow`（QImage 逐像素相等）锁死（§3.5） |
+| 快速切视图「卡顿／数据加载较慢」 | 每次进页面都完整做一遍「查库 + 重建 + 重播 800ms 瀑布 + 140ms 整页淡入」；连点几下就是一串 4-6ms 同步阻塞 + 反复重播 | ① `app/events.py` 修订号（挂 DB commit 事件）→ 四个页面 `showEvent` 脏了才 `reload()`；② `set_items` 内容指纹相同则 `animate=False`（模型照建、不重播）；③ `_fade_in_page` 250ms 节流（§4.0） |
+| 用 `(id, pinned, favorite)` 当内容指纹，动画被误跳过 | 测试/新建条目 `id` 默认 0，两组不同内容撞成同一个键 | 指纹取**完整展示身份**（id/type/preview/content/file_path/pinned/favorite/session_name/language/sensitive/expires_at），别图省事取三元组（§4.0） |
 
 ---
 

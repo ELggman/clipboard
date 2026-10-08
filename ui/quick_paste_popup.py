@@ -48,6 +48,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ui.animations import enable_smooth_wheel
 from ui.macos_patch import (  # 白名单覆写 + 注册/注销
     patch_qnspanel_can_become_key,
     register_native_panel,
@@ -119,7 +120,10 @@ class _KeyCapture(QObject):
         self._popup = None
 
     def eventFilter(self, obj, event) -> bool:
-        popup = self._popup
+        # getattr 而非直接取属性：解释器收尾时 Python 侧的 __dict__ 可能已清空，
+        # 而 Qt 侧对象仍在收事件（本过滤器挂在 QApplication 上）——直接取会抛
+        # AttributeError 刷屏，这里一律当作「已销毁」短路。
+        popup = getattr(self, "_popup", None)
         if popup is None:
             return False  # 弹窗已销毁
         if event.type() == QEvent.Type.KeyPress:
@@ -260,6 +264,7 @@ class QuickPastePopup(QWidget):
         # 且多条长文本会让 content 超宽弹出横向条。文本由 delegate elide。
         self._list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._list.setItemDelegate(_RowDelegate(self._list))
+        enable_smooth_wheel(self._list)  # 超 10 条时列表内滚动缓动
         self._list.itemDoubleClicked.connect(self._pick_item)
         self._list.itemActivated.connect(self._pick_item)
         self._list.pick.connect(self._pick_current_row)

@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ui.animations import enable_smooth_wheel
 from ui.code_highlighter import CodeHighlighter, mono_font
 
 logger = logging.getLogger(__name__)
@@ -99,6 +100,7 @@ class _CodeView(QWidget):
         self.edit.setReadOnly(True)
         self.edit.setFrameShape(QPlainTextEdit.Shape.NoFrame)
         self.edit.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        enable_smooth_wheel(self.edit)  # 长代码/JSON 滚动缓动
         self.edit.setFont(mono_font(12))
         self._gutter = _GutterWidget(self.edit)
         layout.addWidget(self._gutter)
@@ -140,6 +142,7 @@ class ItemDetailPopup(QWidget):
         self._text.setReadOnly(True)          # 只读但可选中复制
         self._text.setFrameShape(QTextEdit.Shape.NoFrame)
         self._text.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+        enable_smooth_wheel(self._text)  # 长文本滚动缓动
         layout.addWidget(self._text, 1)
 
         self._code = _CodeView()

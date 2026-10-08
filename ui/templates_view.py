@@ -14,6 +14,7 @@ import logging
 from PySide6.QtCore import QEvent, QPoint, QSize, Qt, QTimer
 from PySide6.QtGui import QCursor, QGuiApplication
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QButtonGroup,
     QCheckBox,
     QDialog,
@@ -34,6 +35,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app import events
 from services.template.custom_vars import (extra_insert_texts,
                                            script_insert_texts,
                                            script_variables,
@@ -41,6 +43,8 @@ from services.template.custom_vars import (extra_insert_texts,
 from services.template.errors import TemplateError
 from services.template.registry import custom_tooltip, is_preset
 from services.template_service import TemplateService
+from ui.animations import enable_smooth_wheel
+from ui.scroll_fx import enable_scroll_fx
 from ui.fluent_combo import FluentComboBox
 from ui.template_components import (
     ROLE_FOLDER_COUNT,
@@ -304,6 +308,7 @@ class TemplateEditorDialog(QDialog):
             Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self._var_scroll.setFrameShape(QFrame.Shape.NoFrame)
         self._var_scroll.setWidget(self._var_tags)
+        enable_smooth_wheel(self._var_scroll)  # 鼠标滚轮缓动（触控板不介入）
         vrow.addWidget(self._var_scroll, 1)
         # 按钮列手动排布（_VarButtonColumn）：macOS 上裸 QVBoxLayout 的
         # sizeHint/minimumSize 偏小（实测 68px），会把三个 24px 固定高按钮
@@ -705,6 +710,7 @@ class TemplatesView(QWidget):
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
         self._svc: TemplateService | None = None
+        self._loaded_rev = -1  # 上次装载的数据修订号（showEvent 判脏用，见 app/events.py）
         self._templates: list[dict] = []
         self._folders: list[dict] = []
         self._active_menus: list = []  # 右键菜单引用防 GC
@@ -721,7 +727,9 @@ class TemplatesView(QWidget):
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
-        if self._svc is not None:
+        # 只在数据真的变过时重查：原先每次显示都无条件 reload()，快速来回切视图时
+        # 每切一次就白查一遍库 + 重建控件。见 app/events.py。
+        if self._svc is not None and self._loaded_rev != events.revision():
             self.reload()
 
     def resizeEvent(self, event) -> None:
@@ -809,7 +817,13 @@ class TemplatesView(QWidget):
         self._list.setFrameShape(QListWidget.Shape.NoFrame)
         self._list.setSpacing(4)
         self._list.setUniformItemSizes(True)  # 行高恒定 58px：跳过逐行布局计算，滚轮更流畅
+        # 逐像素滚动（与历史页一致，见 history_view）：默认整行模式会把触控板
+        # 的像素 delta 量化成整行，滑动一格一格
+        self._list.setVerticalScrollMode(
+            QAbstractItemView.ScrollMode.ScrollPerPixel)
+        enable_smooth_wheel(self._list)  # 鼠标滚轮缓动（触控板不介入）
         self._list.setItemDelegate(TemplateCardDelegate(self._list, self))
+        enable_scroll_fx(self._list)  # 滚动装饰（悬浮条 + 上下渐隐）
         # 模板右键：收藏 / 移动到类型 / 删除（§15/§21）
         self._list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._list.customContextMenuRequested.connect(
@@ -847,6 +861,7 @@ class TemplatesView(QWidget):
             return
         self._reload_folders()
         self._reload_templates()
+        self._loaded_rev = events.revision()  # 在装载**之后**记，免得漏掉装载中的提交
 
     def _reload_folders(self) -> None:
         current = self._current_folder_id()

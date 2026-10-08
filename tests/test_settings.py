@@ -463,6 +463,87 @@ def test_settings_file_size_persists(tmp_path):
     view.close()
 
 
+def test_settings_scroll_speed_persists_and_applies(tmp_path):
+    """滚动速度：装载不误写、改动写回配置、applier 收到回调（改动即生效）。"""
+    import yaml
+
+    from ui.settings_view import SettingsView
+
+    config = {
+        "app": {"theme": "system", "font_size": 14, "launch_at_login": False,
+                "scroll_speed": 0.5},
+        "history": {"max_items": 500, "auto_delete_days": 30},
+        "privacy": {"policy": "warn", "temp_minutes": 5, "ignored_apps": []},
+    }
+    cfg_path = tmp_path / "settings.yaml"
+    applied: list[dict] = []
+    view = SettingsView()
+    view.set_context(config, {"scroll_speed": applied.append}, cfg_path)
+    assert view._scroll_speed.currentData() == 0.5  # 按配置选中
+    assert not applied  # 装载不触发回调（否则打开设置页就把默认值钉死）
+
+    view._scroll_speed.setCurrentIndex(view._scroll_speed.findData(1.0))
+    assert applied and applied[-1]["app"]["scroll_speed"] == 1.0
+    saved = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    assert saved["app"]["scroll_speed"] == 1.0
+    view.close()
+
+
+def test_defaults_provide_scroll_speed():
+    """defaults.yaml 必须带 app.scroll_speed——缺了它老用户会静默按原生跑。"""
+    import yaml
+
+    from app.config import CONFIG_DIR
+
+    data = yaml.safe_load(
+        (CONFIG_DIR / "defaults.yaml").read_text(encoding="utf-8"))
+    assert data["app"]["scroll_speed"] == 0.5
+
+
+def test_settings_scroll_effects_persist_and_apply(tmp_path):
+    """滚动装饰：逐项开关写回配置、applier 收到回调（改动即生效）。"""
+    import yaml
+
+    from ui.settings_view import SettingsView
+
+    config = {
+        "app": {"theme": "system", "font_size": 14, "launch_at_login": False,
+                "scroll_speed": 0.5,
+                "scroll_effects": {"scrollbar": True, "edge_fade": False,
+                                   "parallax": True, "lift": True}},
+        "history": {"max_items": 500, "auto_delete_days": 30},
+        "privacy": {"policy": "warn", "temp_minutes": 5, "ignored_apps": []},
+    }
+    cfg_path = tmp_path / "settings.yaml"
+    applied: list[dict] = []
+    view = SettingsView()
+    view.set_context(config, {"scroll_effects": applied.append}, cfg_path)
+    # 装载按配置回显，且不触发回调
+    assert view._scroll_fx["scrollbar"].isChecked()
+    assert not view._scroll_fx["edge_fade"].isChecked()
+    assert not applied
+
+    view._scroll_fx["edge_fade"].setChecked(True)
+    assert applied and applied[-1]["app"]["scroll_effects"]["edge_fade"] is True
+    saved = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    assert saved["app"]["scroll_effects"] == {
+        "scrollbar": True, "edge_fade": True, "parallax": True, "lift": True}
+    view.close()
+
+
+def test_defaults_provide_scroll_effects():
+    """defaults.yaml 必须带全部四项——缺项会按「默认开」回显，但配置里没写，
+    用户关掉一项后 defaults 再加新项就永远读不到。"""
+    import yaml
+
+    from app.config import CONFIG_DIR
+
+    data = yaml.safe_load(
+        (CONFIG_DIR / "defaults.yaml").read_text(encoding="utf-8"))
+    assert data["app"]["scroll_effects"] == {
+        "scrollbar": True, "edge_fade": True, "parallax": True, "lift": True}
+
+
 # ---- 删除保护（数据丢失回归）----
 
 def test_image_service_delete_protects_user_files(tmp_path):

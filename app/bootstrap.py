@@ -90,9 +90,18 @@ def start_workspace(app: QApplication) -> None:
     hotkey = HotkeyManager(parent=app)
 
     # UI（装配完成前不弹窗）
+    from ui.animations import set_scroll_speed
     from ui.item_detail_popup import ItemDetailPopup
     from ui.main_window import MainWindow
     from ui.quick_paste_popup import QuickPastePopup
+    from ui.scroll_fx import set_scroll_effects
+
+    # 滚动速度倍率（设置页「滚动速度」）：全局状态，装配 UI 前先应用——
+    # 否则改过的值要等用户在设置页再碰一下才生效（默认 0.5 ≠ 1.0，会一直按原生跑）
+    set_scroll_speed(config["app"].get("scroll_speed", 1.0))
+    # 滚动装饰开关（设置页「滚动效果」）：同上，装配前先落，否则首次进列表
+    # 会按默认全开跑一遍，用户关掉的项要等改设置才消失
+    set_scroll_effects(config["app"].get("scroll_effects", {}))
 
     window = MainWindow()
     detail_popup = ItemDetailPopup()
@@ -272,6 +281,12 @@ def start_workspace(app: QApplication) -> None:
                 apply_theme(app, overrides["app"]["theme"])
             elif key == "font":
                 window.set_font_size(int(overrides["app"]["font_size"]))
+            elif key == "scroll_speed":
+                # 全局状态：事件处理时现读，改完立刻对全部滚动面生效
+                set_scroll_speed(overrides["app"]["scroll_speed"])
+            elif key == "scroll_effects":
+                # 全局状态：写进模块级 _EFFECTS，已装配的滚动区立刻切换
+                set_scroll_effects(overrides["app"].get("scroll_effects", {}))
             elif key == "show_filename":
                 window.set_show_image_filename(
                     bool(overrides["history"]["show_image_filename"]))
@@ -314,7 +329,9 @@ def start_workspace(app: QApplication) -> None:
 
     window.set_settings_context(
         config,
-        {k: apply_setting(k) for k in ("theme", "font", "show_filename",
+        {k: apply_setting(k) for k in ("theme", "font", "scroll_speed",
+                                       "scroll_effects",
+                                       "show_filename",
                                        "autostart", "max_items",
                                        "privacy_policy", "privacy_temp",
                                        "privacy_ignored",

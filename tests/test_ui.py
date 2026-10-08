@@ -2478,6 +2478,115 @@ def test_history_vertical_events_passthrough():
     view.close()
 
 
+# ---- 横滑灵敏度：别把纵向滚动的手抖判成横滑（用户实测反馈）----
+
+def test_history_vertical_scroll_with_hand_jitter_no_switch():
+    """纵向滚动时每个事件都带小幅 dx 手抖 → 不得切类型。
+
+    旧判据只看「|dx| > |dy|」，dx=3/dy=-14 之外的手抖一旦 dx 压过 dy 就切；
+    新判据要求累计横向 ≥ SWIPE_MIN_DX 且明显压过累计纵向。
+    """
+    view = HistoryView()
+    view.set_items([_mk_item("text"), _mk_item("url"), _mk_item("image")])
+    vp = view._list.viewport()
+
+    seq = ([_swipe_event(0, -16, phase=Qt.ScrollPhase.ScrollBegin)]
+           + [_swipe_event(3, -14, phase=Qt.ScrollPhase.ScrollUpdate),
+              _swipe_event(-3, -13, phase=Qt.ScrollPhase.ScrollUpdate),
+              _swipe_event(2, -12, phase=Qt.ScrollPhase.ScrollUpdate),
+              # 末尾 dy 衰减到 0，只剩横向抖动（最危险的一段）
+              _swipe_event(4, 0, phase=Qt.ScrollPhase.ScrollUpdate)]
+           + [_swipe_event(0, 0, phase=Qt.ScrollPhase.ScrollEnd)])
+    for ev in seq:
+        QApplication.sendEvent(vp, ev)
+    assert view._type_tabs.currentRow() == 0  # 一次都没切
+    view.close()
+
+
+def test_history_vertical_lock_survives_tail_jitter():
+    """纵向滚动末尾横向甩尾：已锁定纵向后不得翻盘（锁定是**整段手势**的）。
+
+    本例的累计横向正好压在 SWIPE_MIN_DX 上——若没有纵向锁定，这一次会误切。
+    """
+    view = HistoryView()
+    view.set_items([_mk_item("text"), _mk_item("url")])
+    vp = view._list.viewport()
+
+    seq = ([_swipe_event(0, 0, phase=Qt.ScrollPhase.ScrollBegin)]  # Begin 无位移
+           + [_swipe_event(6, -20, phase=Qt.ScrollPhase.ScrollUpdate),  # → 锁定纵向
+              _swipe_event(18, -1, phase=Qt.ScrollPhase.ScrollUpdate),
+              _swipe_event(16, 0, phase=Qt.ScrollPhase.ScrollUpdate)]
+           + [_swipe_event(0, 0, phase=Qt.ScrollPhase.ScrollEnd)])
+    for ev in seq:
+        QApplication.sendEvent(vp, ev)
+    assert view._type_tabs.currentRow() == 0
+    view.close()
+
+
+def test_history_slow_horizontal_swipe_still_switches():
+    """轻缓横滑（单事件位移只有 12px）靠**累计**达标，仍要能切——不能一刀切死。"""
+    view = HistoryView()
+    view.set_items([_mk_item("text"), _mk_item("url"), _mk_item("image")])
+    vp = view._list.viewport()
+
+    seq = ([_swipe_event(0, 0, phase=Qt.ScrollPhase.ScrollBegin)]
+           + [_swipe_event(-12, -1, phase=Qt.ScrollPhase.ScrollUpdate)
+              for _ in range(4)]
+           + [_swipe_event(0, 0, phase=Qt.ScrollPhase.ScrollEnd)])
+    for ev in seq:
+        QApplication.sendEvent(vp, ev)
+    assert view._type_tabs.currentRow() == 1  # 累计 -48 ≥ 40 → 切一格
+    view.close()
+
+
+def test_history_small_horizontal_nudge_does_not_switch():
+    """横向位移没到阈值的小幅推挤不切（旧判据 dx>dy 就会切，太灵敏）。"""
+    view = HistoryView()
+    view.set_items([_mk_item("text"), _mk_item("url")])
+    vp = view._list.viewport()
+
+    seq = ([_swipe_event(3, 0, phase=Qt.ScrollPhase.ScrollBegin)]
+           + [_swipe_event(5, 0, phase=Qt.ScrollPhase.ScrollUpdate)
+              for _ in range(3)]
+           + [_swipe_event(0, 0, phase=Qt.ScrollPhase.ScrollEnd)])
+    for ev in seq:
+        QApplication.sendEvent(vp, ev)
+    assert view._type_tabs.currentRow() == 0  # 累计仅 18px：不切
+    view.close()
+
+
+def test_history_gesture_machine_sees_raw_events_even_when_scroll_scaled():
+    """滚动速度非标准档时，手势机仍**先于**缩放层拿到原始事件。
+
+    两个过滤器同装 viewport（`enable_smooth_wheel` + 手势），Qt 是「后装的先
+    跑」：手势机必须后装。否则缩放层会先消费掉纵向事件，手势机永远锁定不了
+    纵向（`_dy_sum` 恒为 0），滚动末尾的手抖又会误切类型——正是用户反馈的坑。
+    """
+    import ui.animations as animations
+
+    original = animations.scroll_speed()
+    animations.set_scroll_speed(0.5)
+    try:
+        view = HistoryView()
+        view.set_items([_mk_item("text"), _mk_item("url"), _mk_item("image")])
+        vp = view._list.viewport()
+
+        seq = ([_swipe_event(0, -16, phase=Qt.ScrollPhase.ScrollBegin)]
+               + [_swipe_event(3, -14, phase=Qt.ScrollPhase.ScrollUpdate),
+                  _swipe_event(-3, -13, phase=Qt.ScrollPhase.ScrollUpdate),
+                  # 末尾 dy 衰减到 0，只剩横向抖动（最危险的一段）
+                  _swipe_event(4, 0, phase=Qt.ScrollPhase.ScrollUpdate)]
+               + [_swipe_event(0, 0, phase=Qt.ScrollPhase.ScrollEnd)])
+        for ev in seq:
+            QApplication.sendEvent(vp, ev)
+
+        assert view._dy_sum != 0, "手势机没拿到原始纵向事件：缩放层抢了先"
+        assert view._type_tabs.currentRow() == 0
+        view.close()
+    finally:
+        animations.set_scroll_speed(original)
+
+
 # ---- HotkeyManager raw key 扩展（Tab Trigger 输入流）----
 
 def _key_event(vk, flags=0, autorepeat=False):
@@ -2724,9 +2833,15 @@ def test_template_vertical_wheel_micro_dx_does_not_pan(tmp_path):
     - |dx|<|dy| 归为纵向 → 事件透传给列表滚动（scrollbar 动）
     - _set_pan 无变化时 no-op（不触发重绘）
     横滑仍正常（dx=-120 单独测，见 test_template_pan_wheel_moves_row）。
+
+    2026-09 起纵向鼠标滚轮改由缓动层消费（ui.animations.SmoothWheelScroller，
+    触控板带 phase 不介入）：滚动条不再是「事件同步透传」直接动，而是由
+    QPropertyAnimation 异步驱动到位——故这里要等动画走完再断言位置。
+    「归纵向、不走平移路径」的语义不变。
     """
     from PySide6.QtCore import QPoint, QPointF
     from PySide6.QtGui import QWheelEvent
+    from PySide6.QtTest import QTest
 
     from database.engine import create_db_engine
     from database.migrations import migrate
@@ -2769,8 +2884,10 @@ def test_template_vertical_wheel_micro_dx_does_not_pan(tmp_path):
                          Qt.ScrollPhase.NoScrollPhase, False)
         QApplication.sendEvent(view._list.viewport(), ev)
         pytest_app.processEvents()
-    # 列表滚动条位置变化了（事件透传），但 _set_pan 一次都没被调用
-    assert sb.value() != base, "纵向滚轮事件应透传给滚动条"
+    # 鼠标滚轮由缓动层消费（滚动条由动画异步驱动），等动画走完再断言
+    QTest.qWait(500)
+    # 列表滚动条位置变化了（纵向滚动仍归列表），但 _set_pan 一次都没被调用
+    assert sb.value() != base, "纵向滚轮应滚动列表（经缓动层，异步到位）"
     assert calls["n"] == 0, "纵向滚轮的微小 dx 不应触发平移路径（卡顿根因）"
     # 横向平移未受影响（_pan 值全为 0，没有被误写成正偏移）
     assert max(view._pan.values(), default=0) == 0

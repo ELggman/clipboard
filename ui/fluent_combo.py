@@ -54,6 +54,7 @@ from PySide6.QtWidgets import (
 )
 
 from ui import theme
+from ui.animations import enable_smooth_wheel
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +102,7 @@ class _ComboPopup(QWidget):
         layout.setSpacing(0)
         self.list = QListWidget(self._card)
         self.list.setObjectName("fluentComboList")
+        enable_smooth_wheel(self.list)  # 选项多时列表内滚动缓动
         self.list.setFrameShape(QListWidget.Shape.NoFrame)
         self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.list.itemClicked.connect(self._on_click)

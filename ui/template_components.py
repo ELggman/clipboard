@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ui.animations import enable_smooth_wheel
 from ui.code_highlighter import CodeHighlighter
 from services.template.custom_vars import (
     extra_insert_texts,
@@ -664,6 +665,7 @@ class VariableLibraryPopup(QWidget):
         self._body_lay.setContentsMargins(0, 0, 0, 0)
         self._body_lay.setSpacing(2)
         self._scroll.setWidget(self._body)
+        enable_smooth_wheel(self._scroll)  # 鼠标滚轮缓动（触控板不介入）
         self.resize(260, 300)
 
     def set_custom_variables(self, custom: list[CustomVariable]) -> None:

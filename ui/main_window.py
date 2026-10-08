@@ -7,6 +7,7 @@ Qt 6.9 下 emoji/按钮图标渲染空白）。图标 + 中文标签，hover 轻
 import logging
 
 from PySide6.QtCore import (
+    QElapsedTimer,
     QEvent,
     QPoint,
     QRect,
@@ -44,6 +45,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app import events
 from ui.icons import icon as ui_icon
 
 from .animations import HoverAnimator
@@ -64,6 +66,8 @@ _NAV_PAGES: list[tuple[str, str, type]] = [
     ("gear", "设置", SettingsView),
 ]
 _ROLE_NAV_ICON = Qt.ItemDataRole.UserRole + 1
+# 切页淡入节流：距上次切页不到这个间隔就不淡入（连点时避免反复重启整页离屏渲染）
+_PAGE_FADE_THROTTLE_MS = 250
 _NAV_ITEM_H = 36          # 项高（胶囊 14px 文字 + 上下留白）
 # 胶囊水平 padding：420px 窗口下 5 项（中文标签）完整显示需 ≤ 10px
 # （22px 时总宽 ~578 溢出，实测）
@@ -151,6 +155,8 @@ class MainWindow(QMainWindow):
         self._engine = None
         self._full_items: list = []
         self._active_session_id = 1
+        self._history_rev = -1  # 历史页上次装载的数据修订号（见 _reload_history）
+        self._page_switch_clock = QElapsedTimer()  # 切页淡入节流用（连点不重启淡入）
         self._scope_current = None
         self._privacy_label = QLabel("● 监控中")
         self._privacy_label.setObjectName("privacyStatus")
@@ -264,7 +270,21 @@ class MainWindow(QMainWindow):
             if self._search.text().strip():
                 self._apply_search()
             else:
-                self._reload_history()
+                self._reload_history(force=False)  # 数据没变就复用，别白查（见该方法）
+        self._fade_in_page()
+
+    def _fade_in_page(self) -> None:
+        """切页淡入；**连点时不淡入**（回归）。
+
+        每次切页都起一次 140ms 的整页淡入（`QGraphicsOpacityEffect` 会把整页子控件
+        离屏重渲染一遍）。快速在几个视图之间连点时，上一段还没走完就叠下一段，
+        读起来就是闪 + 卡——用户实测报的「快速切换视图能感受到卡顿」。间隔小于
+        阈值就直接显示，不做淡入。
+        """
+        if (self._page_switch_clock.isValid()
+                and self._page_switch_clock.elapsed() < _PAGE_FADE_THROTTLE_MS):
+            return
+        self._page_switch_clock.restart()
         from ui.animations import fade_in_widget
 
         fade_in_widget(self._pages.currentWidget())
@@ -345,9 +365,20 @@ class MainWindow(QMainWindow):
         if self._search.text().strip():
             self._apply_search()
 
-    def _reload_history(self) -> None:
+    def _reload_history(self, force: bool = True) -> None:
+        """重查当前会话的历史并回填列表。
+
+        `force=False`（切页路径）：数据修订号没变过就直接返回。在几个视图之间快速
+        来回切换时，每次回到历史页都重查一遍 500 条纯属白做（实测 list_recent 4.2ms，
+        外加一次整表模型重建），这正是用户报的「数据加载较慢」。
+
+        会话切换 / 清空搜索等路径仍走 `force=True`：那里不只是「数据变了」，还要求
+        把视图从全局搜索切回会话视图，必须真的重建。
+        """
         page = self._pages.widget(0)
         if not isinstance(page, HistoryView) or self._engine is None:
+            return
+        if not force and self._history_rev == events.revision():
             return
         from services import history_service
 
@@ -355,6 +386,8 @@ class MainWindow(QMainWindow):
             self._engine, session_id=self._active_session_id)
         page.set_view_session_id(self._active_session_id)
         page.set_items(self._full_items)
+        # 装载**之后**再记：装载过程里可能又有提交（如 ensure_favorites 首次建夹）
+        self._history_rev = events.revision()
 
     # ---- 注入 ----
 
@@ -417,6 +450,7 @@ class MainWindow(QMainWindow):
 
     def set_active_session(self, sid: int) -> None:
         self._active_session_id = sid
+        self._history_rev = -1  # 换了会话：下次切回历史页必须真的重查
         page = self._pages.widget(0)
         if isinstance(page, HistoryView):
             page.load_session(sid)

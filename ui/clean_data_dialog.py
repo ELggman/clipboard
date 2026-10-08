@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from ui.animations import enable_smooth_wheel
 from ui.dialogs import ConfirmDialog
 from ui.fluent_combo import FluentComboBox
 
@@ -69,6 +70,7 @@ class CleanDataDialog(QDialog):
         # 预览列表（可勾选，默认全选）
         self._list = QListWidget()
         self._list.setObjectName("historyList")
+        enable_smooth_wheel(self._list)  # 清理结果多时列表内滚动缓动
         layout.addWidget(self._list, 1)
 
         # 操作按钮

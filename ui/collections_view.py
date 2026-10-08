@@ -73,7 +73,10 @@ def _sf_symbol_icon(name: str, size: int = 18):
         return QIcon()
 
 
+from app import events
 from services import collection_service
+from ui.animations import enable_smooth_wheel
+from ui.scroll_fx import enable_scroll_fx
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +92,7 @@ class CollectionsView(QWidget):
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
         self._engine = None
+        self._loaded_rev = -1  # 上次装载的数据修订号（showEvent 判脏用，见 app/events.py）
         self._collections: list[dict] = []
         self._all_items: list = []  # 当前收藏夹全部条目（搜索过滤前）
         self._image_service = None     # 删除条目时清理图片文件
@@ -109,7 +113,9 @@ class CollectionsView(QWidget):
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
-        if self._engine is not None:
+        # 只在数据真的变过时重查：原先每次显示都无条件 reload()（实测 4.3ms），
+        # 快速在几个视图之间来回切换时纯属白做。见 app/events.py。
+        if self._engine is not None and self._loaded_rev != events.revision():
             self.reload()
 
     # ---- 构建 ----
@@ -160,6 +166,8 @@ class CollectionsView(QWidget):
 
         self._delegate = HistoryDelegate(self._items)
         self._items.setItemDelegate(self._delegate)
+        enable_smooth_wheel(self._items)  # 鼠标滚轮缓动（触控板不介入）
+        enable_scroll_fx(self._items, self._delegate)  # 滚动装饰
         self._items.clicked.connect(self._on_item_clicked)
         layout.addWidget(self._items, 1)
         # 空态提示：覆盖在列表 viewport 上（搜索无匹配 / 收藏夹为空）
@@ -180,6 +188,7 @@ class CollectionsView(QWidget):
         panel_layout.setSpacing(6)
         self._list = QListWidget()
         self._list.setObjectName("sideList")
+        enable_smooth_wheel(self._list)  # 收藏夹多时面板内滚动同样缓动
         self._list.currentRowChanged.connect(self._on_select)
         self._list.itemDoubleClicked.connect(self._rename)
         self._list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -280,6 +289,7 @@ class CollectionsView(QWidget):
             self._model.clear()
             self._update_empty_hint("")
         self._update_title()
+        self._loaded_rev = events.revision()  # 在装载**之后**记（ensure_favorites 可能刚提交）
 
     def _current_id(self) -> int:
         row = self._list.currentRow()
@@ -309,6 +319,16 @@ class CollectionsView(QWidget):
                     self._engine, cid)
         self._apply_filter()
         self._update_title()
+        self._prefetch_images()
+
+    def _prefetch_images(self) -> None:
+        """后台预热当前收藏夹里图片条目的缩略图（老条目首次解码别落在绘制路径上）。"""
+        if self._image_service is None:
+            return
+        paths = [it.file_path for it in self._all_items
+                 if it.type == "image" and it.file_path]
+        if paths:
+            self._image_service.prefetch(paths)
 
     def _on_search_text(self, text: str) -> None:
         """输入框 textChanged：存文本 → 过滤（直接连 _apply_filter 无效）。"""

@@ -9,6 +9,7 @@ from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtGui import QCursor, QGuiApplication, QKeyEvent
 from PySide6.QtWidgets import QLineEdit, QListWidget, QVBoxLayout, QWidget
 
+from ui.animations import enable_smooth_wheel
 from ui.macos_patch import (
     patch_qnspanel_can_become_key,
     register_native_panel,
@@ -40,6 +41,7 @@ class TemplatePickerPopup(QWidget):
         self._list = QListWidget()
         self._list.setObjectName("historyList")
         self._list.setUniformItemSizes(True)
+        enable_smooth_wheel(self._list)  # 鼠标滚轮缓动（触控板不介入）
         layout.addWidget(self._list, 1)
         self.resize(420, 320)
 

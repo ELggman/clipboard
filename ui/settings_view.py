@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QFormLayout,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QListWidget,
@@ -22,6 +23,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ui.animations import enable_smooth_wheel
 from ui.fluent_combo import FluentComboBox
 
 logger = logging.getLogger(__name__)
@@ -32,6 +34,17 @@ from services import app_identity
 
 _THEME_OPTIONS = [("system", "跟随系统"), ("light", "浅色"), ("dark", "深色")]
 _FONT_OPTIONS = [12, 13, 14, 15, 16]
+# 滚动速度倍率（1.0 = Qt 原生距离）。Qt 把一次输入的位移再乘 wheelScrollLines
+# 行，macOS 上偏快，故默认落在 0.5 这一档
+_SCROLL_SPEED_OPTIONS = [(0.3, "很慢"), (0.5, "慢"), (0.75, "稍慢"),
+                         (1.0, "标准（原生）"), (1.5, "快")]
+# 滚动视觉装饰（键名与 ui/scroll_fx._EFFECTS 一致，存 config app.scroll_effects）
+_SCROLL_EFFECT_OPTIONS = [
+    ("scrollbar", "悬浮滚动条", "滚动条浮在内容上、闲置自动淡出，可直接拖拽"),
+    ("edge_fade", "边缘渐隐", "还有内容的那一侧做一层渐隐，提示可继续滚"),
+    ("parallax", "缩略图视差", "滚动时缩略图与行轻微错位，形成层次感"),
+    ("lift", "卡片抬升", "滚动时行像被抬起（柔和阴影），停下即归位"),
+]
 _MAX_ITEMS_OPTIONS = [(100, "100"), (500, "500"), (1000, "1000"), (-1, "无限")]
 # §9.10：Never / 1 / 7 / 30 / 90 / 365 天
 _AUTO_DELETE_OPTIONS = [(1, "1 天"), (7, "7 天"), (30, "30 天"),
@@ -92,6 +105,7 @@ class SettingsView(QWidget):
         layout.setHorizontalSpacing(16)
         layout.setVerticalSpacing(10)
         scroll.setWidget(container)
+        enable_smooth_wheel(scroll)  # 鼠标滚轮缓动（触控板不介入）
         outer.addWidget(scroll)
 
         self._theme = FluentComboBox()
@@ -103,6 +117,27 @@ class SettingsView(QWidget):
         for size in _FONT_OPTIONS:
             self._font.addItem(f"{size} pt", size)
         layout.addRow("字体大小", self._font)
+
+        self._scroll_speed = FluentComboBox()
+        for value, label in _SCROLL_SPEED_OPTIONS:
+            self._scroll_speed.addItem(label, value)
+        self._scroll_speed.setToolTip(
+            "触控板与鼠标滚轮共用；「标准」= Qt 原生距离（macOS 上偏快）")
+        layout.addRow("滚动速度", self._scroll_speed)
+
+        # 滚动视觉装饰：逐项开关（见 ui/scroll_fx.py）。改完即时生效——
+        # 模块级 _EFFECTS 是现读的，已装配的滚动区会被 setUpdatesEnabled 式地
+        # 立刻切换，不用重启。
+        self._scroll_fx = {}
+        effects_box = QGridLayout()
+        effects_box.setSpacing(6)
+        for i, (key, label, tip) in enumerate(_SCROLL_EFFECT_OPTIONS):
+            cb = QCheckBox(label)
+            cb.setToolTip(tip)
+            cb.toggled.connect(lambda _=False: self._on_change("scroll_effects"))
+            effects_box.addWidget(cb, i // 2, i % 2)
+            self._scroll_fx[key] = cb
+        layout.addRow("滚动效果", effects_box)
 
         self._max_items = FluentComboBox()
         for value, label in _MAX_ITEMS_OPTIONS:
@@ -172,6 +207,7 @@ class SettingsView(QWidget):
         self._ignored_list = QListWidget()
         self._ignored_list.setObjectName("sideList")
         self._ignored_list.setFixedHeight(90)
+        enable_smooth_wheel(self._ignored_list)  # 应用多时列表内滚动同样缓动
         ignored_box = QVBoxLayout()
         ignored_box.setSpacing(4)
         ignored_box.addWidget(self._ignored_list)
@@ -214,6 +250,8 @@ class SettingsView(QWidget):
         # 改动即生效
         self._theme.currentIndexChanged.connect(lambda _: self._on_change("theme"))
         self._font.currentIndexChanged.connect(lambda _: self._on_change("font"))
+        self._scroll_speed.currentIndexChanged.connect(
+            lambda _: self._on_change("scroll_speed"))
         self._max_items.currentIndexChanged.connect(lambda _: self._on_change("max_items"))
         self._auto_delete.currentIndexChanged.connect(lambda _: self._on_change("auto_delete"))
         self._save_images.toggled.connect(lambda _: self._on_change("save_images"))
@@ -247,6 +285,11 @@ class SettingsView(QWidget):
         self._block_signals(True)
         self._set_combo_value(self._theme, app_cfg.get("theme", "system"))
         self._set_combo_value(self._font, app_cfg.get("font_size", 14))
+        self._set_combo_value(self._scroll_speed,
+                              app_cfg.get("scroll_speed", 0.5))
+        effects = app_cfg.get("scroll_effects") or {}
+        for key, cb in self._scroll_fx.items():
+            cb.setChecked(bool(effects.get(key, True)))
         self._set_combo_value(self._max_items, hist_cfg.get("max_items", 500))
         self._set_combo_value(self._auto_delete, hist_cfg.get("auto_delete_days", 30))
         self._set_combo_value(self._file_size,
@@ -273,6 +316,9 @@ class SettingsView(QWidget):
             "app": {
                 "theme": self._theme.currentData(),
                 "font_size": self._font.currentData(),
+                "scroll_speed": self._scroll_speed.currentData(),
+                "scroll_effects": {k: cb.isChecked()
+                                   for k, cb in self._scroll_fx.items()},
                 "launch_at_login": self._autostart.isChecked(),
             },
             "history": {
@@ -380,9 +426,10 @@ class SettingsView(QWidget):
         # 装载配置时必须屏蔽：这些控件一旦发信号就会走 _on_change →
         # 把「刚从配置读出来的值」又写回 settings.yaml。等于打开一次设置页
         # 就把当前默认值钉死成用户配置，以后改 defaults.yaml 再也不生效。
-        for w in (self._theme, self._font, self._max_items, self._auto_delete,
+        for w in (self._theme, self._font, self._scroll_speed, self._max_items,
+                  self._auto_delete,
                   self._file_size, self._dedupe_scope, self._delete_policy,
                   self._save_images, self._show_filename,
                   self._autostart, self._policy, self._temp_minutes,
-                  self._block_private_key):
+                  self._block_private_key, *self._scroll_fx.values()):
             w.blockSignals(blocked)
