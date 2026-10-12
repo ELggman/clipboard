@@ -510,7 +510,7 @@ def test_settings_scroll_effects_persist_and_apply(tmp_path):
         "app": {"theme": "system", "font_size": 14, "launch_at_login": False,
                 "scroll_speed": 0.5,
                 "scroll_effects": {"scrollbar": True, "edge_fade": False,
-                                   "parallax": True, "lift": True}},
+                                   "parallax": True, "depth": True, "lift": True}},
         "history": {"max_items": 500, "auto_delete_days": 30},
         "privacy": {"policy": "warn", "temp_minutes": 5, "ignored_apps": []},
     }
@@ -527,12 +527,13 @@ def test_settings_scroll_effects_persist_and_apply(tmp_path):
     assert applied and applied[-1]["app"]["scroll_effects"]["edge_fade"] is True
     saved = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
     assert saved["app"]["scroll_effects"] == {
-        "scrollbar": True, "edge_fade": True, "parallax": True, "lift": True}
+        "scrollbar": True, "edge_fade": True, "parallax": True,
+        "depth": True, "lift": True}
     view.close()
 
 
 def test_defaults_provide_scroll_effects():
-    """defaults.yaml 必须带全部四项——缺项会按「默认开」回显，但配置里没写，
+    """defaults.yaml 必须带全部五项——缺项会按「默认开」回显，但配置里没写，
     用户关掉一项后 defaults 再加新项就永远读不到。"""
     import yaml
 
@@ -541,7 +542,8 @@ def test_defaults_provide_scroll_effects():
     data = yaml.safe_load(
         (CONFIG_DIR / "defaults.yaml").read_text(encoding="utf-8"))
     assert data["app"]["scroll_effects"] == {
-        "scrollbar": True, "edge_fade": True, "parallax": True, "lift": True}
+        "scrollbar": True, "edge_fade": True, "parallax": True,
+        "depth": True, "lift": True}
 
 
 # ---- 删除保护（数据丢失回归）----

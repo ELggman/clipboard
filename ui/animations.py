@@ -12,6 +12,7 @@
 - 动画可中断：QPropertyAnimation 新动画自动打断旧的（滚动缓动自算进度、同理可打断）
 """
 import logging
+import time
 
 from PySide6.QtCore import (
     QEasingCurve,
@@ -162,6 +163,7 @@ class HoverAnimator(QObject):
                 pass
             return
         if not self._timer.isActive():
+            apply_frame_rate(self._timer)   # 按当前屏幕刷新率步进
             self._timer.start()
 
     def _tick(self) -> None:
@@ -212,7 +214,8 @@ class ListEnterAnimator(QObject):
       （用户实测报的就是这个）。所以 `observe` 只在**首次填充尚未结束**
       （`_active and _waterfall`）时为行排入场，其余情况直接返回——没记录的行
       `local()` 恒为 1.0、`offset_for()` 恒为 0，delegate 走原路径，逐像素干净。
-      **用户一滚动（`valueChanged`）瀑布立即收摊**：否则装载后头 800ms 内滚到
+      **用户一滚动（真实滚轮/按键输入，见 `__init__`）瀑布立即收摊**：否则装载后
+      头 800ms 内滚到
       的行仍会按 `MAX_DELAY_MS` 排队，白白隐身半秒。
     - 已经露过面的行不再重播，滚出屏幕再滚回来保持静止。
     - `stop()` 显式归零并**冻结**：所有行立即回到最终位置，且在下一次 `play()`
@@ -224,6 +227,11 @@ class ListEnterAnimator(QObject):
     STAGGER_MS = 50       # 首次填充：相邻行错峰间隔
     MAX_DELAY_MS = 500    # 首次填充：末行延迟封顶（千项列表总时长仍压在 800ms）
     OFFSET_PX = 64        # 首次填充：起始位移（= 一个文本行高，行从槽位下方升起）
+    # 会 scrolling 的按键（见 eventFilter；列表是 StrongFocus，这些键真能滚）
+    _SCROLL_KEYS = frozenset((
+        Qt.Key.Key_Up, Qt.Key.Key_Down, Qt.Key.Key_PageUp, Qt.Key.Key_PageDown,
+        Qt.Key.Key_Home, Qt.Key.Key_End,
+    ))
 
     def __init__(self, view, parent: QObject | None = None) -> None:
         super().__init__(parent if parent is not None else view)
@@ -244,13 +252,43 @@ class ListEnterAnimator(QObject):
         self._timer = QTimer(self)
         self._timer.setInterval(16)
         self._timer.timeout.connect(self._tick)
-        # 用户一滚动就收摊（见类文档「滚动不播入场」）。`valueChanged` 只在**滚动
-        # 位置真的变了**时发：整表重建（`clear()` + `appendRows`）只改 range 不改
-        # value，即便重建前停在列表底部也不会误触发（实测）。所以这个信号就是
-        # 「人滚了」的干净判据，不需要额外防抖。
-        bar = view.verticalScrollBar() if hasattr(view, "verticalScrollBar") else None
-        if bar is not None:
-            bar.valueChanged.connect(self._on_scrolled)
+        # 「人滚了」的判据必须是**真实输入**（滚轮 / 按键），不能盯 `valueChanged`
+        # ——回归，用户实测报的「正在滑动时切到别的视图，就没有加载动画了」：
+        # 整表重建（`clear()` + `appendRows`）时新的滚动范围会把当前值**夹小**，
+        # 于是 valueChanged 发出来；而且它是**延后一帧**才发的——`play()` 已经把
+        # 瀑布打开，它随后又把 `_waterfall` 关掉，入场动画当场消失。
+        # 停在顶部时值不变（0 → 0）所以一直没暴露，滚到中间必现。
+        # 早先那句「重建只改 range 不改 value、不会误触发」只在**新范围装得下旧
+        # 值时**成立，别照着它改回去。
+        #
+        # ⚠️ 过滤器必须装得**比会吃掉滚轮事件的那位早**：`SmoothWheelScroller`
+        # 处理鼠标滚轮时 return True，排在它后面的过滤器就再也看不到事件了。
+        # Qt 的 eventFilter 是「后装的先跑」，所以这里要早装——历史页当前的顺序
+        # （本动画器 → scroll_fx）正好满足。
+        self._targets = [t for t in (view, getattr(view, "viewport", None)
+                                     and view.viewport()) if t is not None]
+        for target in self._targets:
+            target.installEventFilter(self)
+
+    def eventFilter(self, obj, event) -> bool:
+        """只认**真实纵向滚动**；一律放行（见 `__init__` 的说明）。
+
+        ⚠️ 滚轮必须**判方向**：历史页的「双指横滑切类型标签」（§4.0）也是 Wheel
+        事件，只是只有 x 分量、纵向滚动条一动都不动；若只按事件类型就当成「人滚
+        了」，切类型标签的入场动画会当场消失（用户实测报的「静止状态下切换到文本
+        等视图，数据也没有加载动画了」）。判据与 `SmoothWheelScroller` 一致：
+        纵向分量非零且不弱于横向。
+        """
+        t = event.type()
+        if t == QEvent.Type.Wheel:
+            angle = event.angleDelta()
+            dy, dx = ((angle.y(), angle.x()) if (angle.y() or angle.x())
+                      else (event.pixelDelta().y(), event.pixelDelta().x()))
+            if dy and abs(dy) >= abs(dx):
+                self._on_scrolled()
+        elif t == QEvent.Type.KeyPress and event.key() in self._SCROLL_KEYS:
+            self._on_scrolled()      # 列表是 StrongFocus，方向键/翻页键也能滚
+        return False
 
     def _on_scrolled(self, _value: int = 0) -> None:
         """滚动一旦发生，首次填充的瀑布就此结束：之后露面的行一律静止。"""
@@ -282,6 +320,13 @@ class ListEnterAnimator(QObject):
         self._frozen = False
         self._waterfall = True
         self._active = True
+        # 刷新率在这里定，**不在 observe()**：`refresh_rate()` 的首次调用要付
+        # `import AppKit`（实测 78ms + 首查 18ms），而 observe() 是**绘制驱动**
+        # 的——把它放那儿等于第一次瀑布的第一帧卡 96ms。`play()` 是数据装载时
+        # 走的（不在绘制路径上），而且与上面 `reduce_motion_enabled()` 的刷新是
+        # 同一个节奏：**每次动画起步刷一次探测值**。启动期还会 `prewarm_refresh_rate()`
+        # 再提前付一次，真到这儿就只剩缓存命中。
+        apply_frame_rate(self._timer)
         # 这里**不**起定时器：起始时刻由首帧绘制时的 observe() 记入。视口一直
         # 没绘制（窗口还没显示）时也就不会有空转的定时器；一旦绘制，observe
         # 会启动它。`_active` 先置真，让此刻的 local() 走进度分支（表还空）——
@@ -311,6 +356,11 @@ class ListEnterAnimator(QObject):
         self._starts[row] = (start, self.ROW_MS, self.OFFSET_PX)
         self._max_end = max(self._max_end, start + self.ROW_MS)
         if not self._timer.isActive():
+            # ⚠️ 只起步，**不**在这里刷刷新率：这个方法是绘制路径（delegate.paint
+            # 每行每帧都调），而 `refresh_rate()` 的首调用要付 `import AppKit`
+            # ~96ms——放在这儿就是第一帧卡一下，还会把各行的起始时刻拉开（实测
+            # 把 `_starts[5]-_starts[0]` 顶到 274ms，比期望的 250 多出 24ms）。
+            # 间隔已由 `play()` 刷好，见那里的注释。
             self._timer.start()
 
     def rows_inserted(self, at: int) -> None:
@@ -383,17 +433,123 @@ _WHEEL_MIN_MS = 140
 _WHEEL_MAX_MS = 320
 
 
-def frame_interval_ms() -> int:
-    """缓动步进间隔 = 一块屏幕刷新周期（60Hz → 16ms，120Hz ProMotion → 8ms）。
+# 刷新率缓存：屏幕几乎不会变，但这两个函数在**绘制/滚动热路径**上被调用
+# （每次动画起步一次），所以值要缓存、TTL 要粗。见 `refresh_rate`。
+_RATE_CACHE: dict = {"rate": 0.0, "at": -1e9}
+_RATE_TTL = 5.0      # 秒：换显示器/ProMotion 切档最多滞后这么久被发现
 
-    Qt 默认的动画时钟是固定 16ms 且不跟 vsync —— 高刷屏上等于只用了一半刷新率。
-    按屏幕刷新率取间隔，同时给个 4ms 下限（刷新率读不到时退回 16ms）。
+
+def _mac_screen_rate() -> float:
+    """macOS 原生刷新率（取不到返回 0）。懒导入 AppKit，非 macOS 直接退化。
+
+    ⚠️ 为什么要绕开 Qt：`QScreen.refreshRate()` 在 macOS 上报的是**当前显示模式
+    的标称速率**，ProMotion 屏（14/16 吋 MacBook Pro、Pro Display XDR）常年报
+    60，而面板能跑 120。我们所有自绘动画（滚动缓动、悬浮条、边缘渐隐、景深、
+    抬升、逐项入场）都按这个间隔步进——报 60 就等于**只用了一半刷新率**，而
+    系统合成的内容是 120，两者错拍，读起来正是「帧率低、不丝滑」。
+    `NSScreen.maximumFramesPerSecond` 才是那块屏实际能吃多少帧。
+
+    只用**主屏**（菜单栏那块）。想按窗口在哪块屏算得先知道窗口的屏幕，而
+    `QWidget.screen()` 是条会段错误的路（见 `apply_frame_rate`），不值得为这点
+    精度去踩它——多显示器的取舍记在 DEVELOPMENT.md §16.1。
     """
-    screen = QApplication.primaryScreen()
-    rate = screen.refreshRate() if screen is not None else 0.0
-    if not rate or rate < 1:
-        return 16
-    return max(4, int(round(1000.0 / rate)))
+    try:
+        import AppKit
+    except Exception:                      # 非 macOS / 未装 pyobjc
+        return 0.0
+    try:
+        screens = list(AppKit.NSScreen.screens() or [])
+        target = AppKit.NSScreen.mainScreen() or (screens[0] if screens else None)
+        rate = float(target.maximumFramesPerSecond()) if target is not None else 0.0
+    except Exception:
+        logger.debug("读 NSScreen.maximumFramesPerSecond 失败", exc_info=True)
+        return 0.0
+    return rate if rate >= 1.0 else 0.0
+
+
+def refresh_rate_cache_clear() -> None:
+    """立刻丢弃刷新率缓存（换显示器后不等 TTL）。"""
+    _RATE_CACHE.update(rate=0.0, at=-1e9)
+
+
+def prewarm_refresh_rate() -> float:
+    """启动期把 `refresh_rate()` 的首调用成本提前付掉，返回采用的刷新率。
+
+    ⚠️ 这笔钱必须提前付：首次调用包含 `import AppKit` **78ms** + 首次 NSScreen
+    查询 **18ms**（实测）。如果留到运行中付，付账的地方就是**第一次动画起步**——
+    第一次滚动、第一次进页面，正好是一次肉眼可见的卡顿。放在窗口还没显示时的
+    启动阶段则完全无感。
+
+    调用点：`main.py` 建好 QApplication、显示主窗口之前（见那里的注释）。只调
+    一次即可（之后都在 TTL 缓存里，热调用 0.005ms）。
+    """
+    t0 = time.monotonic()
+    rate = refresh_rate()
+    cost_ms = (time.monotonic() - t0) * 1000.0
+    if cost_ms > 10.0:
+        logger.debug("刷新率探测耗时 %.1f ms（首调用含 AppKit 导入）", cost_ms)
+    return rate
+
+
+def refresh_rate() -> float:
+    """屏幕刷新率（Hz）：优先 macOS 原生，退化到 Qt，再退化到 60。
+
+    带 **TTL 缓存**（`_RATE_TTL` 秒）。这是必须的，但原因**不是**怕 AppKit 慢，
+    而是因为这个函数在**每次动画起步**都调一次，而它要去问 `AppKit.NSScreen`
+    ——每帧一次 ObjC 往返没必要。缓存后最坏也就是换显示器最多 5 秒后才跟上。
+
+    ⚠️ ProMotion 上这里给的是**上限**（120），不是此刻那一档的速率——这是有意
+    的：我们的定时器只在动画进行中跑（静止就停表），而用户一开始滚动，系统本来
+    就会把面板升到 120。按上限步进才不会再错拍。
+    """
+    now = time.monotonic()
+    cached = _RATE_CACHE["rate"]
+    if cached > 0.0 and now - _RATE_CACHE["at"] < _RATE_TTL:
+        return cached
+    rate = _mac_screen_rate()
+    if rate <= 0.0:
+        s = QApplication.primaryScreen()
+        rate = s.refreshRate() if s is not None else 0.0
+    if rate < 1.0:
+        rate = 60.0
+    _RATE_CACHE.update(rate=rate, at=now)
+    return rate
+
+
+def frame_interval_ms() -> int:
+    """动画步进间隔 = 一块屏幕刷新周期（60Hz → **16**ms，120Hz ProMotion → 8ms）。
+
+    ⚠️ **向下取整，不是四舍五入**（实测调过，别改回去）：60Hz 的真实周期是
+    16.67ms，四舍五入成 17ms 就比屏幕**慢** 0.33ms，两者周期性地错拍——屏幕该
+    刷新时这一帧还没画完，于是同一帧被显示两次。实测就是这样：中位 17.11ms、
+    **58.5fps**，帧率统计看着挺稳（σ 0.62ms、零长帧）却仍然"不丝滑"，因为
+    卡的是"重复帧"而不是"掉帧"。取 16ms 让我们**略快于**屏幕：每个刷新周期里
+    必定已经画好一帧，宁可有帧没被显示，也不能有刷新没帧可显示。
+
+    Qt 默认的动画时钟固定 16ms 且不跟 vsync —— 高刷屏上等于只用了一半刷新率。
+    """
+    return max(4, int(1000.0 / refresh_rate()))
+
+
+def apply_frame_rate(timer: QTimer) -> int:
+    """把 timer 的间隔刷成**当前**屏幕的刷新周期，返回刷上去的值。
+
+    每次动画起步时重刷一次（屏幕换了能跟上，靠 `refresh_rate` 的 TTL）。
+
+    ⚠️ **故意不接收控件参数**（别好心加回来）：曾经写成
+    `apply_frame_rate(timer, widget)` 再从 `widget.screen()` 取屏幕，结果全套
+    测试跑到一半**段错误**（macOS 崩溃报告指到
+    `QWidget::screen() → QGuiApplication::screenAt()`）。原因是没 `show()` 过的
+    控件没有 windowHandle，`QWidget::screen()` 会退化成
+    `screenAt(mapToGlobal(中心点))` 这个兜底路径，在那条路径上调用是非确定性的
+    ——同样的控件、同样的调用，单独跑没事、连跑上百个用例就崩（时序/堆布局相
+    关）。屏幕刷新率这点收益不值得把一条会踩内存的调用放进热路径，所以改成
+    `refresh_rate()` 自己问主屏 + `NSScreen`。
+    """
+    interval = frame_interval_ms()
+    if timer.interval() != interval:
+        timer.setInterval(interval)
+    return interval
 
 # 滚动速度倍率（设置页「滚动速度」）。1.0 = Qt 原生距离，触控板与鼠标滚轮共用
 # 同一根旋钮——两者都只是「一次输入走多远」，没有理由分成两个设置。
@@ -542,6 +698,7 @@ class SmoothWheelScroller(QObject):
         self._span_ms = self._duration(abs(self._to - self._from))
         self._clock.restart()
         if not self._timer.isActive():
+            apply_frame_rate(self._timer)   # 起步重刷（屏幕可能换了）
             self._timer.start()
         return True  # 消费：缓动是这次滚动的唯一驱动，避免与原生各滚一半
 

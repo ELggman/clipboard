@@ -66,6 +66,14 @@ def main() -> int:
 
     logger.info("Clipboard Workspace %s 启动（Python %s）", __version__, sys.version.split()[0])
 
+    # 提前付掉「首次探测屏幕刷新率」的一次性成本（macOS 上是 `import AppKit`
+    # 78ms + 首次 NSScreen 查询 18ms，实测）。留到运行中付的话，付账点就是
+    # **第一次动画起步**——第一次滚动或第一次进页面，正好是一次肉眼可见的卡顿；
+    # 放在窗口还没显示这里则完全无感。见 ui.animations.prewarm_refresh_rate。
+    from ui.animations import prewarm_refresh_rate
+
+    logger.debug("屏幕刷新率 %.0f Hz", prewarm_refresh_rate())
+
     # 延迟导入：业务/UI 装配（启动时间优化点，见 DEVELOPMENT.md §6.3）
     from app.bootstrap import start_workspace
 

@@ -49,7 +49,8 @@ from app.types import TEMP_MINUTE_OPTIONS
 from ui.animations import HoverAnimator, ListEnterAnimator, enable_smooth_wheel
 from ui.fluent_combo import FluentComboBox
 from ui.icons import icon as ui_icon
-from ui.scroll_fx import LIFT_ALPHA, enable_scroll_fx
+from ui.scroll_fx import LIFT_ALPHA, enable_scroll_fx, parse_color
+from ui.theme import current_palette
 
 ROLE_ITEM = Qt.ItemDataRole.UserRole + 1  # QStandardItem 里存 ClipboardItem
 ROLE_HEADER = Qt.ItemDataRole.UserRole + 2  # 时间线月份标题（无条目数据）
@@ -218,6 +219,20 @@ class HistoryDelegate(QStyledItemDelegate):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
         rect = QRect(option.rect).adjusted(1, 1, -1, -1)
+        # 卡片景深（第 5 项装饰）：整张卡按「离视口中心的距离」缩放 + 向外推 +
+        # 向背景淡出。⚠️ 它是**恒常**的——静止时也生效，和视差/抬升「只在滚动中
+        # 非零」不一样（demo_v.py 就是这么写的）。关掉时 `depth` 为 None，连
+        # 一次 save/restore 都不做，完全走原路径。
+        depth = self._depth(option.rect)
+        if depth is not None:
+            scale, push, _dim = depth
+            painter.translate(0, push)
+            if scale != 1.0:
+                center = rect.center()
+                painter.translate(center)
+                painter.scale(scale, scale)
+                painter.translate(-center)
+
         selected = bool(option.state & QStyle.StateFlag.State_Selected)
         hovered = bool(option.state & QStyle.StateFlag.State_MouseOver)
         hover_alpha = (self.animator.alpha(index.row())
@@ -225,6 +240,7 @@ class HistoryDelegate(QStyledItemDelegate):
         self._draw_background(painter, rect, option, selected, hover_alpha)
 
         if item is None:
+            self._draw_depth_dim(painter, rect, depth)
             painter.restore()
             return
         # 敏感优先：即使代码条目也按遮蔽单行渲染（新增.md §10 联动 mock）
@@ -237,6 +253,33 @@ class HistoryDelegate(QStyledItemDelegate):
         else:
             self._draw_text_row(painter, rect, option, item)
 
+        self._draw_depth_dim(painter, rect, depth)
+        painter.restore()
+
+    def _depth(self, option_rect):
+        """景深参数（→ `(缩放, 位移, 淡出 alpha)`）；未装配/未开启时 → `None`。"""
+        fx = getattr(self, "scroll_fx", None)
+        return None if fx is None else fx.depth_for(option_rect)
+
+    def _draw_depth_dim(self, painter, rect, depth) -> None:
+        """把卡片向**列表背景色**淡出（不是变黑）。
+
+        用背景色而不是黑/白：深浅主题下「向背景退去」都读作变远，而直接压亮度的话
+        浅色主题会变成灰卡片。整张卡只填一次（不是每行挂一个 QGraphicsEffect），
+        代价就是一次 `fillPath`。
+
+        放在最后画，所以它同时压暗了卡片底色与文字——和 demo 里分别调卡片色、
+        文字色是同一个观感，但少改十几处取色。
+        """
+        if depth is None or depth[2] <= 1.0:
+            return
+        c = parse_color(current_palette().get("content", "#FFFFFF"))
+        c.setAlpha(int(round(min(255.0, depth[2]))))
+        path = QPainterPath()
+        path.addRoundedRect(rect, self._s(_RADIUS), self._s(_RADIUS))
+        painter.save()
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.fillPath(path, c)
         painter.restore()
 
     def _note_visible(self, row: int) -> None:
@@ -333,7 +376,9 @@ class HistoryDelegate(QStyledItemDelegate):
         base = QPainterPath()
         base.addRoundedRect(rect, self._s(_RADIUS), self._s(_RADIUS))
         # 四层**同心环**（每层 = 外圈减掉内圈，所以只画到行外、不动行内），
-        # 越外越淡；整体再往下偏一点，读起来是投影而不是描边
+        # 越外越淡；整体再往下偏一点，读起来是投影而不是描边。
+        # ⚠️ 必须是「环」不能是「整块」：**普通行的底色是透明的**（只有选中/hover
+        # 才填底色，见 `_draw_background`），整块铺会把行内部也染上一层灰。
         for grow, frac in ((4, 0.20), (3, 0.35), (2, 0.55), (1, 0.8)):
             g = self._s(grow)
             c = QColor(255, 255, 255) if dark else QColor(0, 0, 0)

@@ -1305,6 +1305,44 @@ def test_history_menu_delete(tmp_path):
     assert count == 0
 
 
+def test_collections_page_has_no_horizontal_scrollbar(tmp_path):
+    """回归：收藏夹页不该出现横向滚动条（用户报的「左右滑动的滚轮」）。
+
+    面板里的收藏夹列表按名字的**自然宽度**排布，名字长一点就把列撑宽、凭空冒出
+    一条横向条。现在两个列表都显式关掉横向条，长名字按面板宽度做省略号（全名
+    挂 tooltip）。条目列表同理——它只有纵向语义。
+    """
+    from database.engine import create_db_engine
+    from database.migrations import migrate
+    from services import collection_service
+    from ui.collections_view import CollectionsView
+
+    engine = create_db_engine(tmp_path / "hs.db")
+    migrate(engine)
+    long_name = "一个名字特别特别长的收藏夹用于测试"
+    collection_service.create_collection(engine, long_name)
+
+    view = CollectionsView()
+    view.set_context(engine)
+    view.resize(560, 720)
+    view.show()
+    pytest_app.processEvents()
+    view.show_collection_panel()
+    pytest_app.processEvents()
+
+    off = Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+    assert view._items.horizontalScrollBarPolicy() == off
+    assert view._list.horizontalScrollBarPolicy() == off
+    assert view._list.horizontalScrollBar().maximum() == 0, "长名字不该撑出横向条"
+
+    # 长名字被省略号截断，全名仍在 tooltip 里（不然截掉的部分就找不回来了）
+    row = next(i for i in range(view._list.count())
+               if long_name in view._list.item(i).toolTip())
+    assert view._list.item(row).text().endswith("…")
+    assert long_name in view._list.item(row).toolTip()
+    view.close()
+
+
 def test_collection_context_menu_delete(tmp_path):
     """收藏夹右键删除（回归：此前误调条目删除方法导致 AttributeError）。"""
     from database.engine import create_db_engine

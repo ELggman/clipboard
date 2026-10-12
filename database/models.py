@@ -83,6 +83,13 @@ class CollectionItem(Base):
     content: Mapped[str | None] = mapped_column(Text)
     preview: Mapped[str | None] = mapped_column(Text)
     file_path: Mapped[str | None] = mapped_column(Text)
+    # v10：快照也要带上渲染/操作要用到的元数据。早先只存了 type/content/
+    # preview/file_path，于是收藏夹里的**代码条目**打开详情时 `language` 为空、
+    # 高亮器选不出词法整段没颜色（用户实测报的），列表里的语言徽标同理。
+    language: Mapped[str | None] = mapped_column(String(32))
+    source_app: Mapped[str | None] = mapped_column(String(255))
+    sensitive: Mapped[int] = mapped_column(Integer, default=0)
+    sensitive_type: Mapped[str | None] = mapped_column(String(32))
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
 
 

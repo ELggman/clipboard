@@ -125,6 +125,12 @@ def add_item(engine: Engine, collection_id: int, item: ClipboardItem) -> bool:
                 content=item.content,
                 preview=item.preview,
                 file_path=item.file_path,
+                # v10：渲染/操作用得到的一并快照下来，否则收藏夹里的代码条目
+                # 没有 language → 详情高亮整段无色（用户实测报的）
+                language=item.language or "",
+                source_app=item.source_app or "",
+                sensitive=item.sensitive or 0,
+                sensitive_type=item.sensitive_type or "",
                 created_at=datetime.now(),
             ))
             session.commit()
@@ -186,12 +192,20 @@ def list_all_items(engine: Engine, limit: int = 500) -> list[ClipboardItem]:
 
 
 def _row_to_item(row) -> ClipboardItem:
-    """CollectionItem 行 → ClipboardItem（与 list_items 同一构造）。"""
+    """CollectionItem 行 → ClipboardItem（与 list_items 同一构造）。
+
+    元数据列（v10）在老库里可能是 NULL，一律 `or` 兜底——少了它们代码条目就没有
+    高亮、敏感条目就不知该遮蔽。
+    """
     return ClipboardItem(
         id=row.id,                     # collection_items.id（收藏条目自己的 id）
         type=row.type,
         content=row.content or "",
         preview=row.preview or "",
         file_path=row.file_path or "",
+        language=row.language or "",
+        source_app=row.source_app or "",
+        sensitive=row.sensitive or 0,
+        sensitive_type=row.sensitive_type or "",
         created_at=row.created_at.strftime("%m-%d %H:%M"),
     )

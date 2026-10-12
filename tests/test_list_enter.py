@@ -18,15 +18,27 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
+from PySide6.QtCore import QPoint, QPointF, Qt
+from PySide6.QtGui import QWheelEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QListWidget
 
 import ui.animations as animations
 from app.types import ClipboardItem
 from ui.animations import ListEnterAnimator
-from ui.history_view import HistoryView
+from ui.history_view import TYPE_FILTERS, HistoryView
 
 pytest_app = QApplication.instance() or QApplication([])
+
+
+def _wheel(dy: int = -120, dx: int = 0) -> QWheelEvent:
+    """真实滚轮事件——「人滚了」的判据只认真实输入，程序化 setValue 不算
+    （见 `ListEnterAnimator.__init__`）。`dx` 用来模拟触控板横滑（只有 x 分量）。"""
+    return QWheelEvent(
+        QPointF(10, 10), QPointF(10, 10),
+        QPoint(dx * 8, dy * 8), QPoint(dx, dy),
+        Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+        Qt.ScrollPhase.NoScrollPhase, False)
 
 
 def _bare_animator() -> ListEnterAnimator:
@@ -300,7 +312,8 @@ def test_scrolling_during_fill_window_keeps_rows_crisp():
     assert anim._waterfall is True
 
     bar = view._list.verticalScrollBar()
-    bar.setValue(bar.maximum())             # 立刻滚动
+    assert bar.maximum() > 0
+    QApplication.sendEvent(view._list.viewport(), _wheel())   # 立刻滚动
     pytest_app.processEvents()
 
     assert anim._waterfall is False         # 瀑布立刻收摊
@@ -346,6 +359,63 @@ def test_rebuild_while_scrolled_anchors_waterfall_at_top_visible_row():
 
     QTest.qWait(150)
     assert anim.local(first) > 0.3, "顶行应在 150ms 内明显淡入，而不是还没轮到"
+    view.close()
+
+
+def test_horizontal_swipe_does_not_stop_entrance():
+    """回归：触控板**双指横滑切类型标签**也是 Wheel 事件，不能当成「人滚了」。
+
+    横滑只有 x 分量、纵向滚动条一动都不动。若只按事件类型判定，切类型标签时
+    瀑布被误收摊，入场动画当场消失（用户实测报的「静止状态下切换到文本等视图，
+    数据也没有加载动画了」）。判据必须判方向，与 `SmoothWheelScroller` 一致：
+    纵向分量非零且不弱于横向。
+    """
+    view = _view(rows=60)
+    anim = _animator(view)
+    anim.play(view._model.rowCount())
+    pytest_app.processEvents()
+    assert anim._waterfall is True
+
+    QApplication.sendEvent(view._list.viewport(), _wheel(dx=-60, dy=0))  # 纯横滑
+    pytest_app.processEvents()
+    assert anim._waterfall is True, "横滑不该被当成「人滚了」"
+    assert anim.active is True
+
+    QApplication.sendEvent(view._list.viewport(), _wheel(dy=-120))       # 真·纵向滚
+    pytest_app.processEvents()
+    assert anim._waterfall is False, "纵向滚动才该收摊"
+    view.close()
+
+
+def test_rebuild_while_scrolled_keeps_entrance_animation():
+    """回归（用户实测报的）：停在列表中间时切类型标签 / 切视图，入场动画必须照播。
+
+    触发条件是**重建后行数变少**：新的滚动范围把当前值**夹小** → `valueChanged`
+    发出（且是**延后一帧**才发：`play()` 已把瀑布打开，它随后又关掉 `_waterfall`，
+    `_active` 也被复位，动画当场消失）。停在顶部时值不变（0 → 0）所以一直没暴露。
+    现在只认真实输入（滚轮/按键），程序化的 valueChanged 一律不算「人滚了」。
+    """
+    view = HistoryView()
+    view.set_items([ClipboardItem(type="text" if i % 2 == 0 else "code",
+                                  content=f"条目 {i}")
+                    for i in range(60)])
+    view.resize(420, 460)
+    view.show()
+    pytest_app.processEvents()
+    anim = view._delegate.enter_animator
+    QTest.qWait(900)                        # 首批瀑布播完
+
+    bar = view._list.verticalScrollBar()
+    bar.setValue(bar.maximum() // 2)        # 滚到中间
+    pytest_app.processEvents()
+    anim.stop()
+    pytest_app.processEvents()
+
+    idx = [i for i, t in enumerate(TYPE_FILTERS) if t[0] == "text"][0]
+    view._on_type_filter(idx)               # 只留文本 → 行数减半、范围变小
+    pytest_app.processEvents()
+    assert anim.active is True, "重建带出的 valueChanged 不该被当成「人滚了」"
+    assert anim._starts, "应该已经为可见行排上入场"
     view.close()
 
 

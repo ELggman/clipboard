@@ -12,7 +12,7 @@ from .models import Base
 
 logger = logging.getLogger(__name__)
 
-_SCHEMA_VERSION = 9
+_SCHEMA_VERSION = 10
 
 # 幂等扩展 DDL（FTS5 全文索引 + 常用索引）
 _EXTRA_DDL = [
@@ -45,12 +45,56 @@ def migrate(engine: Engine) -> None:
         _upgrade_v7_image_hash_normalize(engine)
     if current < 9:
         _upgrade_v9_withdraw_shipped_templates(engine)
+    if current < 10:
+        _upgrade_v10_collection_snapshot_metadata(engine)
 
     with engine.begin() as conn:
         for ddl in _EXTRA_DDL:
             conn.execute(text(ddl))
         conn.execute(text(f"PRAGMA user_version = {_SCHEMA_VERSION}"))
     logger.info("迁移完成，schema 版本 -> %s", _SCHEMA_VERSION)
+
+
+def _upgrade_v10_collection_snapshot_metadata(engine: Engine) -> None:
+    """v9 → v10：collection_items 补上渲染/操作用得到的元数据快照列。
+
+    收藏是**内容快照**（与历史解耦），但早先只存了 type/content/preview/file_path
+    ——`language` 没存，于是收藏夹里的代码条目打开详情时拿到空 language，高亮器
+    选不出词法、整段没有颜色（用户实测报的）；列表里的语言徽标同理。`sensitive`
+    也一样：详情弹窗会按它决定是否遮蔽。
+
+    新列全部 nullable（SQLite ALTER TABLE ADD COLUMN 的限制），并顺手用
+    clipboard_id 从历史回填一次——历史还在的收藏条目立刻就有语言。历史已清掉的
+    只能等下次重新收藏：快照的语义就是「不依赖历史」，这里不该去猜。
+    """
+    new_cols = [
+        ("language", "VARCHAR(32)"),
+        ("source_app", "VARCHAR(255)"),
+        ("sensitive", "INTEGER DEFAULT 0"),
+        ("sensitive_type", "VARCHAR(32)"),
+    ]
+    with engine.begin() as conn:
+        existing = {r[1] for r in conn.execute(
+            text("PRAGMA table_info(collection_items)")).fetchall()}
+        for col_name, col_type in new_cols:
+            if col_name not in existing:
+                conn.execute(text(
+                    f"ALTER TABLE collection_items ADD COLUMN {col_name} {col_type}"))
+        conn.execute(text(
+            "UPDATE collection_items SET"
+            " language = COALESCE(language, (SELECT i.language"
+            "   FROM clipboard_items i WHERE i.id = collection_items.clipboard_id)),"
+            " source_app = COALESCE(source_app, (SELECT i.source_app"
+            "   FROM clipboard_items i WHERE i.id = collection_items.clipboard_id)),"
+            " sensitive_type = COALESCE(sensitive_type, (SELECT i.sensitive_type"
+            "   FROM clipboard_items i WHERE i.id = collection_items.clipboard_id)),"
+            # sensitive 是 `DEFAULT 0` 加的列 → 老行拿到的是 0 不是 NULL，
+            # COALESCE 取不到子查询，得显式区分「0 = 还没标过」
+            " sensitive = CASE WHEN sensitive = 0 THEN COALESCE("
+            "   (SELECT i.sensitive FROM clipboard_items i"
+            "    WHERE i.id = collection_items.clipboard_id), 0)"
+            "   ELSE sensitive END"))
+    logger.info("v10 迁移：collection_items 补齐元数据快照列并回填")
 
 
 def _upgrade_v2_collection_snapshot(engine: Engine) -> None:

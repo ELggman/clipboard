@@ -241,14 +241,21 @@ def test_parallax_sign_flips_across_center():
     lst = view._list
     fx = lst._scroll_fx
     _settle(fx)
-    fx._mark_active()
+    try:
+        # 景深开着时视差自动让位（见 test_depth_supersedes_legacy_parallax），
+        # 这里要单独验旧通道，先把景深关掉
+        scroll_fx.set_scroll_effects({"depth": False})
+        fx._mark_active()
 
-    vp = lst.viewport().rect()
-    top = fx.parallax_for(QRect(0, vp.top(), 400, 90))
-    bottom = fx.parallax_for(QRect(0, vp.bottom() - 90, 400, 90))
-    assert top > 0 > bottom, "上边的行往下让、下边的行往上让"
-    assert abs(top) <= scroll_fx._PARALLAX_PX
-    assert abs(bottom) <= scroll_fx._PARALLAX_PX
+        vp = lst.viewport().rect()
+        top = fx.parallax_for(QRect(0, vp.top(), 400, 90))
+        bottom = fx.parallax_for(QRect(0, vp.bottom() - 90, 400, 90))
+        assert top > 0 > bottom, "上边的行往下让、下边的行往上让"
+        assert abs(top) <= scroll_fx._PARALLAX_PX
+        assert abs(bottom) <= scroll_fx._PARALLAX_PX
+    finally:
+        scroll_fx.set_scroll_effects(dict.fromkeys(
+            ("scrollbar", "edge_fade", "parallax", "depth", "lift"), True))
     view.close()
 
 
@@ -274,7 +281,7 @@ def test_set_scroll_effects_applies_live():
         assert not fx.edges.isVisible()
     finally:  # 模块级状态是全局的，别污染后面的用例
         scroll_fx.set_scroll_effects(dict.fromkeys(
-            ("scrollbar", "edge_fade", "parallax", "lift"), True))
+            ("scrollbar", "edge_fade", "parallax", "depth", "lift"), True))
     view.close()
 
 
@@ -285,6 +292,10 @@ def test_lift_toggle_actually_disables_lift():
     view = _view()
     fx = view._list._scroll_fx
     vp = view._list.viewport()
+    # 先把逐项入场推到静止：它由绘制驱动、随时间推进，否则两次 shot 之间
+    # 那一屏还在淡入，像素本来就不同（与抬升无关）
+    view._delegate.enter_animator.stop()
+    pytest_app.processEvents()
 
     def shot() -> QImage:
         fx._timer.stop()          # 钉住 activity，隔绝衰减
@@ -309,17 +320,165 @@ def test_lift_toggle_actually_disables_lift():
         assert shot() == off
     finally:
         scroll_fx.set_scroll_effects(dict.fromkeys(
-            ("scrollbar", "edge_fade", "parallax", "lift"), True))
+            ("scrollbar", "edge_fade", "parallax", "depth", "lift"), True))
     view.close()
 
 
 def test_scroll_effects_default_all_on():
     assert scroll_fx.scroll_effects() == {
-        "scrollbar": True, "edge_fade": True, "parallax": True, "lift": True}
+        "scrollbar": True, "edge_fade": True, "parallax": True,
+        "depth": True, "lift": True}
+
+
+# ---- 卡片景深（第 5 项，移植自 demo_v.py）----
+
+def test_depth_is_bottom_only_and_down_scroll_only():
+    """景深的两条硬约束（用户明确要求，别改回去）：
+
+    ① **只作用于视口中心以下**——上半屏恒等，顶部不能有任何形变；
+    ② **只在往下翻列表时出现**——往回翻或停下都要完全消失。
+
+    ⚠️ 与 demo_v.py 不同：demo 是「上下对称 + 常驻」，我们按用户要求改成了
+    「只在下半屏 + 只在往下翻」。所以这两个断言是**刻意的偏离**，不是 bug。
+    """
+    view = _view()
+    lst = view._list
+    fx = lst._scroll_fx
+    fx._timer.stop()
+    try:
+        vp = lst.viewport().rect()
+        top = QRect(0, vp.top(), 400, 90)
+        bottom = QRect(0, vp.bottom() - 90, 400, 90)
+        lower_mid = QRect(0, vp.center().y() + 10, 400, 90)
+
+        # ① 停下（activity 归零）→ 整体为 0，直接回原路径
+        fx._down = 1.0
+        fx._activity = 0.0
+        assert fx.depth_for(top) is None
+        assert fx.depth_for(bottom) is None, "停下就不该还留着形变"
+
+        # ② 往下翻列表（闸门开）→ 下半屏有效果，上半屏恒等
+        fx._down = 1.0
+        fx._activity = 1.0
+        assert fx.depth_for(top) is None, "顶部不该有任何效果"
+        d = fx.depth_for(bottom)
+        assert d is not None
+        scale, push, dim = d
+        assert scale < 1.0, "下半屏要缩小"
+        assert push > 0, "且向下推（向外）"
+        assert dim > 0, "且向背景淡出"
+        assert abs(push) <= scroll_fx._DEPTH_PUSH_PX + 0.01
+
+        # 越靠下缩得越多（渐变，不是硬切）
+        d_lower = fx.depth_for(lower_mid)
+        assert d_lower is not None and d_lower[0] > scale
+
+        # ③ 往回翻（方向闩锁翻到 0）→ 立刻没有效果
+        fx._down = 0.0
+        fx._activity = 1.0
+        assert fx.depth_for(bottom) is None, "往回翻不该有效果"
+
+        # ④ 开关关掉 → 同样 None
+        scroll_fx.set_scroll_effects({"depth": False})
+        fx._down = 1.0
+        assert fx.depth_for(bottom) is None
+    finally:
+        scroll_fx.set_scroll_effects(dict.fromkeys(
+            ("scrollbar", "edge_fade", "parallax", "depth", "lift"), True))
+    view.close()
+
+
+def test_depth_supersedes_legacy_parallax():
+    """两个都开会把缩略图推两次——景深开着时视差自动让位。"""
+    view = _view()
+    fx = view._list._scroll_fx
+    rect = QRect(0, 0, 400, 100)
+    try:
+        scroll_fx.set_scroll_effects({"depth": True, "parallax": True})
+        fx._mark_active()
+        assert fx.parallax_for(rect) == 0
+
+        scroll_fx.set_scroll_effects({"depth": False})
+        fx._mark_active()
+        assert fx.parallax_for(rect) != 0, "景深关掉后视差要回来"
+    finally:
+        scroll_fx.set_scroll_effects(dict.fromkeys(
+            ("scrollbar", "edge_fade", "parallax", "depth", "lift"), True))
+    view.close()
+
+
+def test_down_gate_latches_through_momentum_decay():
+    """回归：闸门只看**方向**，不看速度——一段滚动的惯性衰减不该让它掉下去。
+
+    早先这里算的是「瞬时速度 / 参考速度」，于是每段轻扫衰到阈值以下时整块下半屏
+    缩回去、下一次轻扫再缩回来，连扫几下就是不停放大缩小 —— 用户实测报的
+    「动画效果不错，就是滑动着看着有点卡顿」就是它。用旧公式的话，下面这段惯性
+    尾巴（末帧只走 1px ≈ 59px/s）会把闸门打到 0.24 左右。
+    """
+    view = _view()
+    lst = view._list
+    fx = lst._scroll_fx
+    fx._timer.stop()
+    try:
+        bar = lst.verticalScrollBar()
+        bar.setValue(bar.minimum() + 300)
+        fx._down = 0.0
+        fx._last_bar_value = bar.value()
+
+        # 一次甩动的尾巴：每帧位移递减到 0（末三帧「本帧没动」）
+        for dv in (24, 20, 16, 12, 8, 5, 3, 1, 1, 1, 0, 0, 0):
+            if dv:
+                bar.setValue(bar.value() + dv)     # 会经 valueChanged 刷新 activity
+            fx._tick()
+        assert fx._down_gate() > 0.9, "惯性尾巴上闸门不能掉下去"
+
+        # 反向：闩锁要翻过去
+        for _ in range(6):
+            bar.setValue(bar.value() - 20)
+            fx._tick()
+        assert fx._down_gate() < 0.2, "反向要翻转"
+    finally:
+        scroll_fx.set_scroll_effects(dict.fromkeys(
+            ("scrollbar", "edge_fade", "parallax", "depth", "lift"), True))
+    view.close()
+
+
+def test_depth_off_is_pixel_identical():
+    """关掉景深后，同一帧与「从没开过」逐像素一致（不残留半个 save/restore）。
+
+    ⚠️ 景深现在**只在往下翻列表时非零**，所以要把闸门手动推上去——否则开关两种
+    状态都是恒等，`on != off` 会假通过（这条用例曾经因为改了门槛而失去意义）。
+    """
+    view = _view()
+    fx = view._list._scroll_fx
+    vp = view._list.viewport()
+    view._delegate.enter_animator.stop()   # 入场动画会随时间推进，先推到静止
+    pytest_app.processEvents()
+
+    def shot() -> QImage:
+        fx._timer.stop()
+        fx._activity = 1.0
+        fx._down = 1.0                          # 打开「正在往下翻」的闸门
+        vp.repaint()
+        pytest_app.processEvents()
+        return vp.grab().toImage()
+
+    try:
+        scroll_fx.set_scroll_effects({"depth": False})
+        off = shot()
+        scroll_fx.set_scroll_effects({"depth": True})
+        on = shot()
+        assert on != off, "开着景深画面必须真的变（否则等于没接上）"
+        scroll_fx.set_scroll_effects({"depth": False})
+        assert shot() == off
+    finally:
+        scroll_fx.set_scroll_effects(dict.fromkeys(
+            ("scrollbar", "edge_fade", "parallax", "depth", "lift"), True))
+    view.close()
 
 
 def test_reduce_motion_turns_off_parallax_and_lift(monkeypatch):
-    """系统「减少动效」→ 视差/抬升不播（悬浮条与渐隐是静态装饰，保留）。"""
+    """系统「减少动效」→ 视差/抬升/景深不播（悬浮条与渐隐是静态装饰，保留）。"""
     monkeypatch.setattr(scroll_fx, "reduce_motion_enabled", lambda: True)
     assert scroll_fx._motion_effects() is False
     view = _view()
@@ -327,6 +486,8 @@ def test_reduce_motion_turns_off_parallax_and_lift(monkeypatch):
     fx._mark_active()
     assert fx.activity() == 0.0
     assert fx.parallax_for(QRect(0, 0, 400, 100)) == 0
+    # 景深严格说静止时也在，但「减少动效」下同样要整个关掉
+    assert fx.depth_for(QRect(0, 0, 400, 100)) is None
     view.close()
 
 

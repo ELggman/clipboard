@@ -1,6 +1,6 @@
 """滚动视觉装饰（设置页「滚动效果」可逐项开关）。
 
-四件套，由 `enable_scroll_fx(area, delegate=None)` 装配：
+五件套，由 `enable_scroll_fx(area, delegate=None)` 装配：
 
 1. **悬浮滚动条**（`OverlayScrollBar`）：原生 QScrollBar 一旦被 QSS 上样式就变成
    占位的（吃 10px 布局宽，见 `ui/theme.py` 注释）。这里把原生条设成
@@ -11,15 +11,24 @@
    增长（滚到端点自然收成 0），不是硬切一条。
 3. **缩略图视差**（`ScrollFx.parallax_for`）：滚动时缩略图相对行做一点反向位移，
    像内容分了层、边上的层跟不上。
-4. **卡片抬升**（`ScrollFx.activity` + delegate 里的 `_draw_lift`）：滚动时行像被
+4. **卡片抬升**（`ScrollFx.lift()` + delegate 里的 `_draw_lift`）：滚动时行像被
    抬起来，底下补一层近高斯阴影。
+5. **卡片景深**（`ScrollFx.depth_for()`，移植自仓库根的 `demo_v.py`，按用户要求
+   改了两处）：**只作用于视口中心以下**（顶部不要这个效果），且**只在往下翻列表
+   时出现**（往回翻或停下 → 0，见 `_down_gate`）。按位置把下半屏的卡
+   **缩放 + 向下推 + 向背景淡出**。另：5 开着时 3 自动让位（`parallax_for` 恒返回
+   0），因为 3 本来就是 5 的弱化版，两个一起上会把缩略图推两次。
 
-3/4 都是**只在滚动进行中**存在的：`activity()` 在滚动事件后为 1.0、停止约 330ms
-内衰减到 0，两者都乘它。所以静止时 delegate 走的是与没有装饰时**逐像素相同**的
-绘制路径——不会因为常驻的非整数位移把图糊掉。
+3/4/5 都是**只在滚动进行中**存在的（5 还多一个「方向必须是往下翻」的条件）。
+所以静止时 delegate 走的是与没有装饰时**逐像素相同**的绘制路径——不会因为常驻
+的非整数位移把图糊掉。
 
-为什么 3/4 不整个放这里：它们要知道行矩形与缩放（`_s`），而那是 delegate 的事；
-这里只提供 `activity()` / `parallax_for()`，绘制留在 `HistoryDelegate`。
+5 的闸门归零时 `depth_for()` 返回 `None`，delegate 直接走原路径、连一次
+`save/restore` 都不做——「停下即恒等」是它自己的责任。
+
+为什么 3/4/5 不整个放这里：它们要知道行矩形与缩放（`_s`），而那是 delegate 的事；
+这里只提供 `activity()` / `lift()` / `parallax_for()` / `depth_for()`，绘制留在
+`HistoryDelegate`。
 """
 
 import logging
@@ -36,7 +45,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QColor, QLinearGradient, QPainter, QPainterPath
 from PySide6.QtWidgets import QWidget
 
-from ui.animations import frame_interval_ms, reduce_motion_enabled
+from ui.animations import apply_frame_rate, frame_interval_ms, reduce_motion_enabled
 from ui.theme import current_palette
 
 logger = logging.getLogger(__name__)
@@ -54,6 +63,23 @@ _HOLD_MS = 90             # 滚动后 activity 保持 1.0 的时长
 _DECAY_MS = 240           # activity 从 1 衰减到 0 的时长
 _PARALLAX_PX = 6          # 缩略图视差的最大位移（逻辑像素）
 LIFT_ALPHA = 44           # 卡片抬升阴影的不透明度上限（delegate 用）
+
+# ---- 卡片景深（第 5 项，移植自 demo_v.py）----
+# ⚠️ 与 demo 有**两处刻意不同**，改之前先读：
+#   ① **只作用于视口中心以下**（用户要求「顶部不要这个效果」）。demo 是上下对称
+#      的镜头：上半屏的卡也缩、也往上推。这里上半屏恒等，效果从中心往下逐渐增强
+#      ——读起来是「下面还有内容、往后卷」。
+#   ② **只在往下翻列表时出现**（用户要求「下滑才出现」）。demo 是常驻的。这里乘
+#      一道方向闸门（`_down_gate`）：往回翻或停下 → 0。所以静止时它整体为 0，
+#      `depth_for` 直接返回 None 走原路径——「静止帧与无装饰逐像素一致」这条
+#      不变量对它同样成立。
+# 另外 demo 的 `max_distance = 视口高 × 0.60` 也是个坑：屏内卡片中心离视口中心最多
+# 只有视口高的一半，所以 t 的可见上界是 0.833 不是 1.0——`_EDGE_SCALE` 是**渐近值**
+# 不是边界值（写 0.90 时实际最扁只有 0.917）。这里比 demo 调紧一档补回来。
+_DEPTH_EDGE_SCALE = 0.88  # 底部缩到的比例（渐近值，见上）
+_DEPTH_MAX_DIST = 0.60    # 视口高 × 此值 = 「完全到底」(t=1)
+_DEPTH_PUSH_PX = 12       # 向下推的最大位移（demo 同值）
+_DEPTH_DIM = 46           # 向列表背景淡出的最大 alpha（0-255）
 
 _RGBA_RE = re.compile(
     r"^rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)"
@@ -84,6 +110,7 @@ _EFFECTS = {
     "edge_fade": True,     # 上下边缘渐隐
     "parallax": True,      # 缩略图视差
     "lift": True,          # 卡片抬升阴影
+    "depth": True,          # 卡片景深（缩放 + 向外推 + 向背景淡出）
 }
 _INSTANCES: list = []      # 已装配的 ScrollFx（改设置时逐一生效）
 
@@ -106,8 +133,13 @@ def set_scroll_effects(values: dict) -> None:
 
 
 def _motion_effects() -> bool:
-    """3/4 两项是"动效"：系统开了「减少动效」就整体关掉（无障碍）。"""
-    return (_EFFECTS["parallax"] or _EFFECTS["lift"]) and not reduce_motion_enabled()
+    """3/4/5 是"动效"：系统开了「减少动效」就整体关掉（无障碍）。
+
+    5（景深）严格说静止时也在，但它同样降低了边缘内容的清晰度，且带速度位移，
+    所以一并归到这里——「减少动效」的用户不该看到一个常驻的镜头形变。
+    """
+    return ((_EFFECTS["parallax"] or _EFFECTS["lift"] or _EFFECTS["depth"])
+            and not reduce_motion_enabled())
 
 
 class OverlayScrollBar(QWidget):
@@ -121,6 +153,10 @@ class OverlayScrollBar(QWidget):
         self._fx = fx
         self._bar = fx.scrollbar()
         self._grab_dy = 0.0
+        # refresh() 的状态镜像：只在真的变了时才去动属性/光标/重绘（见 refresh）
+        self._transparent = True
+        self._cursor = None
+        self._sig = None
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.setMouseTracking(True)
 
@@ -181,18 +217,37 @@ class OverlayScrollBar(QWidget):
     # ---- 绘制 ----
 
     def refresh(self) -> None:
-        """按当前 alpha 决定是否吃鼠标 + 重绘（`ScrollFx._tick` 里调）。"""
+        """按当前 alpha 决定是否吃鼠标 + 重绘（`ScrollFx._tick` 里调）。
+
+        **只在真的变了时动**：本函数每帧都被调一次，而 `setAttribute` /
+        `setCursor` / `update()` 都会惊动 Qt 的属性与重绘系统，闲置时没必要每帧
+        做一遍。
+        """
         a = self._fx.bar_alpha()
-        self.setAttribute(
-            Qt.WidgetAttribute.WA_TransparentForMouseEvents,
-            a <= 0.02 and not self._fx.dragging())
+        transparent = a <= 0.02 and not self._fx.dragging()
+        if transparent != self._transparent:
+            self._transparent = transparent
+            self.setAttribute(
+                Qt.WidgetAttribute.WA_TransparentForMouseEvents, transparent)
+
         if self._fx.dragging():
-            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            cursor = Qt.CursorShape.ClosedHandCursor
         elif self._fx.hovered():
-            self.setCursor(Qt.CursorShape.OpenHandCursor)
+            cursor = Qt.CursorShape.OpenHandCursor
         else:
-            self.unsetCursor()
-        self.update()
+            cursor = None
+        if cursor != self._cursor:
+            self._cursor = cursor
+            if cursor is None:
+                self.unsetCursor()
+            else:
+                self.setCursor(cursor)
+
+        # alpha 或滚动位置变了才需要重画（拖住不动 / 闲置时省掉每帧一次绘制）
+        sig = (round(a, 3), self._bar.value(), self._bar.maximum())
+        if sig != self._sig:
+            self._sig = sig
+            self.update()
 
     def paintEvent(self, event) -> None:
         alpha = self._fx.bar_alpha()
@@ -261,6 +316,12 @@ class ScrollFx(QObject):
         self._drag = False
         self._dirty = False              # 上一 tick 还有 activity（归零时要补一帧）
         self._motion = _motion_effects()
+        # 景深要用的「正在往下翻」闩锁（0..1，见 `_down_gate`）。只看**方向**，
+        # 不看速度大小——早先按速度算，结果每段轻扫的惯性衰减都会让整块下半屏
+        # 缩回去、下一次轻扫再缩回来，连扫几下就是不停放大缩小（用户实测报的
+        # 「滑动着看着卡顿」）。
+        self._down = 0.0
+        self._last_bar_value = self._bar.value()
 
         self.overlay = OverlayScrollBar(self)
         self.edges = EdgeFade(self)
@@ -335,14 +396,66 @@ class ScrollFx(QObject):
         就是**离视口中心的距离**：越靠边的行让得越多、中间几乎不动，读起来像
         内容分了层、边上的层跟不上。幅度只有 ±6px，且只在滚动中生效；静止时
         恒为 0，不会因为常驻的非整数位移把图糊掉。
+
+        **景深开着时返回 0**：景深（第 5 项）是同一个想法的完整版，而且它推的是
+        整张卡。两个一起上会把缩略图推两次，所以让景深接管。
         """
-        if self._activity <= 0.001 or not _EFFECTS["parallax"]:
+        if (self._activity <= 0.001 or not _EFFECTS["parallax"]
+                or _EFFECTS["depth"]):
             return 0
         vp = self._vp.rect()
         half = max(1.0, vp.height() / 2)
         rel = (rect.center().y() - vp.center().y()) / half
         rel = max(-1.0, min(1.0, rel))
         return int(round(-rel * _PARALLAX_PX * self._activity))
+
+    def _down_gate(self) -> float:
+        """「正在往下翻列表」的强度 0..1（往回翻 / 停下 → 0）。
+
+        ⚠️ **只看方向，不看速度大小**（改过一版，别改回去）：早先这里算的是
+        `瞬时速度 / 参考速度`，于是**每一段滚动的惯性衰减**都会让闸门掉下去、
+        整块下半屏缩回原样，下一次轻扫再缩回去——连扫几下就是不停地放大缩小，
+        读起来就是「卡顿」。方向闩锁只在真的反向时才翻。
+
+        乘 `activity()` 是为了让「停手」有个 ~330ms 的收尾；不乘的话手一停
+        `_down` 还挂着 1，效果不会消失。
+        """
+        return self._down * self._activity
+
+    def depth_for(self, rect):
+        """卡片景深：→ `(缩放, 额外位移 px, 淡出 alpha 0.._DEPTH_DIM)`；未开启 → `None`。
+
+        由**位置 + 下滑方向**共同决定，两项都是刻意的取舍：
+        - **位置**：只看视口中心**以下**，上半屏恒等（用户要求「顶部不要这个效果」）
+        - **方向**：只在**往下翻列表**时出现（`_down_gate()`），往回翻或停下 → 0
+
+        所以静止时它整体为 0、直接返回 `None`，delegate 连一次 `save/restore` 都不
+        做——「静止帧与无装饰逐像素一致」这条不变量对它同样成立（与早期的常驻版本
+        不同，那时是有意让静止帧也带形变）。
+
+        三个通道里真正让人「看见」的是**缩放和淡出**，不是位移：连续平滑的位移没有
+        静止参照物，人眼读不出来（旧视差 ±6px 看不出效果就是栽在这儿）。
+        """
+        if not (_EFFECTS["depth"] and self._motion):
+            return None
+        gate = self._down_gate()
+        if gate <= 0.004:
+            return None
+        vp = self._vp.rect()
+        # 只看中心以下：上半屏直接返回 None（不是返回恒等值）——这样 delegate 对
+        # 顶部每一行都走**完全原始**的绘制路径，连一次 translate 都没有
+        below = ((rect.center().y() - vp.center().y())
+                 / (vp.height() * _DEPTH_MAX_DIST))
+        if below <= 0.0:
+            return None
+        below = min(1.0, below)
+        t = below * below * (3.0 - 2.0 * below)      # smoothstep：两端导数为 0
+        t *= gate
+        if t <= 1e-6:
+            return None
+        scale = 1.0 - (1.0 - _DEPTH_EDGE_SCALE) * t
+        push = _DEPTH_PUSH_PX * t                    # 一律向下（向外）
+        return scale, push, t * _DEPTH_DIM
 
     # ---- 状态（OverlayScrollBar 读写）----
 
@@ -390,6 +503,13 @@ class ScrollFx(QObject):
 
     def _ensure_timer(self) -> None:
         if not self._timer.isActive():
+            # 停表期间滚动条可能已经动过（缓动的尾巴、程序化 setValue），起步时
+            # 把基准点归位，免得把那段陈旧位移当成第一帧的方向。
+            # `_down` **不**重置：它是方向闩锁，留着上一次的方向，这样紧接着的
+            # 同向滚动一上来就是满效果，不会每段手势都重新涨一次（那也是一种
+            # 「呼吸」）。
+            self._last_bar_value = self._bar.value()
+            apply_frame_rate(self._timer)   # 屏幕可能换了
             self._timer.start()
 
     def _tick(self) -> None:
@@ -399,6 +519,18 @@ class ScrollFx(QObject):
         # activity：滚动停止 _HOLD_MS 后线性衰减（视差/抬升的"余韵"）
         if self._activity > 0.0 and self._idle_ms > _HOLD_MS:
             self._activity = max(0.0, self._activity - step / _DECAY_MS)
+
+        # 「正在往下翻」的方向闩锁（景深用）：本帧滚动条往上走（内容前移 = 在看
+        # 更靠后的条目）就朝 1 靠，反向朝 0 靠；**本帧没动就保持**——惯性衰减的
+        # 空隙里 dv 经常是 0，那时若让闸门掉下去，就是前面 `_down_gate` 说的
+        # 「呼吸式卡顿」。
+        cur = self._bar.value()
+        dv = cur - self._last_bar_value
+        self._last_bar_value = cur
+        if dv > 0:
+            self._down += (1.0 - self._down) * 0.25
+        elif dv < 0:
+            self._down *= 0.75
 
         # 滚动条：鼠标在上面 / 正在拖 / 刚滚过 → 1，否则 0
         target = 1.0 if (self._hover or self._drag

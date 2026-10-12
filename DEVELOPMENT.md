@@ -114,7 +114,7 @@ clipboard-workspace/
 │   ├── clean_data_dialog.py # 清理数据弹窗（时间+类型筛选删除）
 │   ├── app_picker_dialog.py # 已安装应用选择器（忽略列表）
 │   ├── animations.py        # 动画/滚动基础设施（滚轮缓动、逐项入场、帧率时钟）
-│   ├── scroll_fx.py         # 滚动视觉装饰（悬浮滚动条/边缘渐隐/视差/抬升）
+│   ├── scroll_fx.py         # 滚动视觉装饰（悬浮条/边缘渐隐/视差/抬升/景深）
 │   └── theme.py             # 浅色/深色/跟随系统（QPalette + Stylesheet）
 ├── resources/               # 图标、qss
 ├── config/
@@ -435,7 +435,7 @@ def load_actions(extra_dirs: list[Path] = ()) -> list[ClipboardAction]:
   就是「帧率低、不丝滑」（用户实测报的正是这个）。同一轮实测里 delegate 单帧
   绘制只要 ~2.3ms（p95 2.8ms、零次超 16.7ms 预算），**根本不是帧率问题**，
   是常驻半透明。故 `observe` 只在**首次填充尚未结束**时为可见行排队，用户一
-  滚动（`verticalScrollBar().valueChanged`）瀑布立即收摊——否则装载后 800ms 内
+  滚动（**真实滚轮/按键输入**，不是 `valueChanged`——见 §9）瀑布立即收摊——否则装载后 800ms 内
   滚到的行会按 `MAX_DELAY_MS` 排队，位移一整行高、alpha 0，**隐身半秒**。
   **只维护 `{行号: 起始时刻}` 一张表 + 一个 16ms QTimer**
   （`ui.animations.ListEnterAnimator`），每行进度按单调时钟现算，偏移/透明度由
@@ -465,7 +465,7 @@ def load_actions(extra_dirs: list[Path] = ()) -> list[ClipboardAction]:
   ④ 顺带把 delegate 的 `_pixmap_cache` 从无界 dict 改成 `OrderedDict` LRU（上限
   256）——一张 256×192 的 QPixmap ≈ 196KB，长会话/多会话切换会累积到上百 MB
 - **滚动视觉装饰**（`ui/scroll_fx.py`，2026-09-30，用户要「更多视觉装饰」）。
-  四件套由 `enable_scroll_fx(area, delegate=None)` 装配，**逐项可开关**（设置页
+  五件套由 `enable_scroll_fx(area, delegate=None)` 装配，**逐项可开关**（设置页
   「滚动效果」→ `app.scroll_effects`，键名与 `_EFFECTS` 一致）：
   ① **悬浮滚动条**（`OverlayScrollBar`）——原生条 QSS 上样式后变占位（吃 10px
   布局宽，见 §9），故设 `ScrollBarAlwaysOff` + 自绘一条**浮在内容上方**的细条，
@@ -475,14 +475,27 @@ def load_actions(extra_dirs: list[Path] = ()) -> list[ClipboardAction]:
   底色 → 透明」的渐变，高度随离端点距离增长（滚到端点自然收成 0）③ **缩略图
   视差**（`ScrollFx.parallax_for`，±6px，delegate 画缩略图时读）④ **卡片抬升**
   （`ScrollFx.lift()` + delegate `_draw_lift`：四层同心圆角矩形叠出近高斯阴影，
-  比 QGraphicsDropShadowEffect 便宜两个数量级）。**3/4 只在滚动进行中非零**：
-  `activity()` 滚动后为 1.0、停止约 330ms 内衰减到 0，两者都乘它——静止时
-  delegate 走**与无装饰逐像素相同**的绘制路径。3/4 的绘制留在 delegate（要知道
-  行矩形与 `_s` 缩放），`scroll_fx` 只提供 `activity()`/`lift()`/`parallax_for()`。
-  ⚠️ **delegate 取强度必须走各自的 `lift()` / `parallax_for()`，别读 `activity()`**
-  ——`activity` 只由「视差**或**抬升任一开着」驱动，只开视差时它照样是 1.0，
-  直接读它会让「卡片抬升」勾选框完全失效（用户实测报的「开关不明显」）。
-  系统「减少动效」开启时 3/4 整体关掉（悬浮条与渐隐是静态装饰，保留）
+  比 QGraphicsDropShadowEffect 便宜两个数量级）⑤ **卡片景深**
+  （`ScrollFx.depth_for()`，2026-10-09 移植自仓库根的 `demo_v.py`，**按用户要求
+  改了两处**）：把卡片**缩放 + 向下推 + 向列表底色淡出**，但**只作用于视口中心
+  以下**（顶部不要这个效果），且**只在往下翻列表时出现**（往回翻或停下 → 0，见
+  `_down_gate`）。⚠️ 闸门是**方向闩锁**（只看滚动方向，不看速度大小），
+  别改回按速度算——那会让下半屏随每段甩动的惯性衰减「呼吸」，见 §9。
+  **3/4/5 都只在滚动进行中非零**：`activity()` 滚动后为 1.0、
+  停止约 330ms 内衰减到 0（⑤ 还多一个方向条件），所以静止时 delegate 一律走
+  **与无装饰逐像素相同**的绘制路径。⑤ 开着时 ③ 自动让位（`parallax_for` 恒返回
+  0）——两者是同一个想法的弱化版与完整版，一起上会把缩略图推两次。
+  **为什么 ⑤ 能被看见，而 ③ 不能**（关键）：⑤ 改的是**面积和明暗**（最多缩 12%、
+  淡出 α46），③ 只改位移（±6px）且**视口正中恒为 0**——而人眼正盯着中央那几行。
+  连续平滑的位移没有静止参照物，读不出来；缩放有卡片自己的边界当参照物。
+  3/4/5 的绘制留在 delegate（要知道行矩形与 `_s` 缩放），`scroll_fx` 只提供
+  `activity()`/`lift()`/`parallax_for()`/`depth_for()`。
+  ⚠️ **delegate 取强度必须走各自的 `lift()` / `parallax_for()` / `depth_for()`，
+  别读 `activity()`**——`activity` 只由「三项任一开着」驱动，只开视差时它照样是
+  1.0，直接读它会让「卡片抬升」勾选框完全失效（用户实测报的「开关不明显」）。
+  ⚠️ **⑤ 的两条硬约束别改回去**（用户明确要求，有回归用例钉着）：只在**下半屏**、
+  只在**往下翻**。demo 原版是「上下对称 + 常驻」，我们这两处是刻意偏离。
+  系统「减少动效」开启时 3/4/5 整体关掉（悬浮条与渐隐是静态装饰，保留）
 - **装饰的静止判据要连淡出一起等**（`ScrollFx._tick`，实测踩坑）：activity 比
   滚动条先归零（330ms vs 900ms idle + 300ms 淡出），只判 activity 会在浮层条
   还是 1.0 时就停表，**条卡在画面上不消失**。判据须含
@@ -649,6 +662,12 @@ CREATE TABLE collection_items (
     preview       TEXT,
     file_path     TEXT,                 -- 图片快照路径（被引用时删除历史保护该文件）
     created_at    DATETIME NOT NULL,
+    -- v10：渲染/操作会用到的元数据也要快照，不然收藏里的代码条目没有
+    -- language → 详情高亮整段无色、敏感条目不知道要遮蔽（用户实测报的）
+    language       TEXT,
+    source_app     TEXT,
+    sensitive      INTEGER DEFAULT 0,
+    sensitive_type TEXT,
     UNIQUE (collection_id, clipboard_id)
 );
 
@@ -862,16 +881,29 @@ CREATE INDEX ix_items_session ON clipboard_items (session_id);
 | 变换模板「选中文本 → 输 shortcut → Tab」提取不出任何东西（**设计错误，已撤回**） | 触发靠打字，第一个字母就把要变换的选中文本覆盖掉了——`{{selection}}` 永远读空，退回剪贴板 | v9 撤回整批模板（§7.4）：打字展开与内容变换是两类东西，不该共用触发通道；变换类改做「对剪贴板条目执行，结果回剪贴板」 |
 | 列表滑动「直上直下」、一格一格跳 | `QListView`/`QListWidget` 默认 `ScrollPerItem`（整行模式），触控板递来的 `pixelDelta` 被量化成整行，macOS 的连续滚动被砸碎 | 主列表一律 `setVerticalScrollMode(ScrollPerPixel)`（触控板原生连续 + 惯性即自然顺滑，不需自己补动画）（§4.0） |
 | 鼠标滚轮一格瞬移一大段、无过渡 | Qt 滚轮路径不做任何缓动（`wheelScrollLines(3) × singleStep` 一次到位；像素模式主列表 = 192px/格） | `ui.animations.SmoothWheelScroller`：纵向滚轮事件动 `QScrollBar.value`，OutCubic 140–320ms；Shift+纵向/横向/无可滚范围/已在边界/减少动效 全部放行（§4.0） |
-| 滚轮缓动「一顿一顿、掉帧」，同样距离明显不如触控板顺 | **不是绘制慢**（delegate 单帧 ~2.3ms）：`QPropertyAnimation` 走 Qt 的 `QUnifiedTimer`——**粗粒度、不锁 vsync** 的 ~16ms 时钟，一段 140ms 的滚动实测有 48ms 空档、σ≈12ms 抖动 | 换 `Qt.PreciseTimer` + `QElapsedTimer` 单调时钟自算进度（仍 OutCubic，仍可打断）：同样距离同样时长 **7 帧 / max 间隔 17.4ms / σ=0.8ms，零掉帧**。`frame_interval_ms()` = 一个屏幕刷新周期（§4.0） |
+| **高刷屏**（ProMotion 14/16 吋 MBP、Pro Display XDR）上「还是不够丝滑」 | 所有自绘动画的步进间隔取自 `QScreen.refreshRate()`，而 Qt 在 macOS 上报的是**当前显示模式的标称速率**——ProMotion 常年报 **60**，面板实际能跑 120。于是我们的缓动/装饰按 60Hz 步进，系统合成的内容是 120Hz，两者错拍 | `refresh_rate()` 优先向 **`NSScreen.maximumFramesPerSecond`** 要（懒导入 AppKit，非 macOS 自动退化到 Qt）。**每次动画起步刷一次**（`apply_frame_rate`，在 `play()`/`_set_target`/`_scroll_wheel` 这些**动画起点**，不在绘制路径），屏幕换了/ProMotion 切档都能跟上（靠 5 秒 TTL 缓存）。取的是上限 120 而非此刻那一档——定时器只在动画中跑，用户一开始滚系统本来就会升到 120。诊断：`tools/diag_scroll.py` |
+| 同一帧里最贵的一档装饰是**卡片抬升** | `_draw_lift` 每行画 4 层同心环，实测 dpr=2 下**单帧 +3.0ms**（其余四档合计才 ~0.8ms；基准 0.6ms）。开销基本与「环面积×层数」成正比，不是 `subtracted()` 的锅（换成整块铺同价，且整块会染到行内部——普通行底色是透明的） | **观感取舍，未改**。要降就减层数：4→3 层 **-24%**（201k 像素有微差，最大 18/255）；4→2 层 **-50%**（最大 30/255）；4 层**关抗锯齿** **-35%** 且只有 8015 像素不同（就是那圈边缘），但圆角会有点硬。`tools/diag_scroll.py` 第 3 块可以直接量 |
+| 滚轮缓动「一顿一顿、掉帧」，同样距离明显不如触控板顺 | **不是绘制慢**（delegate 单帧 ~2.3ms）：`QPropertyAnimation` 走 Qt 的 `QUnifiedTimer`——**粗粒度、不锁 vsync** 的 ~16ms 时钟，一段 140ms 的滚动实测有 48ms 空档、σ≈12ms 抖动 | 换 `Qt.PreciseTimer` + `QElapsedTimer` 单调时钟自算进度（仍 OutCubic，仍可打断）：同样距离同样时长 **7 帧 / max 间隔 17.4ms / σ=0.8ms，零掉帧**。`frame_interval_ms()` = 一个屏幕刷新周期，**向下取整**（§4.0） |
+| 帧率统计很漂亮但**手感依然不丝滑** | 60Hz 的真实周期是 16.67ms，四舍五入成 **17ms** 就比屏幕慢 0.33ms，两者周期性错拍——屏幕该刷新时这帧还没画完，**同一帧被显示两次**。实测：中位 17.11ms / σ 0.62ms / **零掉帧**，却是 **58.5fps**。卡的是「重复帧」，掉帧统计看不见它 | `frame_interval_ms()` 改成**向下取整**（60Hz → 16ms，跑 62.5fps）：**宁可多画一帧没被显示，不能有刷新没帧可显示**。`tools/diag_scroll.py` 第 1、2 块会直接标出「间隔 vs 理想周期」和「实测 fps vs 屏幕 Hz」 |
 | 触控板「轻微一划就滑过好几屏」 | Qt 把一次输入的位移**再乘 `wheelScrollLines`（默认 3）行**；且实测 `QListView`/`QScrollArea`/`QPlainTextEdit`/`QTextEdit` **一律只看 `angleDelta`、`pixelDelta` 被完全忽略**——所以能改的只有这一条换算，不能靠像素模式 | 设置页「滚动速度」→ `app.scroll_speed`（默认 0.5 ≈ 原生一半）；缩放在 `SmoothWheelScroller` 里对**距离**乘系数，触控板仍不补动画（系统惯性曲线照旧）。倍率 1.0 = 原生，触控板原样放行（§4.0） |
-| 滑动「帧率很低、肉眼可见不丝滑」 | **不是帧率问题**（实测 delegate 单帧只要 ~2.3ms、零次超 16.7ms 预算）：滚动时几乎每行都是「初次露面」，逐条播入场 → 100% 的可见行 `alpha < 0.9`（中位 0.37）、位移中位 15px，**整个视口常驻半透明中间态** | 入场只播**首次填充**那一屏；`observe` 在非 `_active and _waterfall` 时直接返回，用户一滚动（`valueChanged`）瀑布立即收摊。**别再给滚动加逐条入场**（§4.0） |
+| 滑动「帧率很低、肉眼可见不丝滑」 | **不是帧率问题**（实测 delegate 单帧只要 ~2.3ms、零次超 16.7ms 预算）：滚动时几乎每行都是「初次露面」，逐条播入场 → 100% 的可见行 `alpha < 0.9`（中位 0.37）、位移中位 15px，**整个视口常驻半透明中间态** | 入场只播**首次填充**那一屏；`observe` 在非 `_active and _waterfall` 时直接返回，用户一滚动（**真实滚轮/按键输入**）瀑布立即收摊。**别再给滚动加逐条入场**（§4.0） |
 | 图片多的列表滚动超 60fps 预算（中位 9.77ms / p95 16.23ms / 最大 29.64ms） | 缩略图解码**同步压在 `HistoryDelegate.paint()` 里**（冷路径 3ms/张），而 `@lru_cache` 与 QPixmap 缓存**都只活在当前进程**→每次冷启动第一次滚到图片都要重解原图 | 缩略图在 `save()` 时顺手落盘 `images/<digest>.t512.png`，`thumbnail()` 优先读小文件（0.149ms，**快 20×**），老条目懒回填 + `prefetch()` 后台成批预热。同场景降到中位 1.28ms、零帧超预算（§3.5） |
 | 滚动条停在列表中间时切换视图，**先白屏半秒再出数据**（看着像「加载慢」） | 整表重建只改 range 不改 value，**滚动位置被保留**；可见行是 30 号开外，而入场错峰延迟按**绝对行号** `min(row×50, 500)` 算 → 全屏都撞 500ms 封顶，整屏 `alpha=0`（实测切回历史页后可见行延迟 `[499,499,499,500,500,500]`） | 错峰基准改成**本轮首个绘制的可见行**（绘制顺序自上而下，首个 `observe` 就是视口顶行）：`min(max(0, row - base_row) × 50, 500)`。停在顶部时基准 = 0（与旧行为等价）；停在中间则顶行立即入场。`play()`/`stop()` 重置基准（§4.0） |
 | 取消勾选「卡片抬升」画面毫无变化 | `_draw_lift` 读的是 `fx.activity()`，而 activity 只由「视差**或**抬升任一开着」驱动——只开视差时它照样 1.0，于是抬升永远在画 | delegate 改用 `fx.lift()`（该项关闭时恒 0），与 `parallax_for()` 检查 `_EFFECTS["parallax"]` 对称。顺手把阴影从三层/`LIFT_ALPHA=26` 提到四层/44：实测贡献从「最大差 35/255、16434 像素」升到「74/255、23252 像素」（§4.0） |
+| 滚到列表中间后切类型标签 / 切视图，**入场动画不播了** | 「人滚了」原先拿 `scrollbar.valueChanged` 判断——整表重建时新的滚动范围会把当前值**夹小**，实测顺序是 `rangeChanged → valueChanged`（`clear()` 让 range 归零、`appendRows` 再撑开，值被夹下来），而且**都延后一帧**才发：`play()` 已把瀑布打开，它随后又把 `_waterfall` 关掉、`_active` 复位，动画当场消失。停在顶部时值不变（0 → 0），所以一直没暴露 | 判据换成**真实输入**：`ListEnterAnimator` 给 viewport + view 装 eventFilter，只认纵向 `Wheel` 与滚动键（一律放行）。⚠️ 过滤器要**早于**会吃掉滚轮的 `SmoothWheelScroller` 装（Qt「后装的先跑」）——历史页现在的顺序正好满足 |
+| **静止**状态下切类型标签，入场动画也没了 | 过滤 `Wheel` 时**只看了事件类型、没看方向**：历史页「双指横滑切类型标签」（§4.0）也是 Wheel 事件，只是只有 x 分量、纵向滚动条一动都不动——却被当成「人滚了」把瀑布收摊 | 滚轮判据必须**判方向**，与 `SmoothWheelScroller` 一致：纵向分量非零且不弱于横向。`KeyPress` 也收窄到真能滚的那几个键（列表是 `StrongFocus`） |
+
+| 滚动时下半屏**不停地放大缩小**（用户：「动画效果不错，就是滑动着看着有点卡顿」） | 景深的闸门算的是**瞬时速度 / 参考速度**，于是每段甩动的**惯性衰减**都会把它从 1.0 打到 ~0.09，下一次轻扫再涨回来——连扫几下就是整块下半屏反复呼吸。实测一段 20 帧的甩动：闸门 `1.00 → 0.09 → 1.00`，而**绘制根本不是瓶颈**（dpr=2 图片行也只要 3.8ms，预算 16.7ms；定时器 σ=0.53ms，零长帧） | 改成**方向闩锁**：只看本帧滚动条往哪边走（`dv > 0` 朝 1、`dv < 0` 朝 0、**`dv == 0` 保持**——惯性空隙里 dv 常是 0），乘 `activity()` 在停手后淡出。同场景闸门全程贴在 1.00。顺带把 `OverlayScrollBar.refresh()` 的每帧 `setAttribute`/`setCursor`/`update` 改成只在真变了时做 |
+| 「离视口中心越远越…」这类效果做了但**看不出来** | 只有位移这一个通道（±6px）且**正中恒为 0**——而人眼正盯着中央那几行；连续平滑的位移又没有静止参照物。实测：正中 0px、上下 1/4 处只有 2–3px | 补上**缩放与明暗**两个通道（卡片自己的边界就是参照物）。落成第 5 项装饰「卡片景深」，见 §4.0/§16.1 |
+| 比较两帧像素的用例**时好时坏**（明明改的不是它） | 逐项入场瀑布**由绘制驱动、随时间推进**：两次 `grab()` 之间那一屏还在淡入，像素本来就不同。实测 `test_lift_toggle_actually_disables_lift` 的第三次 shot 与第一次差 78 像素，全是入场残留 | 凡是「同一位置抓两帧比像素」的用例，先 `view._delegate.enter_animator.stop()` 推到静止再抓。另有两条同类坑：`QWidget.grab()` 会垫调色板底色（测 alpha 要用 `render(..., DrawChildren)`，§13.4），以及 `fx._timer.stop()` 后要手动钉住 `_activity` 才能隔绝衰减 |
 | 老条目首见仍要付一次全解码 | 落盘缩略图是后来才加的，已入库的图没有小文件 | `ImageService.prefetch(paths)`：页面装载时把当前列表的图片路径丢进后台守护线程，几秒内整库转成小文件。降级路径（不预热）也只是「首次 3ms、之后 0.15ms」，仍比「每次启动都 3ms」好一个量级（§3.5） |
 | 缩略图缓存刷掉后画出来的东西变了 | 落盘读回的 QImage 与解码路径的格式不一致（`Format_RGBA8888` vs PNG 原生格式） | 两条路径统一 `convertToFormat(Format_RGBA8888)`，测试用 `fast == slow`（QImage 逐像素相等）锁死（§3.5） |
 | 快速切视图「卡顿／数据加载较慢」 | 每次进页面都完整做一遍「查库 + 重建 + 重播 800ms 瀑布 + 140ms 整页淡入」；连点几下就是一串 4-6ms 同步阻塞 + 反复重播 | ① `app/events.py` 修订号（挂 DB commit 事件）→ 四个页面 `showEvent` 脏了才 `reload()`；② `set_items` 内容指纹相同则 `animate=False`（模型照建、不重播）；③ `_fade_in_page` 250ms 节流（§4.0） |
 | 用 `(id, pinned, favorite)` 当内容指纹，动画被误跳过 | 测试/新建条目 `id` 默认 0，两组不同内容撞成同一个键 | 指纹取**完整展示身份**（id/type/preview/content/file_path/pinned/favorite/session_name/language/sensitive/expires_at），别图省事取三元组（§4.0） |
+| 全套测试跑到一半 **Segmentation fault**（`ui/animations.py` 的 `apply_frame_rate`） | `QWidget::screen()`。没 `show()` 过的控件没有 windowHandle，QWidget 会退化成 `QGuiApplication::screenAt(mapToGlobal(中心点))` 这条兜底路径，在那条路上调用**非确定性**地踩内存——macOS 崩溃报告的原生栈是 `QWidget::screen() → QGuiApplication::screenAt()`。同样的控件同样的调用，单独跑没事、连跑上百个用例才崩（**时序/堆布局相关**，加一句 `isValid()`/`objectName()` 都能"修好"，别被骗） | **别再从控件推屏幕**。`apply_frame_rate(timer)` 不再收控件参数，`refresh_rate()` 自己问 `NSScreen.mainScreen()` + `QApplication.primaryScreen()`。见 §16.6 的通用形式：**热路径上不碰控件** |
+| 第一次滚动/第一次进页面**卡一下**（~96ms） | `refresh_rate()` 的首调用要付 `import AppKit` **78ms** + 首次 NSScreen 查询 **18ms**（实测）；而它挂在动画起点上，那次卡顿正好落在用户第一次交互 | 启动期提前付：`main.py` 在**显示主窗口之前**调 `ui.animations.prewarm_refresh_rate()`（窗口没出来时谁也看不见）。同时把 `apply_frame_rate` 从 `observe()`（**绘制驱动**，delegate.paint 每行每帧都调）挪到 `play()`——顺带修掉一个测试时序抖动：那 96ms 曾把各行起始时刻拉开 24ms，顶爆 `_starts[5]-_starts[0]` 的 ±20ms 容差 |
+| 收藏夹页冒出**左右滑动的水平滚动条**（以前没有） | 面板收藏夹列表用完整 `f"{名字}（{条数}）"` 当 item 文本，名字一长就把内容宽度撑过视口（实测 `horizontal maximum = 91`） | ① 面板与条目两个列表都 `setHorizontalScrollBarPolicy(ScrollBarAlwaysOff)`；② 面板文本按 `_PANEL_TEXT_W` 走 `elidedText`，完整名字进 `setToolTip`。条目列表本来列宽就 = 视口宽（558），永远不会出条——出条的一定是**面板**那条 |
+| 收藏夹里打开代码条目，**关键词不高亮** | 收藏夹是**内容快照**（`collection_items` 与历史解耦），但快照只冗余了 content/preview/file_path——`language` 没带，而 `item_detail_popup` 拿 `item.language` 去建 Pygments lexer，空 language 就整段无色；`source_app`/`sensitive` 同理（敏感条目该遮蔽而没遮蔽） | `collection_items` 补 `language/source_app/sensitive/sensitive_type` 四列（**v10 迁移** `_upgrade_v10_collection_snapshot_metadata`，对老库用子查询回填历史里的值）；`add_item` 存、`_row_to_item` 读（`or` 兜底 NULL）。**快照要存"渲染/操作会用到的元数据"，不只是内容** |
 
 ---
 
@@ -910,6 +942,359 @@ CREATE INDEX ix_items_session ON clipboard_items (session_id);
 - [x] Timeline 时间线页（今天/昨天/本周/更早按月分组，点击进详情）
 - [x] **Code Mode**：代码检测（services/code_detector.py，18 语言启发式 + 置信度）+ v3 迁移元数据 + 列表 mono 预览 + 详情 Pygments 高亮 + 7 个代码 Actions
 - [x] **Privacy Mode**：⌘⇧P 暂停监控 + 来源应用排除 + 敏感检测（warn/ignore/临时过期）+ 遮蔽显示 + ⌘Delete 手动删除
+- [x] **滚动与切页性能**（2026-09-30 ~ 10-01）：`SmoothWheelScroller` 弃用
+      `QPropertyAnimation`（Qt 的 `QUnifiedTimer` 不锁 vsync，一段 140ms 滚动里
+      实测 48ms 空档、σ≈12ms）改 `Qt.PreciseTimer` + 单调时钟自算 OutCubic；
+      缩略图落盘 `.t512.png`（源 256→512px）+ 懒回填 + `prefetch()` 后台预热；
+      `app/events.py` 数据修订号 + 四页 `showEvent` 判脏 + `set_items` 内容指纹
+      ——切页不再重查重播（§3.5 / §4.0）
+- [x] **滚动视觉装饰**（`ui/scroll_fx.py`，设置页「滚动效果」逐项开关）：
+      悬浮滚动条 / 上下边缘渐隐 / 缩略图视差 / 卡片抬升 / **卡片景深**（下半屏 + 只在往下翻时出现，§4.0）
+- [x] 逐项入场的错峰基准改成**视口顶行**（回归：停在列表中间切视图会先白屏半秒，§4.0）
 - [ ] 一次性准备打包：make_cert.sh 生成自签名证书
 - [ ] build.sh 打通「打包 → 签名 → 验证 checklist」
 - [ ] 性能验收：启动 <1s、万条搜索 <100ms
+- [ ] **真机实测滚动装饰**：图片多的列表快速上下滚（触控板惯性）、杀进程重启
+      再滚一遍（验落盘缩略图）、深/浅主题各看一眼
+- [ ] 开放问题的完整清单见 **§16**（本节只排「接下来做什么」的顺序）
+
+---
+
+## 12. `services/` 模块参考
+
+全项目最厚的一层（30 个文件 / 约 5.3k 行）。按职责分区，便于定位。
+
+**「Qt」列的含义**：该文件是否 import PySide6 / pyobjc / Quartz / AppKit。
+标记为「纯」的模块**没有任何 Qt/DB 依赖**，可以脱离 GUI 直接单测——新增识别类
+逻辑时优先做成纯函数模块，测试成本差一个数量级。
+
+### 12.1 剪贴板管线与存储
+
+| 模块 | 职责 | 依赖 | Qt |
+|---|---|---|---|
+| `clipboard_watcher.py` | 轮询 NSPasteboard `changeCount`；解析文本/URL/图片/文件 → 去重 → 落库（§3.1） | `app.types` | 是 |
+| `history_service.py` | 去重落库、FTS 索引同步、数量上限裁剪；`list_recent()` / `list_grouped()`（时间线分组也在这里） | `app.types`、`database.*`、`item_filters` | 否 |
+| `search_service.py` | FTS5 全文索引 + CJK 子串兜底 + 正则（§3.4，目标 1 万条 <100ms） | `services` | 否 |
+| `item_filters.py` | 「可见 / 可搜」判据：过期临时条目（§9.9）与敏感遮蔽（§9.17）。抽成一层是因为自动清扫是 24 小时周期，而条目可能是 5 分钟就过期 | `database.models` | 否 |
+
+### 12.2 内容识别（纯函数，零 Qt/DB）
+
+| 模块 | 职责 | 依赖 | Qt |
+|---|---|---|---|
+| `code_detector.py` | 18 语言启发式打分 + 置信度（阈值 0.80），结构化优先（§3.6） | — | 纯 |
+| `sensitive_detector.py` | 5 类敏感模式识别 + `mask()`（§3.7 / 新增.md §9.11-9.16） | — | 纯 |
+
+这两个模块是「策略由调用方执行，本模块只回答是不是」的范式：检测与处置分离，
+所以能在没有数据库、没有窗口的情况下验证。
+
+### 12.3 图片
+
+| 模块 | 职责 | 依赖 | Qt |
+|---|---|---|---|
+| `image_service.py` | 落盘 `images/<sha256>.png`、`.t512.png` 缩略图两级缓存、`prefetch()` 后台预热、`is_managed()` 守卫（§3.5） | — | 是 |
+
+### 12.4 模板 / Snippet
+
+| 模块 | 职责 | 依赖 | Qt |
+|---|---|---|---|
+| `template_service.py` | 模板 CRUD / 文件夹 / 搜索 / 渲染流水线；shortcut 唯一校验（冲突抛 `ValueError`，不静默覆盖） | `database.*`、`template.{custom_vars,parser,renderer,variables}` | 是 |
+| `snippet_service.py` | **兼容层**：代理到 `TemplateService`，旧 API 保持可用（v6 重构后） | `template_service` | 否 |
+
+`services/template/` 子包（模板引擎，§7.3/§7.4 的落点）：
+
+| 模块 | 职责 | Qt |
+|---|---|---|
+| `token.py` | token 模型（`Token` 含 `args`，供脚本传参） | 纯 |
+| `parser.py` | 模板字符串 → token 流；`validate_template` 保存期校验 | 纯 |
+| `renderer.py` | token 流 → 文本 + `cursor_pos` | 纯 |
+| `registry.py` | 内置变量的**唯一事实源**（类别/作用/用法/例子） | 纯 |
+| `variables.py` | 变量 Provider：date/time/datetime/uuid/clipboard/input/cursor（依赖注入，可测） | 纯 |
+| `value_sources.py` | 自定义变量值源注册表：input/fixed/command/state 四种 | 是 |
+| `custom_vars.py` | 自定义变量持久化（`template.extra_variables`）+ 旧格式迁移 | 是 |
+| `scripts.py` | 发货脚本目录解析（`cw:<脚本名>` 值源） | 纯 |
+| `matcher.py` | **英文** shortcut 键盘缓冲引擎 | 纯 |
+| `ax_matcher.py` | **中文** shortcut 触发引擎（AX 文本末尾匹配） | 纯 |
+| `ax_text.py` | AX 读焦点输入框文本 + 组合状态检测 | 是 |
+| `ime.py` | 输入法检测（ctypes + HIToolbox TIS） | 纯 |
+| `insertion.py` | 文本插入：模拟粘贴 + 剪贴板保存/恢复（§70-72） | 是 |
+| `errors.py` | 模板错误类型（保存/渲染失败必须可读、不崩） | 纯 |
+
+**注意中英分离是有意为之**：`matcher.py` 只处理英文 shortcut，`ax_matcher.py`
+只处理中文 —— 两条通道的触发时机、误触风险、甚至删除键行为都不同（§7.3）。
+
+### 12.5 会话与收藏
+
+| 模块 | 职责 | 依赖 | Qt |
+|---|---|---|---|
+| `session_service.py` | 任务型内容分组（v4）；默认「普通」会话不可删 | `database.*` | 否 |
+| `collection_service.py` | 收藏夹 + 条目**内容快照**（与历史解耦，所以删历史不影响收藏）。快照存的是**完整展示身份**：content/preview/file_path **加** language/source_app/sensitive/sensitive_type——少一样，收藏夹里的条目就画不对（代码不高亮、敏感不遮蔽） | `app.types`、`database.*` | 否 |
+
+### 12.6 系统集成
+
+| 模块 | 职责 | 依赖 | Qt |
+|---|---|---|---|
+| `hotkey_manager.py` | 自写 Quartz CGEventTap（§3.2）；不用 pynput/keyboard（它们会与监听线程的 runloop 打架） | — | 是 |
+| `autostart.py` | LaunchAgent plist 管理（§4.2） | — | 否 |
+| `app_identity.py` | 忽略应用的条目格式与匹配：name + bundle_id（只按名字匹配会随系统语言失效，§9.5） | — | 否 |
+| `action_service.py` | Action 插件加载、筛选、执行并写回剪贴板 | — | 是 |
+
+---
+
+## 13. 测试指南
+
+### 13.1 怎么跑
+
+```bash
+source .venv/bin/activate
+.venv/bin/python -m pytest -q                      # 全量（712 用例，约 29s）
+.venv/bin/python -m pytest tests/test_scroll_fx.py -q   # 单个文件
+```
+
+⚠️ **必须用 `.venv/bin/python`**（`source .venv/bin/activate` 之后再 `python` 也
+行），别用系统 / anaconda 的解释器——见 §13.3 末尾。
+
+**没有 `pytest.ini` / `conftest.py`**。每个测试文件自己负责三件事，新增测试文件
+必须照抄这三行，否则在别的机器上会挂：
+
+```python
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+pytest_app = QApplication.instance() or QApplication([])
+```
+
+### 13.2 offscreen 与「真实副作用」
+
+绝大多数 UI 测试跑在 `QT_QPA_PLATFORM=offscreen`（无窗口），所以能进 CI。
+但有几类测试**会真的动你的系统**，跑之前要知道：
+
+| 测试文件 | 真实副作用 |
+|---|---|
+| `test_clipboard.py`、`test_watcher.py` | **会改写你的系统剪贴板**（用真实 NSPasteboard） |
+| `test_ax_text.py` | 会触碰真实前台应用 → 测试内一律 `monkeypatch` 掉 `_frontmost_pid` 与 AX 调用 |
+| `test_insertion.py` | 合成键盘事件 + AX 读焦点文本不稳定，只覆盖可纯逻辑验证的部分 |
+
+### 13.3 按主题找用例
+
+| 想验证 | 去哪 |
+|---|---|
+| 剪贴板解析 / 去重落库 | `test_watcher.py`、`test_history.py` |
+| 搜索 FTS5 / CJK | `test_core.py`、`test_services_v1.py` |
+| Actions 语义 | `test_actions.py` |
+| 代码检测 / 敏感检测 | `test_code_detector.py`、`test_sensitive_detector.py` |
+| 模板引擎全链路 | `test_template_engine.py`、`test_template_service.py`、`test_shipped_scripts.py` |
+| 变量系统 / 值源 | `test_value_sources.py`、`test_variables_ux.py`、`test_scripts.py` |
+| 会话 / 收藏 / 时间线 | `test_sessions.py`、`test_services_v1.py` |
+| 主题 / 自绘控件 | `test_theme.py`、`test_fluent_combo.py`、`test_ui.py` |
+| 动效 / 滚动 | `test_animations.py`、`test_smooth_scroll.py`、`test_scroll_fx.py`、`test_list_enter.py` |
+| 切页 / 重复加载 | `test_switch_lag.py` |
+| 缩略图落盘 | `test_image_thumb_cache.py` |
+| 设置写回 | `test_settings.py` |
+
+⚠️ **测试必须用 `.venv/bin/python`**，不是系统/anaconda 的 python：`pyobjc` 的
+依赖是按框架分包装的，anaconda 那个环境里 `AppKit` 有、**`Quartz` 没有**，于是
+`tests/test_insertion.py` 在收集阶段就 ImportError，整个测试会话直接中断。看到
+「ERROR collecting tests/test_insertion.py: No module named 'Quartz'」就是解释器
+用错了，不是代码坏了。
+
+### 13.4 写测试时的既有约定
+
+- **验收标准写在模块文档里，用例与之逐条对应。** `test_scroll_fx.py`、
+  `test_list_enter.py`、`test_image_thumb_cache.py` 都是这个写法：文件头
+  docstring 列出验收标准，下面的用例一条条对上去。
+- **回归用例要能被证伪。** 本轮修「停在中途切页会白屏」时，先把修复临时改回去
+  跑一遍确认用例真的会失败，再改回来——否则可能写了个恒过的用例。
+- **测像素要绕开 Qt 的隐式底色。** `QWidget.grab()` 会把调色板底色垫在下面，
+  `render()` 默认的 `DrawWindowBackground` 同样会先铺一层不透明背景；要读透明
+  必须用 `QImage(Format_ARGB32_Premultiplied)` + `fill(transparent)` +
+  `render(..., QImage.RenderFlag.DrawChildren)`（`test_scroll_fx._alpha_at`）。
+- **全局状态用完要还原。** `ui/animations` 的滚动速度、`ui/scroll_fx` 的装饰
+  开关都是**模块级**变量，测试改完必须 `finally` 还原，否则污染后面的用例。
+
+---
+
+## 14. 配置参考
+
+**加载**：`app/config.py::load_config()` 把 `config/defaults.yaml`（入库、打包
+内置、**禁止删除**）与 `config/settings.yaml`（用户覆盖、**不入库**，见
+`.gitignore`）做**深度合并**，缺失字段回退默认值。
+
+**写回**：`save_user_config(overrides)` 与既有用户配置深度合并后写
+`settings.yaml`——所以设置页只写改动的子树，不会把默认值全量钉死。
+
+⚠️ 设置页装载配置时必须 `blockSignals`：这些控件一旦发信号就会走 `_on_change`
+把「刚从配置读出来的值」又写回 `settings.yaml`，等于打开一次设置页就把当前默认值
+钉死成用户配置，以后改 `defaults.yaml` 再也不生效（`settings_view._block_signals`）。
+
+| 段 | 键 | 默认 | 说明 |
+|---|---|---|---|
+| `app` | `theme` | `system` | `system` / `light` / `dark` |
+| | `font_size` | `14` | 历史列表基准字号（12–16） |
+| | `scroll_speed` | `0.5` | 滚动距离倍率（1.0 = Qt 原生）。触控板与鼠标滚轮共用 |
+| | `scroll_effects` | 四项全 `true` | `scrollbar` / `edge_fade` / `parallax` / `lift`（§4.0） |
+| | `launch_at_login` | `false` | 写入 LaunchAgent |
+| `history` | `max_items` | `500` | 每会话上限（`-1` = 无限） |
+| | `auto_delete_days` | `30` | 1/7/30/90/365/`-1`(永不) |
+| | `poll_interval` | `0.2` | 剪贴板轮询间隔（秒） |
+| | `save_images` | `true` | 是否把复制的图片存到本地 |
+| | `show_image_filename` | `true` | 图片条目是否显示文件名 |
+| | `max_file_size_mb` | `50` | 复制文档大小上限（`0` = 不限制） |
+| | `dedupe_scope` | `all` | `all`(跨会话全局去重) / `session`(仅本会话) |
+| `privacy` | `policy` | `warn` | `warn`(存但遮蔽) / `ignore`(不存) / `save_temporarily` |
+| | `temp_minutes` | `5` | `save_temporarily` 的到期分钟数 |
+| | `block_private_key` | `true` | 私钥类内容一律不保存（§9.15） |
+| | `paused` | `false` | 暂停监控，**持久化**（重启后保持） |
+| | `ignored_apps` | `[]` | 来源应用排除；新旧两种写法都支持，混用亦可（§9.5） |
+| `session` | `active_id` | `1` | 激活会话 = 新内容的保存目标，重启恢复 |
+| | `delete_policy` | `move` | `move`(内容移回普通，合并去重) / `delete` |
+| `hotkey` | `enabled` / `keycode` / `flags` | `true` / `9` / `[command, shift]` | ⌘⇧V；用物理 vk 码，不依赖键盘布局 |
+| | `privacy_keycode` | `35` | ⌘⇧P 隐私模式开关 |
+| `template` | `picker_keycode` | `1` | ⌘⇧S 打开模板 Picker |
+| | `default_trigger_mode` | `tab` | `tab` / `boundary` |
+| | `date_format` 等三个 | strftime | `{{date}}`/`{{time}}`/`{{datetime}}` **无参数**时的格式；带参数逐次覆盖 |
+| | `extra_variables` | `[]` | 用户自定义变量（结构化：`{name, description, source, config}`） |
+| | `favorite_variables` | `null` | 常用变量；`null` = 全部预设 |
+| `search` | `page_size` | `100` | 搜索结果分页 |
+
+---
+
+## 15. 扩展指南（怎么加一个新 X）
+
+### 15.1 新增一个 Action
+
+1. 在 `actions/` 下新建 `<名字>.py`，一个文件一个 Action（§3.3）。
+2. 继承 Action 基类，实现接口；主程序**不写死**任何 Action。
+3. 跑 `tests/test_actions.py` 的范式补一条语义断言（输入 → 输出）。
+
+设计校验原则：**任何新功能先问「能否作为 Action / 插件增量加入？」**——能，
+主程序不动；不能，才允许改核心。
+
+### 15.2 新增一项设置
+
+改动是**五处**，漏一处就会「设置页能改但不生效」或「改了不落盘」：
+
+1. `config/defaults.yaml` — 加键 + 默认值 + 注释。
+2. `ui/settings_view.py` — 建控件；`_SCROLL_EFFECT_OPTIONS` 这类选项表放模块级。
+3. 同文件 `_load_from_config()` — 装载时把配置值填进控件。
+4. 同文件 `_collect_overrides()` — 收集控件值进写回结构。
+5. 同文件 `_block_signals()` — **把新控件加进屏蔽列表**（否则装载即写回，见 §14）。
+6. `app/bootstrap.py` — 在 applier 表里加一个 `key: 回调` 分支让它即时生效。
+
+### 15.3 新增一个滚动视觉装饰
+
+照 `ui/scroll_fx.py` 现有的四个做：
+
+1. 在 `_EFFECTS` 加键（默认 `True`），`config/defaults.yaml` 同步加一项。
+2. `settings_view._SCROLL_EFFECT_OPTIONS` 加一行（键名必须与 `_EFFECTS` 一致）。
+3. 装饰本体：
+   - 静态装饰（滚动条、渐隐那种）→ 在 `ScrollFx.apply_settings()` 里
+     `setVisible` 控制，`_place()` 里定位。
+   - 动效（随滚动变化的）→ 加一个**读自己开关**的方法（如 `lift()`），
+     **绝不能让 delegate 直接读 `activity()`** —— `activity` 只由「视差或抬升
+     任一开着」驱动，只开视差时它照样是 1.0，直接读它会让另一个勾选框完全失效
+     （用户实测报过这个 bug）。
+4. 静止时必须逐像素归零：`test_frame_identical_after_scroll_settles` 会验。
+
+### 15.4 新增一个值源 / 模板变量
+
+- **自定义变量值源**：加一个 `ValueSourceProvider` 子类，在
+  `build_value_sources()` 登记一行（`services/template/value_sources.py`）。
+- **内置变量**：`services/template/registry.py` 是**唯一事实源**（类别/作用/
+  用法/例子），改这里会同时驱动变量区 UI、自动补全、tooltip 与错误提示。
+- **发货脚本**：往 `resources/scripts/` 丢一个读 stdin 的文件，模板里写
+  `cw:<文件名>` 即可用，不必改代码。
+
+---
+
+## 16. 未解决问题清单（转接必读）
+
+按「影响面 × 是否已定方案」排序。每条都标了它现在记在哪，避免同一件事在文档里
+有两个说法。
+
+### 16.1 滚动观感（本轮遗留，方案未定）
+
+| 问题 | 现状 | 候选方案 |
+|---|---|---|
+| **缩略图视差几乎看不出来** | 幅度按「离视口中心的距离」给：上下边缘 ±6px、**视口正中恒为 0**，而人眼正盯着中央那几行。且它只作用于图片条目，纯文本列表完全无感 | **已按方案③落地**（2026-10-09）：新增第 5 项装饰**卡片景深**（缩放 + 向背景淡出 + 向下推），已按用户后续要求收敛为「**只作用于下半屏 + 只在往下翻列表时出现**」；景深开着时视差自动让位。理由：人眼对**面积/明暗**变化的敏感度远高于**平滑连续位移**（后者没有静止参照物）。③ 的两个替代方案（跟手滞后、加大幅度到 ±16px）未采纳——后者还要求图片行加高约 12px |
+| **悬浮滚动条开关感知弱** | 它长得就像原生滚动条，开关差别不大（实测开关最大像素差 35/255、1847 像素，是四项里最弱的；渐隐 241/255、抬升 74/255 都明显得多） | 做得跟原生区分开（更细、更靠边、悬停才变粗） |
+| **`demo_v.py` 的滑动效果未落地** | 参考实现在仓库根目录（未跟踪）。它是**自绘 `QAbstractScrollArea`**，不是 `QListView`——自己拿 `scroll_y` 浮点数接管滚动，所以能做橡皮筋回弹 | **视觉层可直接搬**（缩放/变暗/视差都只需 `option.rect`，与现有 `parallax_for` 同源）。**橡皮筋那层搬不了**：`QListView` 的滚动位置就是 `QScrollBar.value()`（钳在 range 内的整数），要越界回弹只能换成自绘滚动区；且 macOS 触控板自带惯性，自己接管会跟系统抢（§4.0 已定「触控板不介入」）。另：demo 的视差方向与现项目**相反**（向外推 vs 向中心收） |
+| **真机实测未做** | 全部验收都在 offscreen 完成。触控板惯性、实际观感、深/浅主题下的阴影方向、杀进程重启后落盘缩略图是否生效——都还没在真机上过 | 见 §11 待办最后一条 |
+| **多显示器 / 屏幕切换只认主屏** | `refresh_rate()` 现在问 `NSScreen.mainScreen()` + `QApplication.primaryScreen()`（**故意**不再从控件推屏幕，见 §9 —— 那条路会段错误），结果按 5 秒 TTL 缓存。所以把窗口拖到一块**刷新率不同**的副屏上时，步进间隔要等 ≤5 秒才跟上，且多屏是按**菜单栏那块**算的 | 想精确就跟 `QWindow.screenChanged` 清缓存（`refresh_rate_cache_clear()` 已备好），但要接在**窗口句柄**（`windowHandle()`）上、不要碰 `QWidget::screen()`。收益小（步进快一点只是多画几帧）、风险大，先记着 |
+
+### 16.2 模板 / 变量（原文在 §7.4，此处只列条目）
+
+- `{{cursor}}` **位置产出即被丢弃**：renderer 正确返回 `cursor_pos`，但
+  `bootstrap._render_and_insert_impl` 两处都 `text, _, _ = …` → 插入后光标恒在末尾。
+- `state` 值源只有 `frontmost_app` 一个状态。
+- `command` 值源**同步跑在触发链路上**（默认 5s 超时，期间 UI 不响应；此时焦点已
+  还给目标应用 → 超时表现为目标应用卡住后才出现文本）。
+- **内置变量的参数静默丢弃**：`{{uuid:x}}` / `{{clipboard:x}}` / `{{selection:x}}` /
+  `{{cursor:x}}` 的 params 在 `parse` 里根本没保留，也没有保存期提示
+  （自定义变量那条已修）。
+- **命令值源 cwd 固定为应用启动目录**（脚本通道除外：`cw:` 跑脚本时 cwd = 脚本所在目录）。
+- **非标准前缀的 PATH 看不到**：`ensure_path` 只**追加**标准目录
+  （`/usr/local/bin`、`/opt/homebrew/bin`、`/usr/bin`、`/bin`、`/usr/sbin`、`/sbin`），
+  不前置、不改动已有优先级。用户机器上 `jq` 若在 `/opt/anaconda3/bin` 依然看不到
+  ——所以发货脚本一律只用 Python 标准库、用应用自己的解释器跑。
+- **高级语法全无**：默认值/回退（`{{x|默认}}`）、select 枚举、过滤器管道、
+  日期偏移（`{{date:+1d}}`）、字面量转义（`\{\{`）。结构上受限于
+  `_VAR_RE = \{\{(\w+)(?::([^}]*))?\}\}`，只支持「一个 `\w+` + 一段不含 `}` 的 params」。
+- 内置变量没有「外部计算」值源（`SRC_EXTERNAL` 零引用）；`VariableMeta.value_source`
+  无代码读取（纯文档元数据）。
+
+### 16.3 变换类模板（已撤回，待重做）
+
+2026-09-20 用户判定「选中文本 → 输 shortcut → Tab」的变换模板**形态不成立**，
+v9 迁移已把 17 个发货模板整批撤回（`database/migrations.py` 的
+`_WITHDRAWN_TEMPLATES` 只留作清理判据，且只删 name/shortcut/content 三项都与当初
+一致的行——用户改过任何一个字就留下）。
+
+**理由**：触发靠打字，第一个字母就把要变换的选中文本覆盖掉，输入永远拿不到；且
+结果插回原处、原文没了，没法对照验证。抢抓方案（在 CGEventTap 回调里抢在按键送达
+目标应用前读一次 AX 选中文本）技术上可行，但只是让一个不合理的交互勉强跑通，用户
+明确否掉。
+
+**待办**：重做成「**对剪贴板条目执行，结果回剪贴板**」。落点是历史列表右键菜单
+（`ui/history_view.py::_build_menu`）加一个「变换 →」子菜单；模板需要新增「结果
+去处」字段（`database/models.py` 的 `Snippet` 目前只有 `trigger_mode`）。
+`resources/scripts/` 里那 12 个读 stdin 的脚本保留下来做引擎。
+
+**核心区分**：打字展开（输入 = 你打的字，输出 = 替换它）与内容变换（输入在别处、
+输出是派生）是两类东西，不该共用一条触发通道——前者根本没有「外部输入」这个概念。
+
+### 16.4 打包与验收（未开始）
+
+- `packaging/make_cert.sh` 生成自签名证书——**每台打包机器一次**，还没跑过。
+- `packaging/build.sh` 的「打包 → 签名 → 验证 checklist」还没打通。
+- 性能验收指标（启动 <1s、万条搜索 <100ms）尚未正式测。
+
+### 16.5 已推迟的功能
+
+| 功能 | 去处 |
+|---|---|
+| OCR | 插件化，见 §6.4 的打包预警（PaddleOCR 体积） |
+| 图片预览、拖拽、多窗口 | 在 `ui/` 层扩展 |
+| AI 插件（Summarize/Translate/Rewrite/Explain） | 需先有 AI Privacy Gateway（新增.md §9.25） |
+| 第三方插件、开放 API | §3.3 的加载器已支持用户插件目录，即 V3 雏形 |
+| 快捷键自定义 | 设置页现在只展示 ⌘⇧V（暂不可改） |
+
+### 16.6 Qt 通用坑（与具体功能无关，写新代码时记得）
+
+- **`QListWidget` 的回车会被消费并发射 `itemActivated`**，只连 `itemDoubleClicked`
+  时双击能用、回车静默失效。popup 里做选择的列表必须两条信号都连。
+- **调色板里的半透明项是 QSS 函数串**（`"rgba(0, 0, 0, 0.22)"`），`QColor` 不解析
+  它；8 位十六进制又是 AARRGGBB 顺序。自绘控件取色必须自己解一次
+  （`scroll_fx.parse_color`），且**解不出时退回兜底色，绝不返回无效 QColor**（那是黑块）。
+- **`QPropertyAnimation` 走 Qt 的 `QUnifiedTimer`**——粗粒度、不锁 vsync 的 ~16ms
+  时钟。对帧率敏感的滚动缓动自己用 `Qt.PreciseTimer` + `QElapsedTimer` 算进度。
+- **`QImage.constBits()` 是 BGRA 字节序**，像素分析脚本按 RGBA 读会 R/B 反转。
+- **别在热路径上现问某个控件"归属哪块屏幕"**。`QWidget::screen()` 对没 `show()`
+  过的控件会退化成 `QGuiApplication::screenAt(mapToGlobal(中心点))`，这条兜底路径
+  会非确定性地踩内存（实测：全套测试跑到一半段错误）。同理适用于任何"拿控件向上
+  问全局状态"的调用。要屏幕就问 `QGuiApplication.primaryScreen()` /
+  `NSScreen.mainScreen()`，或者把结果**缓存在控件创建时**。
+- **"探测一次的 ObjC / 系统调用"要放在启动期付掉，别留给第一次交互动画**。
+  `import AppKit` 是 **78ms**、首次 `NSScreen` 查询 **18ms**——挂在"第一次滚动/第一次
+  进页面"上就是一次肉眼可见的卡顿（`ui.animations.prewarm_refresh_rate` 就是干这个的）。
+- **`QWidget.paint()` 驱动的东西里不要放"可能很慢"的调用**。delegate 的
+  `paint()` / 它调的 `observe()` 每行每帧都跑，一秒能跑上千次；那里只该有查表和
+  算术。慢的东西（首次 import、ObjC 往返、磁盘、DB）一律挪到"动画起点"或提前预热。

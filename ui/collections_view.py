@@ -83,6 +83,8 @@ logger = logging.getLogger(__name__)
 ROLE_ITEM = Qt.ItemDataRole.UserRole + 1  # 与 HistoryView 保持一致
 
 _PANEL_WIDTH = 180       # 浮层面板宽度
+# 面板里收藏夹名字的可用宽度：面板 180 − 左右边距 10×2 − 列表内边距/纵向条余量
+_PANEL_TEXT_W = _PANEL_WIDTH - 2 * 10 - 16
 _PANEL_HIDE_MS = 250     # 鼠标离开浮层后的收回延时（进入浮层内控件可取消）
 
 
@@ -166,6 +168,10 @@ class CollectionsView(QWidget):
 
         self._delegate = HistoryDelegate(self._items)
         self._items.setItemDelegate(self._delegate)
+        # 横向滚动条一律关掉（与历史页一致）：这些列表只有纵向语义，
+        # 一旦哪档 delegate 报出比视口宽的尺寸就会凭空冒出一条横条
+        self._items.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         enable_smooth_wheel(self._items)  # 鼠标滚轮缓动（触控板不介入）
         enable_scroll_fx(self._items, self._delegate)  # 滚动装饰
         self._items.clicked.connect(self._on_item_clicked)
@@ -188,6 +194,12 @@ class CollectionsView(QWidget):
         panel_layout.setSpacing(6)
         self._list = QListWidget()
         self._list.setObjectName("sideList")
+        # ⚠️ 必须关掉横向条：收藏夹名字长一点就会把这一列撑宽，凭空冒出一条
+        # 横向滚动条（用户实测报的「收藏夹页面出现左右滑动的滚轮」）。列表只有
+        # 纵向语义，名字改成按面板宽度做省略号（见 `_load_collections`），
+        # 全名挂在 tooltip 上。
+        self._list.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         enable_smooth_wheel(self._list)  # 收藏夹多时面板内滚动同样缓动
         self._list.currentRowChanged.connect(self._on_select)
         self._list.itemDoubleClicked.connect(self._rename)
@@ -276,8 +288,14 @@ class CollectionsView(QWidget):
         ]
         self._list.blockSignals(True)
         self._list.clear()
+        fm = self._list.fontMetrics()
         for c in self._collections:
-            item = QListWidgetItem(f"{c['name']}（{c['count']}）")
+            label = f"{c['name']}（{c['count']}）"
+            # 按面板宽度截断：横条已关掉，不截就会直接被切掉半个字
+            item = QListWidgetItem(
+                fm.elidedText(label, Qt.TextElideMode.ElideRight,
+                              _PANEL_TEXT_W))
+            item.setToolTip(label)      # 省略号截掉的部分看 tooltip
             item.setData(Qt.ItemDataRole.UserRole, c["id"])
             self._list.addItem(item)
         self._list.blockSignals(False)

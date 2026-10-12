@@ -11,6 +11,8 @@ app:
     scrollbar: true        # 悬浮滚动条（浮在内容上方，闲置自动淡出）
     edge_fade: true        # 上下边缘渐隐（还有内容的那一侧）
     parallax: true         # 缩略图视差（滚动时图与行轻微错位）
+    depth: true            # 卡片景深（按离视口中心的距离缩放+外推+向背景淡出；
+                           # 常驻，静止时也在；开着时 parallax 自动让位）
     lift: true             # 卡片抬升阴影（滚动时行像被抬起）
   launch_at_login: false   # 开机启动（写入 LaunchAgent）
 

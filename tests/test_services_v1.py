@@ -124,6 +124,88 @@ def test_collection_snapshot_survives_history_delete(engine):
     assert items[0].content == "收藏不删"
 
 
+def test_collection_snapshot_carries_render_metadata(engine):
+    """回归：收藏快照必须带上渲染/操作用得到的元数据（v10）。
+
+    用户实测报的「收藏夹里打开代码条目，文本框中的关键词没有高亮」：快照早先只存
+    type/content/preview/file_path，`language` 没存 → 详情弹窗拿 `item.language`
+    选高亮词法时拿到空串，整段没颜色；列表里的语言徽标同理。`sensitive` 也一样
+    （弹窗按它决定是否遮蔽）。
+    """
+    import hashlib
+
+    from app.types import ClipboardItem
+    from services import collection_service, history_service
+
+    code = ClipboardItem(type="code", content="def f():\n    return 1\n",
+                         preview="def f()", language="python",
+                         source_app="Code", sensitive=1,
+                         sensitive_type="api_key")
+    code.hash = hashlib.sha256(b"code-snap").hexdigest()
+    history_service.save_item(engine, code)
+
+    cid = collection_service.create_collection(engine, "代码")
+    collection_service.add_item(engine, cid, code)
+
+    got = collection_service.list_items(engine, cid)[0]
+    assert got.type == "code"
+    assert got.language == "python", "缺 language → 详情没法高亮"
+    assert got.source_app == "Code"
+    assert got.sensitive == 1 and got.sensitive_type == "api_key"
+
+
+def test_migration_v10_backfills_collection_snapshot_metadata(tmp_path):
+    """v9 → v10：collection_items 补上元数据列，并从历史回填一次。
+
+    回填只对「历史里还留着对应条目」的收藏生效——快照的语义是不依赖历史，
+    历史已清掉的只能等下次重新收藏。
+    """
+    from database.engine import create_db_engine
+    from database.migrations import _SCHEMA_VERSION, migrate
+
+    eng = create_db_engine(tmp_path / "old.db")
+    with eng.begin() as conn:
+        # v9 的 collection_items：没有 v10 那几列
+        conn.execute(text(
+            "CREATE TABLE collection_items ("
+            " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            " collection_id INTEGER NOT NULL,"
+            " clipboard_id INTEGER NOT NULL DEFAULT 0,"
+            " type VARCHAR(16) NOT NULL DEFAULT 'text',"
+            " content TEXT, preview TEXT, file_path TEXT,"
+            " created_at DATETIME NOT NULL,"
+            " UNIQUE (collection_id, clipboard_id))"))
+
+    migrate(eng)                       # 建出其余表，并给老表加上 v10 的列
+    with eng.begin() as conn:
+        cols = {r[1] for r in conn.execute(
+            text("PRAGMA table_info(collection_items)")).fetchall()}
+        assert {"language", "source_app", "sensitive", "sensitive_type"} <= cols
+
+    # 写一条历史 + 引用它的收藏快照（列留空，模拟老库升上来时的样子），
+    # 把版本退回 9 再迁一次 → 这次该回填
+    with eng.begin() as conn:
+        conn.execute(text(
+            "INSERT INTO clipboard_items (type, content, hash, language,"
+            " sensitive, created_at, updated_at) VALUES"
+            " ('code', 'x = 1', 'h1', 'python', 1,"
+            " datetime('now'), datetime('now'))"))
+        conn.execute(text(
+            "INSERT INTO collection_items (collection_id, clipboard_id, type,"
+            " content, created_at) VALUES (1, 1, 'code', 'x = 1',"
+            " datetime('now'))"))
+        conn.execute(text("PRAGMA user_version = 9"))
+
+    migrate(eng)
+    with eng.connect() as conn:
+        row = conn.execute(text(
+            "SELECT language, sensitive FROM collection_items")).fetchone()
+        assert row[0] == "python", "应从历史回填语言"
+        assert row[1] == 1
+        assert conn.execute(text("PRAGMA user_version")).scalar() == _SCHEMA_VERSION
+    eng.dispose()
+
+
 def test_collection_delete_cascades(engine):
     """删除收藏夹级联清理条目快照（FK ON DELETE CASCADE）。"""
     import hashlib
