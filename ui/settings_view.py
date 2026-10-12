@@ -10,9 +10,7 @@ from typing import Any, Callable
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
-    QFormLayout,
     QFrame,
-    QGridLayout,
     QHBoxLayout,
     QLabel,
     QListWidget,
@@ -65,6 +63,74 @@ _POLICY_OPTIONS = [("warn", "提醒（保存并遮蔽显示）"),
 _TEMP_OPTIONS = [(m, f"{m} 分钟") for m in TEMP_MINUTE_OPTIONS]
 
 
+# ---- 布局积木（设置页：轻分组 + 行内说明）----
+#
+# 原来整页是一列 QFormLayout（标签右对齐压到中间、24 行同权重、只有两行灰字当
+# 分节），读起来像后台管理系统的字段表。现在改成「组标题 + 组内细分隔线 + 每行
+# 左列标题/右列控件」，说明文字放在标题正下方——macOS 系统设置 / Raycast 的读法。
+# 不画卡片描边：窗口只有 420px 宽，再切一刀更挤。
+
+
+def _divider() -> QFrame:
+    """组内细分隔线（组与组之间靠组标题 + 18px 间距区分，不画线）。"""
+    line = QFrame()
+    line.setObjectName("settingsDivider")
+    line.setFrameShape(QFrame.Shape.NoFrame)
+    line.setFixedHeight(1)
+    return line
+
+
+def _row(title: str, control: QWidget | None = None, desc: str = "") -> QWidget:
+    """一行设置：左列标题（+ 可选说明），右列控件（无控件则右列空着）。
+
+    说明**只给「不解释就不敢动」的项**（去重范围、删除策略、敏感策略、景深…）；
+    主题、字体大小这类自明的保持单行，否则页面长度翻倍、一半是废话。tooltip 全部保留。
+    """
+    row = QWidget()
+    h = QHBoxLayout(row)
+    h.setContentsMargins(0, 7, 0, 7)
+    h.setSpacing(12)
+    left = QVBoxLayout()
+    left.setContentsMargins(0, 0, 0, 0)
+    left.setSpacing(2)
+    name = QLabel(title)
+    name.setObjectName("rowTitle")
+    left.addWidget(name)
+    if desc:
+        note = QLabel(desc)
+        note.setObjectName("rowDesc")
+        note.setWordWrap(True)
+        left.addWidget(note)
+    h.addLayout(left, 1)
+    if control is not None:
+        # 顶对齐：控件与标题同一行起算，说明文字在下方不被控件挤压
+        h.addWidget(control, 0,
+                    Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop)
+    return row
+
+
+def _stacked_row(title: str, control: QWidget, desc: str = "") -> QWidget:
+    """标题 + 说明在上、控件**整行铺开**在下。
+
+    只给「忽略的应用」这类需要宽度的复合控件——原来 90px 固定高列表 + 两个按钮
+    被硬塞进 QFormLayout 右列，是整页最挤的一行。
+    """
+    row = QWidget()
+    v = QVBoxLayout(row)
+    v.setContentsMargins(0, 7, 0, 7)
+    v.setSpacing(6)
+    name = QLabel(title)
+    name.setObjectName("rowTitle")
+    v.addWidget(name)
+    if desc:
+        note = QLabel(desc)
+        note.setObjectName("rowDesc")
+        note.setWordWrap(True)
+        v.addWidget(note)
+    v.addWidget(control)
+    return row
+
+
 class SettingsView(QWidget):
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -91,6 +157,18 @@ class SettingsView(QWidget):
 
     # ---- 构建 ----
 
+    def _section(self, layout: QVBoxLayout, title: str) -> None:
+        """加一个组标题。组间留 18px，首组不留。
+
+        组与组的分界靠「留白 + 组标题」，组内靠 `_divider()` 的细分隔线——
+        这就是「轻分组」的全部：没有卡片描边（420px 宽再切一刀更挤）。
+        """
+        if layout.count():
+            layout.addSpacing(18)
+        label = QLabel(title)
+        label.setObjectName("sectionTitle")
+        layout.addWidget(label)
+
     def _build_ui(self) -> None:
         # 内容包进 QScrollArea：窗口高度有限（初始 560px），设置项多时
         # 可滚动查看而非挤压在一起
@@ -102,117 +180,147 @@ class SettingsView(QWidget):
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         container = QWidget()
         container.setObjectName("settingsContainer")
-        layout = QFormLayout(container)
-        layout.setContentsMargins(16, 6, 16, 14)
-        layout.setHorizontalSpacing(16)
-        layout.setVerticalSpacing(10)
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(16, 8, 16, 20)
+        layout.setSpacing(0)          # 行间距由 _row 的内边距给，分隔线要紧贴
         scroll.setWidget(container)
         enable_smooth_wheel(scroll)  # 鼠标滚轮缓动（触控板不介入）
         outer.addWidget(scroll)
 
+        # ---- 外观 ----
+        self._section(layout, "外观")
+
         self._theme = FluentComboBox()
         for value, label in _THEME_OPTIONS:
             self._theme.addItem(label, value)
-        layout.addRow("主题", self._theme)
+        layout.addWidget(_row("主题", self._theme))
+        layout.addWidget(_divider())
 
         self._font = FluentComboBox()
         for size in _FONT_OPTIONS:
             self._font.addItem(f"{size} pt", size)
-        layout.addRow("字体大小", self._font)
+        layout.addWidget(_row("字体大小", self._font))
+        layout.addWidget(_divider())
 
         self._scroll_speed = FluentComboBox()
         for value, label in _SCROLL_SPEED_OPTIONS:
             self._scroll_speed.addItem(label, value)
         self._scroll_speed.setToolTip(
             "触控板与鼠标滚轮共用；「标准」= Qt 原生距离（macOS 上偏快）")
-        layout.addRow("滚动速度", self._scroll_speed)
+        layout.addWidget(_row(
+            "滚动速度", self._scroll_speed,
+            "触控板与鼠标滚轮共用；「标准」= Qt 原生距离（macOS 上偏快）"))
+        layout.addWidget(_divider())
 
-        # 滚动视觉装饰：逐项开关（见 ui/scroll_fx.py）。改完即时生效——
-        # 模块级 _EFFECTS 是现读的，已装配的滚动区会被 setUpdatesEnabled 式地
-        # 立刻切换，不用重启。
+        # 滚动视觉装饰：逐项开关（见 ui/scroll_fx.py）。改完即时生效——模块级
+        # _EFFECTS 是现读的，已装配的滚动区会立刻切换，不用重启。
+        # 五项**各自成行带说明**（原来挤在一个 2 列网格里塞进右列，标签悬空、
+        # 明显比别的行拥挤）。这一簇内部**不画分隔线**：它们是一组同类开关，
+        # 每条都带说明，靠留白就能分开；再加 4 条线反而吵。
         self._scroll_fx = {}
-        effects_box = QGridLayout()
-        effects_box.setSpacing(6)
         for i, (key, label, tip) in enumerate(_SCROLL_EFFECT_OPTIONS):
-            cb = QCheckBox(label)
+            cb = QCheckBox()
             cb.setToolTip(tip)
             cb.toggled.connect(lambda _=False: self._on_change("scroll_effects"))
-            effects_box.addWidget(cb, i // 2, i % 2)
             self._scroll_fx[key] = cb
-        layout.addRow("滚动效果", effects_box)
+            layout.addWidget(_row(label, cb, tip))
+
+        # ---- 历史与存储 ----
+        self._section(layout, "历史与存储")
 
         self._max_items = FluentComboBox()
         for value, label in _MAX_ITEMS_OPTIONS:
             self._max_items.addItem(label, value)
-        layout.addRow("每会话历史数量上限", self._max_items)
+        layout.addWidget(_row("每会话历史数量上限", self._max_items))
+        layout.addWidget(_divider())
 
         self._auto_delete = FluentComboBox()
         for value, label in _AUTO_DELETE_OPTIONS:
             self._auto_delete.addItem(label, value)
-        layout.addRow("自动删除", self._auto_delete)
+        layout.addWidget(_row(
+            "自动删除", self._auto_delete, "按复制时间清理；置顶条目不受影响"))
+        layout.addWidget(_divider())
 
         self._file_size = FluentComboBox()
         for value, label in _FILE_SIZE_OPTIONS:
             self._file_size.addItem(label, value)
-        layout.addRow("文件大小上限", self._file_size)
+        layout.addWidget(_row(
+            "文件大小上限", self._file_size, "超过上限的复制内容不保存"))
+        layout.addWidget(_divider())
 
         self._dedupe_scope = FluentComboBox()
         for value, label in _DEDUPE_OPTIONS:
             self._dedupe_scope.addItem(label, value)
-        layout.addRow("去重范围", self._dedupe_scope)
+        layout.addWidget(_row(
+            "去重范围", self._dedupe_scope,
+            "同内容再次复制：全部会话只留一份；仅本会话则各会话可各存一份"))
+        layout.addWidget(_divider())
 
         self._delete_policy = FluentComboBox()
         for value, label in _DELETE_POLICY_OPTIONS:
             self._delete_policy.addItem(label, value)
-        layout.addRow("删除会话时", self._delete_policy)
+        layout.addWidget(_row(
+            "删除会话时", self._delete_policy,
+            "移回普通会话（与其中内容合并去重），或一并删除"))
+        layout.addWidget(_divider())
 
-        self._save_images = QCheckBox("保存复制图片到本地")
-        layout.addRow("图片保存", self._save_images)
+        self._save_images = QCheckBox()
+        layout.addWidget(_row("保存复制图片", self._save_images))
+        layout.addWidget(_divider())
 
-        self._show_filename = QCheckBox("图片条目显示文件名")
-        layout.addRow("图片文件名", self._show_filename)
+        self._show_filename = QCheckBox()
+        layout.addWidget(_row(
+            "图片条目显示文件名", self._show_filename,
+            "关闭则显示「时间 · image」"))
+        layout.addWidget(_divider())
 
-        self._autostart = QCheckBox("登录时自动启动")
-        layout.addRow("开机启动", self._autostart)
-
-        hotkey = QLabel("⌘⇧V（暂不可改，V1.5 支持自定义）")
-        layout.addRow("快捷键", hotkey)
-
-        # 清理数据入口（详细交互在弹窗中，不影响收藏夹——快照独立）
+        # 清理数据入口（详细交互在弹窗中，不影响收藏夹——快照独立）。
+        # 归在「历史与存储」而不是「系统」：它删的就是存储的数据，与自动删除同类。
         clean_btn = QPushButton("打开清理数据…")
         clean_btn.setObjectName("secondaryButton")
         clean_btn.clicked.connect(self._open_clean_dialog)
-        layout.addRow("清理数据", clean_btn)
+        layout.addWidget(_row(
+            "清理数据", clean_btn, "不影响收藏夹（快照独立）"))
 
-        # ---- 隐私模式（新增.md §9）----
-        section = QLabel("隐私模式")
-        section.setObjectName("sectionTitle")
-        layout.addRow(section)
+        # ---- 隐私 ----
+        self._section(layout, "隐私")
 
         self._policy = FluentComboBox()
         for value, label in _POLICY_OPTIONS:
             self._policy.addItem(label, value)
-        layout.addRow("敏感内容策略", self._policy)
+        layout.addWidget(_row(
+            "敏感内容策略", self._policy,
+            "检测到银行卡 / 身份证 / 私钥等敏感内容时怎么处理"))
+        layout.addWidget(_divider())
 
         self._temp_minutes = FluentComboBox()
         for value, label in _TEMP_OPTIONS:
             self._temp_minutes.addItem(label, value)
-        layout.addRow("临时保存时长", self._temp_minutes)
+        layout.addWidget(_row(
+            "临时保存时长", self._temp_minutes,
+            "仅「临时保存」策略生效；到期自动删除"))
+        layout.addWidget(_divider())
 
         # §9.15：私钥类内容默认不保存（拿到即可冒充身份，且不像口令能改）
-        self._block_private_key = QCheckBox("私钥内容不保存（推荐）")
+        self._block_private_key = QCheckBox()
         self._block_private_key.setToolTip(
             "开启后，检测到 PRIVATE KEY 内容时不论上面选了哪种策略都不保存")
-        layout.addRow("私钥处理", self._block_private_key)
+        layout.addWidget(_row(
+            "私钥内容不保存", self._block_private_key,
+            "检测到 PRIVATE KEY 时，不论上面选哪种策略都不保存"))
+        layout.addWidget(_divider())
 
-        # 忽略的应用（§9.5）：来源应用 ∈ 列表 → 不保存
+        # 忽略的应用（§9.5）：来源应用 ∈ 列表 → 不保存。
+        # 整行铺开（_stacked_row）：列表 + 两个按钮需要宽度，挤进右列必被压窄。
         self._ignored_list = QListWidget()
         self._ignored_list.setObjectName("sideList")
         self._ignored_list.setFixedHeight(90)
         enable_smooth_wheel(self._ignored_list)  # 应用多时列表内滚动同样缓动
-        ignored_box = QVBoxLayout()
-        ignored_box.setSpacing(4)
-        ignored_box.addWidget(self._ignored_list)
+        ignored_box = QWidget()
+        ignored_v = QVBoxLayout(ignored_box)
+        ignored_v.setContentsMargins(0, 0, 0, 0)
+        ignored_v.setSpacing(6)
+        ignored_v.addWidget(self._ignored_list)
         ignored_btns = QHBoxLayout()
         ignored_btns.setSpacing(6)
         add_btn = QPushButton("添加")
@@ -224,30 +332,39 @@ class SettingsView(QWidget):
         ignored_btns.addWidget(add_btn)
         ignored_btns.addWidget(remove_btn)
         ignored_btns.addStretch(1)
-        ignored_box.addLayout(ignored_btns)
-        layout.addRow("忽略的应用", ignored_box)
+        ignored_v.addLayout(ignored_btns)
+        layout.addWidget(_stacked_row(
+            "忽略的应用", ignored_box, "来自这些应用的复制不进历史"))
 
-        
+        # ---- 系统 ----
+        self._section(layout, "系统")
 
-        # 暂停/恢复监控（运行时状态，不持久化）
+        self._autostart = QCheckBox()
+        layout.addWidget(_row("登录时自动启动", self._autostart))
+        layout.addWidget(_divider())
+
+        # 暂停/恢复监控。状态**是持久化的**（app/bootstrap.py 在变化时
+        # save_user_config({"privacy": {"paused": …}})，defaults.yaml 也写明
+        # 「持久化，重启后保持」）——旧注释写的「运行时状态，不持久化」是错的。
         self._pause_btn = QPushButton("暂停监控")
         self._pause_btn.setObjectName("secondaryButton")
         self._pause_btn.clicked.connect(self._toggle_pause)
-        layout.addRow("监控", self._pause_btn)
+        layout.addWidget(_row(
+            "剪贴板监控", self._pause_btn,
+            "暂停后不再记录剪贴板内容；状态重启后保持"))
+        layout.addWidget(_divider())
 
-        # ---- 关于（版权标注）----
-        section = QLabel("关于")
-        section.setObjectName("sectionTitle")
-        layout.addRow(section)
+        layout.addWidget(_row(
+            "快捷键", QLabel("⌘⇧V"), "暂不可改，V1.5 支持自定义"))
 
-        about_app = QLabel("Clipboard Workspace")
-        layout.addRow("应用", about_app)
+        # ---- 关于 ----
+        self._section(layout, "关于")
+        # 一行收完：原来「应用 / 版本 / Copyright」三条 label:value 占满一屏，
+        # 那是数据库记录的样子，不是关于页。
+        layout.addWidget(_row(
+            "Clipboard Workspace", desc=f"版本 {__version__} · © 2026 Elgg"))
 
-        about_version = QLabel(__version__)
-        layout.addRow("版本", about_version)
-
-        about_copyright = QLabel("© 2026 Elgg")
-        layout.addRow("Copyright", about_copyright)
+        layout.addStretch(1)
 
         # 改动即生效
         self._theme.currentIndexChanged.connect(lambda _: self._on_change("theme"))

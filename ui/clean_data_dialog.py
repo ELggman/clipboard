@@ -1,11 +1,14 @@
 """清理数据弹窗：筛选历史并删除（不影响收藏夹快照）。
 
 设置页只保留入口按钮，详细交互（时间筛选/勾选预览/部分删除）在此弹窗完成。
+
+**筛选项改动即刷新**（用户要求：不要「查询」按钮）。带一个短防抖——见
+`_REFRESH_DEBOUNCE_MS` 的说明。
 """
 import logging
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QDialog,
     QHBoxLayout,
@@ -28,6 +31,13 @@ _CLEAN_OPTIONS = [(7, "7 天以前"), (30, "30 天以前"), (90, "90 天以前")
 _TYPE_OPTIONS = [("", "全部类型"), ("text", "文本"), ("url", "URL"),
                  ("image", "图片"), ("file", "文件"), ("code", "代码")]
 
+# 筛选项改动后延迟这么久才真查（防抖）。为什么需要：`list_older_than` 没有
+# LIMIT，「全部历史」在大库上实测 ~44ms（5000 行，SQL + 构造 ClipboardItem），
+# 加上重建整张预览表（含 processEvents）实测单次 ~170ms。用户拨筛选时常常连着
+# 拨几个下拉（7 天→30 天→全部历史），不防抖就是连着卡几次。
+# 150ms 是「察觉不到」和「能合并连拨」之间的位置——单次改动仍像立刻生效。
+_REFRESH_DEBOUNCE_MS = 150
+
 
 class CleanDataDialog(QDialog):
     def __init__(self, engine, parent=None):
@@ -42,7 +52,8 @@ class CleanDataDialog(QDialog):
         layout.setContentsMargins(20, 16, 20, 16)
         layout.setSpacing(10)
 
-        # 筛选行：时间 + 类型 + 会话
+        # 筛选行：时间 + 类型 + 会话。**没有「查询」按钮**——改动即刷新
+        # （见 `_schedule_query`），省掉「选了条件还得再点一下」那步。
         filter_row = QHBoxLayout()
         filter_row.setSpacing(6)
         self._days = FluentComboBox()
@@ -60,10 +71,6 @@ class CleanDataDialog(QDialog):
         for s in session_service.list_sessions(engine):
             self._sessions.addItem(s["name"], s["id"])
         filter_row.addWidget(self._sessions)
-        query_btn = QPushButton("查询")
-        query_btn.setObjectName("secondaryButton")
-        query_btn.clicked.connect(self._query)
-        filter_row.addWidget(query_btn)
         filter_row.addStretch(1)
         layout.addLayout(filter_row)
 
@@ -90,9 +97,23 @@ class CleanDataDialog(QDialog):
         note.setObjectName("placeholder")
         layout.addWidget(note)
 
-        self._query()
+        # 三个下拉改动 → 自动刷新预览（带防抖）。连接放在**填充之后**：
+        # `addItem` 不 emit（见 FluentComboBox.addItem），所以填充期不会误触，
+        # 但顺序上先建后连更不容易在将来踩坑。
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.setSingleShot(True)
+        self._refresh_timer.setInterval(_REFRESH_DEBOUNCE_MS)
+        self._refresh_timer.timeout.connect(self._query)
+        for combo in (self._days, self._types, self._sessions):
+            combo.currentIndexChanged.connect(self._schedule_query)
+
+        self._query()   # 首屏立即出结果（不走防抖）
 
     # ---- 查询与删除 ----
+
+    def _schedule_query(self, *_args) -> None:
+        """筛选项变了 → 稍后自动刷新。连拨几个下拉只查最后一次。"""
+        self._refresh_timer.start()
 
     def _query(self) -> None:
         """按时间 + 类型条件查询匹配条目（可勾选，默认全选）。"""

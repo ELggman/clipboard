@@ -403,6 +403,15 @@ QLabel#privacyStatus[paused="true"] { color: $secondary; }
 /* 设置页分区标题（隐私模式等） */
 QLabel#sectionTitle { color: $secondary; font-size: 12px; font-weight: 600; }
 
+/* 设置页一行：左列「标题（+ 可选说明）」，右列控件。
+   ⚠️ 标题**故意不加粗**：满页加粗正是「后台管理系统」那种重量感的来源，标题靠
+   位置（左对齐、说明在正下方）和组标题区分层级，不靠字重。 */
+QLabel#rowTitle { color: $text; font-size: 14px; }
+QLabel#rowDesc  { color: $secondary; font-size: 12px; }
+/* 组内细分隔线（轻分组不画卡片，分界全靠它 + 组间距 + 组标题）。
+   高度由代码 setFixedHeight(1) 定，这里只上色。 */
+QFrame#settingsDivider { background: $separator; border: none; }
+
 /* 设置页滚动容器：透明背景、无边框（内容少时不露灰底） */
 QScrollArea { background: transparent; border: none; }
 QWidget#settingsContainer { background: transparent; }

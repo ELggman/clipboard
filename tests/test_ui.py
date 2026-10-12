@@ -1525,6 +1525,75 @@ def test_clean_data_dialog_type_filter(tmp_path):
     dialog.close()
 
 
+def test_clean_data_dialog_filters_auto_refresh(tmp_path):
+    """清理弹窗：**改动筛选项即刷新**，没有「查询」按钮（用户要求）。
+
+    原来是「选好条件 → 再点一下查询」。现在三个下拉（时间/类型/会话）任一变化都
+    自动重查。带 150ms 防抖——「全部历史」在大库上单次要 ~170ms（`list_older_than`
+    无 LIMIT + 重建整张预览表），连拨几个下拉不该各卡一次。
+    """
+    import datetime
+    import hashlib
+
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QPushButton
+    from sqlalchemy import text
+
+    from database.engine import create_db_engine
+    from database.migrations import migrate
+    from services import history_service
+    from ui.clean_data_dialog import CleanDataDialog
+
+    engine = create_db_engine(tmp_path / "auto.db")
+    migrate(engine)
+    for content, type_, age in (("old text", "text", 40), ("old url", "url", 40),
+                                ("new code", "code", 1)):
+        item = ClipboardItem(type=type_, content=content)
+        item.hash = hashlib.sha256(content.encode()).hexdigest()
+        history_service.save_item(engine, item)
+        with engine.begin() as conn:
+            conn.execute(text(
+                "UPDATE clipboard_items SET created_at = :t WHERE content = :c"),
+                {"t": datetime.datetime.now() - datetime.timedelta(days=age),
+                 "c": content})
+
+    dialog = CleanDataDialog(engine)
+    dialog.show()
+    pytest_app.processEvents()
+
+    # ① 没有「查询」按钮（只剩两个删除动作）
+    assert "查询" not in [b.text() for b in dialog.findChildren(QPushButton)]
+
+    def settle() -> int:
+        """等防抖跑完，返回预览行数。"""
+        QTest.qWait(250)
+        pytest_app.processEvents()
+        return dialog._list.count()
+
+    # ② 首屏立即出结果（默认「7 天以前」= 早于 7 天 → 那两条 40 天前的旧条目）
+    assert dialog._list.count() == 2
+
+    # ③ 只改下拉、**不点任何按钮** → 内容自己更新
+    dialog._days.setCurrentIndex(dialog._days.findData(0))   # 全部历史
+    assert settle() == 3
+    dialog._types.setCurrentIndex(dialog._types.findData("code"))
+    assert settle() == 1
+    dialog._types.setCurrentIndex(dialog._types.findData(""))
+    assert settle() == 3
+
+    # ④ 防抖：连拨 3 次下拉只查最后一次
+    calls = []
+    original = dialog._query
+    dialog._query = lambda: (calls.append(1), original())
+    dialog._days.setCurrentIndex(dialog._days.findData(7))
+    dialog._days.setCurrentIndex(dialog._days.findData(30))
+    dialog._days.setCurrentIndex(dialog._days.findData(90))
+    QTest.qWait(300)
+    pytest_app.processEvents()
+    assert len(calls) == 1, f"连拨 3 次应只查 1 次，实际 {len(calls)} 次"
+    dialog.close()
+
+
 def test_context_menu_bottom_row_hit(tmp_path):
     """回归：最底部条目右键可命中（viewport 坐标映射，顶部筛选条偏移）。"""
     from PySide6.QtCore import QPoint
@@ -1733,6 +1802,49 @@ def test_settings_ignored_apps_roundtrip_legacy_and_new(tmp_path):
     # 列表显示名字（不是 bundle id），匹配键取 bundle id
     assert view._ignored_list.item(1).text() == "Code"
     assert view._ignored_keys() == {"1password", "com.microsoft.vscode"}
+    view.close()
+
+
+def test_settings_page_layout_grouped_no_horizontal_scroll(tmp_path):
+    """设置页布局契约：轻分组 + 行内说明，且**不被长说明撑出横向条**。
+
+    上一版是一整列 QFormLayout（标签右对齐压到中间、24 行同权重、只有两行灰字当
+    分节），读起来像后台管理系统的字段表。现在按「组标题 + 组内细分隔线 + 每行
+    左标题/右控件」排，说明文字放标题正下方。
+
+    这条用例锁两件事：
+    1. 分组与关键行都还在（重构最容易犯的错是漏掉某一项设置）；
+    2. 横向不滚——说明文字很长时若没设 wordWrap，页面会被撑宽冒出横向条
+       （跟收藏夹页同一类回归）。
+    """
+    from PySide6.QtWidgets import QLabel, QScrollArea
+
+    from ui.settings_view import SettingsView
+
+    view = SettingsView()
+    view.set_context({"app": {}, "history": {}, "privacy": {}}, {})
+    view.resize(420, 700)
+    view.show()
+    pytest_app.processEvents()
+
+    scroll = view.findChild(QScrollArea)
+    assert scroll is not None
+    assert scroll.horizontalScrollBar().maximum() == 0, "长说明把页面撑出横向条"
+
+    # 五个分组标题（按用户任务排：外观 → 历史与存储 → 隐私 → 系统 → 关于）
+    titles = [lab.text() for lab in view.findChildren(QLabel)
+              if lab.objectName() == "sectionTitle"]
+    assert titles == ["外观", "历史与存储", "隐私", "系统", "关于"]
+
+    # 关键控件都还在（分组重排不该弄丢任何一项设置）
+    for attr in ("_theme", "_font", "_scroll_speed", "_max_items", "_auto_delete",
+                 "_file_size", "_dedupe_scope", "_delete_policy", "_save_images",
+                 "_show_filename", "_autostart", "_policy", "_temp_minutes",
+                 "_block_private_key", "_ignored_list", "_pause_btn"):
+        assert getattr(view, attr) is not None, f"{attr} 被漏掉了"
+    # 滚动效果 5 项各自成行（不再是塞进右列的 2 列网格）
+    assert set(view._scroll_fx) == {"scrollbar", "edge_fade", "parallax",
+                                    "depth", "lift"}
     view.close()
 
 

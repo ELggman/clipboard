@@ -379,6 +379,35 @@ def load_actions(extra_dirs: list[Path] = ()) -> list[ClipboardAction]:
 - **窗口**：默认 760×700，最小 640×560（编辑器弹窗化后模板页只需两栏）。
   ⚠️ HistoryView 缩放封顶 `min(width/380, 1.35)`——宽屏下 1000/380=2.63 倍
   会把行高/字号放得不可用，封顶后宽屏只增加留白
+- **设置页 = 轻分组 + 行内说明**（2026-10-12，用户报「与后台管理系统太类似」）。
+  原来是**一整列 `QFormLayout`**：标签右对齐压到中间、24 行同权重、只有两行灰字
+  当分节——读起来就是「字段名 + 控件」的字段表。现在按
+  **组标题（`QLabel#sectionTitle`）→ 组内细分隔线（`QFrame#settingsDivider`）
+  → 每行「左列标题 + 标题正下方一行小字说明」+ 右列控件**排（macOS 系统设置的
+  读法）。三条约定：
+  ① **不画卡片描边**——窗口只有 420px 宽，再切一刀更挤；分界全靠组标题 + 18px
+  组间距 + 组内 1px 细线（`_section()` / `_divider()` / `_row()` / `_stacked_row()`
+  四个积木，见 `ui/settings_view.py`）；
+  ② **说明只给「不解释就不敢动」的项**（去重范围、删除策略、敏感策略、5 个滚动
+  开关…），主题/字体大小这类自明的保持单行——每行都挂小字会让页面长一倍、一半是
+  废话；tooltip 全部保留；
+  ③ **标题不加粗**——满页加粗正是「后台管理系统」那种重量感的来源，层级靠位置和
+  组标题，不靠字重。
+  分组按**用户任务**排：外观 → 历史与存储 → 隐私 → 系统 → 关于（清理数据归在
+  「历史与存储」——它删的就是存储的数据；「关于」压成一行，不再占三行）。
+  `_load_from_config` / `_collect_overrides` / `_on_change` / 全部信号连接都按
+  **控件引用**走，所以这是**纯布局重构**：控件属性名一个没变，测试不受影响。
+  回归用例 `test_settings_page_layout_grouped_no_horizontal_scroll`（分组标题 +
+  关键控件齐全 + **长说明不许撑出横向条**）。
+- **交互约定：能自动就别让用户多点一下**（全项目统一）。设置页是**改动即生效**
+  （无「保存」按钮，见 §14）；清理数据弹窗是**改动即刷新**（无「查询」按钮，
+  时间/类型/会话任一变化自动重查）。
+  ⚠️ 自动刷新要配**防抖**：清理弹窗的 `list_older_than` **没有 LIMIT**，
+  「全部历史」在 5000 行的库上实测单次 ~170ms（SQL+构造 44ms + 重建整张预览表），
+  连拨几个下拉不防抖就是连着卡几次；`_REFRESH_DEBOUNCE_MS = 150`（单次改动仍
+  像立刻生效，连拨只查最后一次）。回归用例
+  `test_clean_data_dialog_filters_auto_refresh`（无查询按钮 + 改下拉即更新 +
+  连拨 3 次只查 1 次）。
 - **模板页两栏卡片 + 编辑弹窗**（`templates_view.py` +
   `ui/template_components.py`）：左分类（source-list 计数右对齐）/ 中列表
   （搜索 + 两行卡片行：名称+★ 行尾 ★ 点击区=收藏切换，shortcut 钥匙片 +
@@ -903,6 +932,7 @@ CREATE INDEX ix_items_session ON clipboard_items (session_id);
 | 全套测试跑到一半 **Segmentation fault**（`ui/animations.py` 的 `apply_frame_rate`） | `QWidget::screen()`。没 `show()` 过的控件没有 windowHandle，QWidget 会退化成 `QGuiApplication::screenAt(mapToGlobal(中心点))` 这条兜底路径，在那条路上调用**非确定性**地踩内存——macOS 崩溃报告的原生栈是 `QWidget::screen() → QGuiApplication::screenAt()`。同样的控件同样的调用，单独跑没事、连跑上百个用例才崩（**时序/堆布局相关**，加一句 `isValid()`/`objectName()` 都能"修好"，别被骗） | **别再从控件推屏幕**。`apply_frame_rate(timer)` 不再收控件参数，`refresh_rate()` 自己问 `NSScreen.mainScreen()` + `QApplication.primaryScreen()`。见 §16.6 的通用形式：**热路径上不碰控件** |
 | 第一次滚动/第一次进页面**卡一下**（~96ms） | `refresh_rate()` 的首调用要付 `import AppKit` **78ms** + 首次 NSScreen 查询 **18ms**（实测）；而它挂在动画起点上，那次卡顿正好落在用户第一次交互 | 启动期提前付：`main.py` 在**显示主窗口之前**调 `ui.animations.prewarm_refresh_rate()`（窗口没出来时谁也看不见）。同时把 `apply_frame_rate` 从 `observe()`（**绘制驱动**，delegate.paint 每行每帧都调）挪到 `play()`——顺带修掉一个测试时序抖动：那 96ms 曾把各行起始时刻拉开 24ms，顶爆 `_starts[5]-_starts[0]` 的 ±20ms 容差 |
 | 收藏夹页冒出**左右滑动的水平滚动条**（以前没有） | 面板收藏夹列表用完整 `f"{名字}（{条数}）"` 当 item 文本，名字一长就把内容宽度撑过视口（实测 `horizontal maximum = 91`） | ① 面板与条目两个列表都 `setHorizontalScrollBarPolicy(ScrollBarAlwaysOff)`；② 面板文本按 `_PANEL_TEXT_W` 走 `elidedText`，完整名字进 `setToolTip`。条目列表本来列宽就 = 视口宽（558），永远不会出条——出条的一定是**面板**那条 |
+| 设置页行内说明一长，整页**冒出横向滚动条** | 说明 `QLabel` 没开 `setWordWrap` → 按自然宽度撑宽容器（实测关掉 wrap → `horizontal maximum = 140`）。跟收藏夹那条是**同一类**：窄容器 + 不换行的长文本 | `_row()` / `_stacked_row()` 里统一 `setWordWrap(True)`；回归用例 `test_settings_page_layout_grouped_no_horizontal_scroll` 断言 `horizontalScrollBar().maximum() == 0`（已验证可证伪） |
 | 收藏夹里打开代码条目，**关键词不高亮** | 收藏夹是**内容快照**（`collection_items` 与历史解耦），但快照只冗余了 content/preview/file_path——`language` 没带，而 `item_detail_popup` 拿 `item.language` 去建 Pygments lexer，空 language 就整段无色；`source_app`/`sensitive` 同理（敏感条目该遮蔽而没遮蔽） | `collection_items` 补 `language/source_app/sensitive/sensitive_type` 四列（**v10 迁移** `_upgrade_v10_collection_snapshot_metadata`，对老库用子查询回填历史里的值）；`add_item` 存、`_row_to_item` 读（`or` 兜底 NULL）。**快照要存"渲染/操作会用到的元数据"，不只是内容** |
 
 ---
@@ -1173,7 +1203,11 @@ pytest_app = QApplication.instance() or QApplication([])
 改动是**五处**，漏一处就会「设置页能改但不生效」或「改了不落盘」：
 
 1. `config/defaults.yaml` — 加键 + 默认值 + 注释。
-2. `ui/settings_view.py` — 建控件；`_SCROLL_EFFECT_OPTIONS` 这类选项表放模块级。
+2. `ui/settings_view.py` — 建控件，**用 `_row(标题, 控件, 说明)` 加进所属分组**
+   （`_section()` 开组、`_divider()` 分隔；需要整行铺开的复合控件用 `_stacked_row()`）。
+   选项表（`_SCROLL_EFFECT_OPTIONS` 这类）放模块级。
+   ⚠️ 说明文字会 `setWordWrap(True)`（`_row` 里已做）——不换行的话长说明会把
+   页面撑宽、冒出横向条（实测关掉 wrap → `horizontal maximum = 140`）。
 3. 同文件 `_load_from_config()` — 装载时把配置值填进控件。
 4. 同文件 `_collect_overrides()` — 收集控件值进写回结构。
 5. 同文件 `_block_signals()` — **把新控件加进屏蔽列表**（否则装载即写回，见 §14）。
