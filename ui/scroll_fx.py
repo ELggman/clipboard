@@ -80,6 +80,13 @@ _DEPTH_EDGE_SCALE = 0.88  # 底部缩到的比例（渐近值，见上）
 _DEPTH_MAX_DIST = 0.60    # 视口高 × 此值 = 「完全到底」(t=1)
 _DEPTH_PUSH_PX = 12       # 向下推的最大位移（demo 同值）
 _DEPTH_DIM = 46           # 向列表背景淡出的最大 alpha（0-255）
+# 景深**停手后的收尾**比视差/抬升快一倍（用户实测：停下之后缩回去等得有点久，
+# 要求「恢复时间减半」）。为什么只有它要快：三个通道里景深是唯一**看得出来**的
+# 收尾——缩放 + 变淡有明确的静止参照物（卡片自己的边界），而阴影淡出、缩略图
+# 滑回 6px 都几乎看不见。所以同一段余韵只有景深读起来是「慢」。
+# 合计 45+120 = 165ms（视差/抬升仍是 90+240 = 330ms）。
+_DEPTH_HOLD_MS = 45
+_DEPTH_DECAY_MS = 120
 
 _RGBA_RE = re.compile(
     r"^rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)"
@@ -321,6 +328,10 @@ class ScrollFx(QObject):
         # 缩回去、下一次轻扫再缩回来，连扫几下就是不停放大缩小（用户实测报的
         # 「滑动着看着卡顿」）。
         self._down = 0.0
+        # 景深的收尾强度（0..1）。**和 `_activity` 分开**：它有自己的
+        # `_DEPTH_HOLD_MS`/`_DEPTH_DECAY_MS`（停手后收得比视差/抬升快一倍），
+        # 两条曲线只在 `_mark_active` 里一起复位到 1.0，之后各走各的。
+        self._depth_activity = 0.0
         self._last_bar_value = self._bar.value()
 
         self.overlay = OverlayScrollBar(self)
@@ -417,10 +428,12 @@ class ScrollFx(QObject):
         整块下半屏缩回原样，下一次轻扫再缩回去——连扫几下就是不停地放大缩小，
         读起来就是「卡顿」。方向闩锁只在真的反向时才翻。
 
-        乘 `activity()` 是为了让「停手」有个 ~330ms 的收尾；不乘的话手一停
-        `_down` 还挂着 1，效果不会消失。
+        乘 `_depth_activity` 是为了让「停手」有个收尾；不乘的话手一停 `_down`
+        还挂着 1，效果不会消失。⚠️ 用的是**景深自己**的那条衰减（165ms），不是
+        `activity()`（330ms）——停手后缩回去等得有点久，用户要求减半（见
+        `_DEPTH_HOLD_MS`）。
         """
-        return self._down * self._activity
+        return self._down * self._depth_activity
 
     def depth_for(self, rect):
         """卡片景深：→ `(缩放, 额外位移 px, 淡出 alpha 0.._DEPTH_DIM)`；未开启 → `None`。
@@ -499,6 +512,7 @@ class ScrollFx(QObject):
         self._idle_ms = 0
         if self._motion:
             self._activity = 1.0
+            self._depth_activity = 1.0
         self._ensure_timer()
 
     def _ensure_timer(self) -> None:
@@ -519,6 +533,12 @@ class ScrollFx(QObject):
         # activity：滚动停止 _HOLD_MS 后线性衰减（视差/抬升的"余韵"）
         if self._activity > 0.0 and self._idle_ms > _HOLD_MS:
             self._activity = max(0.0, self._activity - step / _DECAY_MS)
+
+        # 景深的收尾单独一条曲线：同样从 1.0 线性衰减，但更早开始、更快走完
+        # （`_DEPTH_HOLD_MS`/`_DEPTH_DECAY_MS`，合计是上面的一半）
+        if self._depth_activity > 0.0 and self._idle_ms > _DEPTH_HOLD_MS:
+            self._depth_activity = max(
+                0.0, self._depth_activity - step / _DEPTH_DECAY_MS)
 
         # 「正在往下翻」的方向闩锁（景深用）：本帧滚动条往上走（内容前移 = 在看
         # 更靠后的条目）就朝 1 靠，反向朝 0 靠；**本帧没动就保持**——惯性衰减的

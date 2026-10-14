@@ -3,10 +3,12 @@
 选型依据（DEVELOPMENT.md §3.1）：
 - 进程内 API、无 TCC 权限需求（pasteboard 不受 TCC 保护）
 - 不用 pyperclip 轮询（其走 pbpaste/pbcopy 子进程，不适合常驻）
-解析顺序与需求一致：File → Image → URL → Text。
+解析顺序：**Image → File → URL → Text**（图片必须在 File 前，见 `_parse_payload`
+的注释；表格类复制的细长位图另有一道守卫，见 `_is_table_strip`）。
 """
 import hashlib
 import logging
+from io import BytesIO
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
@@ -21,11 +23,17 @@ from AppKit import (
     NSPasteboardTypeURL,
     NSWorkspace,
 )
+from PIL import Image
 from PySide6.QtCore import QObject, QTimer, Signal
 
 from app.types import CODE, FILE, IMAGE, TEXT, URL, ClipboardItem
 
 logger = logging.getLogger(__name__)
+
+# 「细长条位图」的判定阈值：高 ≥ 宽 × 此值。8 的依据是列表缩略图——缩略图框
+# 高固定 68px、宽度按原图比例算，所以 8:1 时宽度只有 8px，再细就看不出东西了。
+# 详见 `_is_table_strip`。
+_STRIP_ASPECT = 8
 
 
 class ClipboardWatcher(QObject):
@@ -88,10 +96,12 @@ class ClipboardWatcher(QObject):
         #    必须放在 File 之前：应用内复制图片（截图/VS Code/Safari）时
         #    剪贴板常同时带 file-url 与图片数据，用户意图是图片内容
         #    → 存 images/；仅 file-url（无图片数据）才是文件复制。
+        #    ⚠️ 例外见 `_is_table_strip`：表格复制的那张位图不算「用户意图的图片」，
+        #    此时**不返回**图片、继续往下走文本分支。
         data = pb.dataForType_(NSPasteboardTypePNG)
         if data is None:
             data = pb.dataForType_(NSPasteboardTypeTIFF)
-        if data is not None:
+        if data is not None and not ClipboardWatcher._is_table_strip(pb, data):
             return ClipboardItem(
                 type=IMAGE,
                 data=bytes(data),
@@ -149,6 +159,36 @@ class ClipboardWatcher(QObject):
             language=result.language if result else "",
             language_confidence=result.confidence if result else 0.0,
         )
+
+    @staticmethod
+    def _is_table_strip(pb: NSPasteboard, data: bytes) -> bool:
+        """这张位图是不是「表格复制」的细长渲染条（是 → 别当图片存）。
+
+        Excel / Numbers / WPS 复制单元格时剪贴板**同时**放三样：TSV 纯文本、HTML、
+        以及一张**渲染出来的位图**（位图是给不支持表格的应用兜底的）。那张位图按
+        **整个选区**渲染，所以选中「一整列」时它就是一条细长条——实测 54×8192、
+        墨迹只占 0.09%、内容只占高度 0.8%，而列表缩略图框高固定 68px、宽度按原图
+        比例算，于是缩略图只有 **1px 宽**，用户看到的是「一条白条，啥也看不到」。
+
+        此时那份 TSV 才是真内容（可搜索、能再粘回表格），所以让它走文本分支。
+
+        两个条件缺一不可，各自都在挡一类误伤：
+        - **细长**（高 ≥ 宽 × `_STRIP_ASPECT`）：正常图片不会这么细长；宽扁的表格
+          选区（10 列 × 3 行）缩略图有 170px 宽，看得见，不必拦。
+        - **文本 ≥ 2 个非空行**：挡浏览器右键「拷贝图像」——那也是「图片 + 文本」，
+          但那份文本是**单行 URL**，不能把图当表格丢掉。顺带挡了截图（无文本）。
+        """
+        text = pb.stringForType_(NSPasteboardTypeString) or ""
+        if sum(1 for line in text.splitlines() if line.strip()) < 2:
+            return False
+        try:
+            # 只读文件头取尺寸，不解码像素（PNG 解析 IHDR / TIFF 读 IFD）→ ~0.2ms
+            with Image.open(BytesIO(data)) as im:
+                w, h = im.size
+        except Exception:
+            logger.debug("读位图尺寸失败，按普通图片处理", exc_info=True)
+            return False
+        return w > 0 and h >= w * _STRIP_ASPECT
 
     @staticmethod
     def _frontmost_app() -> tuple[str, str]:

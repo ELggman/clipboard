@@ -351,15 +351,15 @@ def test_depth_is_bottom_only_and_down_scroll_only():
         bottom = QRect(0, vp.bottom() - 90, 400, 90)
         lower_mid = QRect(0, vp.center().y() + 10, 400, 90)
 
-        # ① 停下（activity 归零）→ 整体为 0，直接回原路径
+        # ① 停手收尾走完（景深自己那条曲线归零）→ 整体为 0，直接回原路径
         fx._down = 1.0
-        fx._activity = 0.0
+        fx._depth_activity = 0.0
         assert fx.depth_for(top) is None
         assert fx.depth_for(bottom) is None, "停下就不该还留着形变"
 
         # ② 往下翻列表（闸门开）→ 下半屏有效果，上半屏恒等
         fx._down = 1.0
-        fx._activity = 1.0
+        fx._depth_activity = 1.0
         assert fx.depth_for(top) is None, "顶部不该有任何效果"
         d = fx.depth_for(bottom)
         assert d is not None
@@ -375,7 +375,7 @@ def test_depth_is_bottom_only_and_down_scroll_only():
 
         # ③ 往回翻（方向闩锁翻到 0）→ 立刻没有效果
         fx._down = 0.0
-        fx._activity = 1.0
+        fx._depth_activity = 1.0
         assert fx.depth_for(bottom) is None, "往回翻不该有效果"
 
         # ④ 开关关掉 → 同样 None
@@ -425,12 +425,20 @@ def test_down_gate_latches_through_momentum_decay():
         fx._down = 0.0
         fx._last_bar_value = bar.value()
 
-        # 一次甩动的尾巴：每帧位移递减到 0（末三帧「本帧没动」）
-        for dv in (24, 20, 16, 12, 8, 5, 3, 1, 1, 1, 0, 0, 0):
-            if dv:
-                bar.setValue(bar.value() + dv)     # 会经 valueChanged 刷新 activity
+        # 一次甩动的尾巴：每帧位移递减（末帧只走 1px ≈ 59px/s）
+        for dv in (24, 20, 16, 12, 8, 5, 3, 1, 1, 1):
+            bar.setValue(bar.value() + dv)     # 经 valueChanged 刷新 activity
             fx._tick()
-        assert fx._down_gate() > 0.9, "惯性尾巴上闸门不能掉下去"
+        assert fx._down_gate() > 0.9, "减速过程中闸门不能掉下去"
+
+        # 惯性走完后的「本帧没动」几帧：**方向闩锁必须保持**——回归点在这儿。
+        # ⚠️ 断言的是 `_down`（方向），**不是** `_down_gate()`：闸门这几帧会开始
+        # 往下走，那是有意的——景深停手后的收尾只有 165ms，而 `_DEPTH_HOLD_MS`
+        # (45) 比 3 帧(48ms)还短，所以「本帧没动」的第 2 帧起收尾就启动了
+        # （用户要求「恢复时间减半」，见 ui/scroll_fx.py 的 `_DEPTH_HOLD_MS`）。
+        for _ in range(3):
+            fx._tick()
+        assert fx._down > 0.9, "本帧没动不该把方向闩锁打下去"
 
         # 反向：闩锁要翻过去
         for _ in range(6):
@@ -441,6 +449,43 @@ def test_down_gate_latches_through_momentum_decay():
         scroll_fx.set_scroll_effects(dict.fromkeys(
             ("scrollbar", "edge_fade", "parallax", "depth", "lift"), True))
     view.close()
+
+
+def test_depth_recovers_twice_as_fast_as_parallax():
+    """景深停手后的收尾是视差/抬升的**一半**（用户要求「恢复时间减半」）。
+
+    三个通道里只有景深**看得出来**：缩放 + 变淡有明确的静止参照物（卡片自己的
+    边界），而阴影淡出、缩略图滑回 6px 都几乎看不见——所以同一段余韵只有景深
+    读起来是「停下之后缩回去等得有点久」。因此给景深单开一条更快的衰减曲线
+    （`_DEPTH_HOLD_MS`/`_DEPTH_DECAY_MS`），视差/抬升保持原样（90+240=330ms）。
+    """
+    view = _view()
+    lst = view._list
+    fx = lst._scroll_fx
+    try:
+        step = fx._timer.interval()
+        fx._mark_active()          # 刚滚过一下（两条曲线一起复位到 1.0）
+        fx._timer.stop()           # 只手动步进，免得真实计时器插进来
+        fx._down = 1.0             # 朝下（方向闸门开）
+        depth_frames = act_frames = None
+        for i in range(1, 80):
+            fx._tick()
+            if depth_frames is None and fx._depth_activity <= 0.0:
+                depth_frames = i
+            if act_frames is None and fx._activity <= 0.0:
+                act_frames = i
+            if depth_frames and act_frames:
+                break
+        assert depth_frames is not None, "景深收尾没走完"
+        assert act_frames is not None, "视差/抬升的余韵没走完"
+        assert depth_frames * 2 <= act_frames, (
+            f"景深收尾该约为视差/抬升的一半：{depth_frames} 帧"
+            f"({depth_frames * step}ms) vs {act_frames} 帧({act_frames * step}ms)")
+        # 收尾走完就彻底回原路径（「静止帧与无装饰逐像素一致」这条不变量）
+        vp = lst.viewport().rect()
+        assert fx.depth_for(QRect(0, vp.bottom() - 90, 400, 90)) is None
+    finally:
+        view.close()
 
 
 def test_depth_off_is_pixel_identical():
@@ -458,6 +503,7 @@ def test_depth_off_is_pixel_identical():
     def shot() -> QImage:
         fx._timer.stop()
         fx._activity = 1.0
+        fx._depth_activity = 1.0                # 景深闸门走自己那条曲线
         fx._down = 1.0                          # 打开「正在往下翻」的闸门
         vp.repaint()
         pytest_app.processEvents()

@@ -165,16 +165,23 @@ class ClipboardWatcher(QObject):
         # 按顺序探测，落到 (type, content, file_path)
 ```
 
-解析顺序（与需求一致：Text → URL → Image → File）：
+解析顺序（**图片最优先**，代码为准）：
 
-1. `NSPasteboardTypeString` → Text（再按 `is_url` 判断 URL 类型）
-2. `NSPasteboardTypePNG` / `NSPasteboardTypeTIFF` → Image（图片转存 + 缩略图，见 §3.5）
-3. `NSFilenamesPboardType`（`NSPasteboardTypeFileURL`）→ File
+1. `NSPasteboardTypePNG` / `NSPasteboardTypeTIFF` → Image（转存 + 缩略图，见 §3.5）。
+   ⚠️ **必须排在 File 之前**：应用内复制图片（截图 / VS Code / Safari）时剪贴板常
+   同时带 file-url 与图片数据，用户意图是图片内容；只有 file-url（无图片数据）才是
+   文件复制。
+   ⚠️ **例外：表格复制的细长位图**（`_is_table_strip`，见 §9「Excel 整列复制」）。
+2. `NSPasteboardTypeFileURL` → File（路径 percent-decode，否则中文名显示乱码）
+3. `NSPasteboardTypeURL` → URL；`NSPasteboardTypeString` → URL/Code/Text
+   （http(s) 开头视为 URL；再走 `code_detector`，置信度 ≥0.80 记 code）
 4. 都不是 → 忽略
 
 **`source_app` 获取**：在变化事件回调时刻取 `NSWorkspace.sharedWorkspace().frontmostApplication().localizedName()`，不需要额外权限。
 
-**去重**：内容 hash（sha256，图片 hash 图片二进制）。hash 相同 → 只更新 `updated_at` 不新增。
+**去重**：内容 hash（sha256；图片 hash **落盘 PNG 字节**而不是剪贴板原始字节——
+剪贴板可能是 TIFF，重新复制同一张图时拿到的是 PNG，按原始字节算会让去重永久失效，
+见 `ImageService.save` 的 docstring）。hash 相同 → 只更新 `updated_at` 不新增。
 
 ### 3.2 全局热键（⌘⇧V Quick Paste）
 
@@ -510,10 +517,17 @@ def load_actions(extra_dirs: list[Path] = ()) -> list[ClipboardAction]:
   以下**（顶部不要这个效果），且**只在往下翻列表时出现**（往回翻或停下 → 0，见
   `_down_gate`）。⚠️ 闸门是**方向闩锁**（只看滚动方向，不看速度大小），
   别改回按速度算——那会让下半屏随每段甩动的惯性衰减「呼吸」，见 §9。
-  **3/4/5 都只在滚动进行中非零**：`activity()` 滚动后为 1.0、
-  停止约 330ms 内衰减到 0（⑤ 还多一个方向条件），所以静止时 delegate 一律走
-  **与无装饰逐像素相同**的绘制路径。⑤ 开着时 ③ 自动让位（`parallax_for` 恒返回
-  0）——两者是同一个想法的弱化版与完整版，一起上会把缩略图推两次。
+  **3/4/5 都只在滚动进行中非零**：滚动后为 1.0、停手后衰减到 0，所以静止时 delegate
+  一律走**与无装饰逐像素相同**的绘制路径。⚠️ **收尾时间 ⑤ 比 3/4 快一倍**：
+  3/4 用 `_HOLD_MS` + `_DECAY_MS` = 90 + 240 = **330ms**；⑤ 用**自己**的
+  `_DEPTH_HOLD_MS` + `_DEPTH_DECAY_MS` = 45 + 120 = **165ms**（用户实测「停下之后
+  缩回去等得有点久」，要求「恢复时间减半」）。为什么只有 ⑤ 要快：三个通道里只有它
+  **看得出来**——缩放 + 变淡有静止参照物（卡片自己的边界），而阴影淡出、缩略图滑回
+  6px 都几乎看不见，同一段余韵只有 ⑤ 读起来是「慢」。⑤ 的收尾强度是**独立状态**
+  `_depth_activity`（`_down_gate()` 乘它，**不再**乘 `activity()`），两条曲线只在
+  `_mark_active()` 里一起复位到 1.0。⑤ 还多一个方向条件。⑤ 开着时 ③ 自动让位
+  （`parallax_for` 恒返回 0）——两者是同一个想法的弱化版与完整版，一起上会把缩略图
+  推两次。
   **为什么 ⑤ 能被看见，而 ③ 不能**（关键）：⑤ 改的是**面积和明暗**（最多缩 12%、
   淡出 α46），③ 只改位移（±6px）且**视口正中恒为 0**——而人眼正盯着中央那几行。
   连续平滑的位移没有静止参照物，读不出来；缩放有卡片自己的边界当参照物。
@@ -927,6 +941,8 @@ CREATE INDEX ix_items_session ON clipboard_items (session_id);
 | 比较两帧像素的用例**时好时坏**（明明改的不是它） | 逐项入场瀑布**由绘制驱动、随时间推进**：两次 `grab()` 之间那一屏还在淡入，像素本来就不同。实测 `test_lift_toggle_actually_disables_lift` 的第三次 shot 与第一次差 78 像素，全是入场残留 | 凡是「同一位置抓两帧比像素」的用例，先 `view._delegate.enter_animator.stop()` 推到静止再抓。另有两条同类坑：`QWidget.grab()` 会垫调色板底色（测 alpha 要用 `render(..., DrawChildren)`，§13.4），以及 `fx._timer.stop()` 后要手动钉住 `_activity` 才能隔绝衰减 |
 | 老条目首见仍要付一次全解码 | 落盘缩略图是后来才加的，已入库的图没有小文件 | `ImageService.prefetch(paths)`：页面装载时把当前列表的图片路径丢进后台守护线程，几秒内整库转成小文件。降级路径（不预热）也只是「首次 3ms、之后 0.15ms」，仍比「每次启动都 3ms」好一个量级（§3.5） |
 | 缩略图缓存刷掉后画出来的东西变了 | 落盘读回的 QImage 与解码路径的格式不一致（`Format_RGBA8888` vs PNG 原生格式） | 两条路径统一 `convertToFormat(Format_RGBA8888)`，测试用 `fast == slow`（QImage 逐像素相等）锁死（§3.5） |
+| **Excel 整列复制**存进来是一条「细长白条，啥也看不到」 | 表格复制（Excel / Numbers / WPS 选中单元格）剪贴板**同时**放 TSV 文本 + HTML + 一张**渲染出来的位图**，而图片分支优先级最高 → 存了那张位图。它按**整个选区**渲染：实测选中一整列得到 **54×8192**、墨迹只占 **0.09%**、内容只占高度 **0.8%**（其余是空白 + 网格线）。而列表缩略图框高固定 68px、宽度按原图比例算 → 缩略图只有 **1px 宽** | `_is_table_strip()`：位图**细长**（高 ≥ 宽 × 8）**且**剪贴板文本有 ≥2 个非空行 → 不走图片分支，落下去存那份 TSV 文本（可搜索、能再粘回表格）。两条条件各自挡一类误伤：细长挡正常图片、多行文本挡浏览器右键「拷贝图像」（那也是「图片 + 文本」，但文本是单行 URL）。四条回归用例在 `tests/test_watcher.py`，两个方向都验过可证伪（§3.1） |
+| 想给图片「裁掉空白边距」却裁不动 | `Image.getbbox()` **只把黑色 (0,0,0) 当背景**，白底图返回整张图（实测 60×2000 的白条返回 `(0,0,8,256)`）；而且 Excel 的位图带**网格线**（浅灰 212，占 10.6%），任何「找单一背景色」的做法都会算成「整张都是内容」 | 若要做，得自己定义墨迹（**明显深于背景**，如 < 背景灰度 − 100 → 网格线不算、文字算）+ 直方图取众数当背景 + 256 项 LUT（`point(lambda)` 会逐像素回调 Python：442K 像素要 **23ms**，换 LUT 后 **1ms**）。本轮**没做裁剪**（用户判断「效果无法保证」，实测确实如此），改走上面的存文本 |
 | 快速切视图「卡顿／数据加载较慢」 | 每次进页面都完整做一遍「查库 + 重建 + 重播 800ms 瀑布 + 140ms 整页淡入」；连点几下就是一串 4-6ms 同步阻塞 + 反复重播 | ① `app/events.py` 修订号（挂 DB commit 事件）→ 四个页面 `showEvent` 脏了才 `reload()`；② `set_items` 内容指纹相同则 `animate=False`（模型照建、不重播）；③ `_fade_in_page` 250ms 节流（§4.0） |
 | 用 `(id, pinned, favorite)` 当内容指纹，动画被误跳过 | 测试/新建条目 `id` 默认 0，两组不同内容撞成同一个键 | 指纹取**完整展示身份**（id/type/preview/content/file_path/pinned/favorite/session_name/language/sensitive/expires_at），别图省事取三元组（§4.0） |
 | 全套测试跑到一半 **Segmentation fault**（`ui/animations.py` 的 `apply_frame_rate`） | `QWidget::screen()`。没 `show()` 过的控件没有 windowHandle，QWidget 会退化成 `QGuiApplication::screenAt(mapToGlobal(中心点))` 这条兜底路径，在那条路上调用**非确定性**地踩内存——macOS 崩溃报告的原生栈是 `QWidget::screen() → QGuiApplication::screenAt()`。同样的控件同样的调用，单独跑没事、连跑上百个用例才崩（**时序/堆布局相关**，加一句 `isValid()`/`objectName()` 都能"修好"，别被骗） | **别再从控件推屏幕**。`apply_frame_rate(timer)` 不再收控件参数，`refresh_rate()` 自己问 `NSScreen.mainScreen()` + `QApplication.primaryScreen()`。见 §16.6 的通用形式：**热路径上不碰控件** |

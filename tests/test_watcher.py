@@ -100,6 +100,81 @@ def test_parse_image_only_data():
     assert item.type == "image"
 
 
+# ---- 表格复制：细长位图不该当图片存 ----
+
+def _strip_png(w: int = 54, h: int = 8192, rows: int = 5) -> bytes:
+    """Excel 整列复制那张位图的形状（尺寸取自实测载荷）。
+
+    实测：Excel 选中一整列复制时，位图 **54×8192**、墨迹只占 0.09%、内容只占
+    高度 0.8%（其余是空白 + 网格线）。这里按同样比例造一张。
+    """
+    from PIL import ImageDraw
+
+    im = Image.new("RGB", (w, h), "white")
+    draw = ImageDraw.Draw(im)
+    for r in range(rows):
+        y = 8 + r * 15
+        draw.rectangle([6, y, w - 6, y + 9], fill=(40, 40, 40))
+    buf = BytesIO()
+    im.save(buf, "PNG")
+    return buf.getvalue()
+
+
+def _set_png_and_text(data: bytes, text: str | None) -> NSPasteboard:
+    pb = NSPasteboard.generalPasteboard()
+    pb.clearContents()
+    pb.setData_forType_(data, NSPasteboardTypePNG)
+    if text is not None:
+        pb.setString_forType_(text, NSPasteboardTypeString)
+    return pb
+
+
+def test_parse_table_strip_stores_text_not_image():
+    """回归：Excel 整列复制（细长位图 + TSV 文本）→ 存**文本**，不存那条白条。
+
+    用户实测：复制一列（前几行有数据、后面全空）后，历史里是一条细长白条，
+    啥也看不到。根因是位图按整个选区渲染（54×8192），而列表缩略图框高固定
+    68px、宽度按原图比例算 → 缩略图只有 **1px 宽**。那张位图里 99.5% 是空白
+    + 网格线，真正的内容就是剪贴板上那份 TSV，存文本才是有意义的。
+    """
+    tsv = "张三\n李四\n王五\n赵六\n钱七"
+    pb = _set_png_and_text(_strip_png(), tsv)
+    item = ClipboardWatcher._parse(pb)
+    assert item is not None
+    assert item.type == "text", "细长表格位图不该被当成图片存"
+    assert item.content == tsv
+    assert not item.data, "不该再把位图交给 image_service 落盘"
+
+
+def test_parse_tall_image_with_single_line_text_keeps_image():
+    """浏览器右键「拷贝图像」也是「图片 + 文本」，但那份文本是**单行 URL**。
+
+    这是上一条的护栏：判据若只看「细长」就会把网页上的细长图误判成表格。
+    """
+    pb = _set_png_and_text(_strip_png(), "https://example.com/banner.png")
+    item = ClipboardWatcher._parse(pb)
+    assert item is not None
+    assert item.type == "image"
+    assert item.data
+
+
+def test_parse_tall_image_without_text_keeps_image():
+    """没有文本可退时，再细长的位图也照存图片——不能静默丢掉复制内容。"""
+    pb = _set_png_and_text(_strip_png(), None)
+    item = ClipboardWatcher._parse(pb)
+    assert item is not None
+    assert item.type == "image"
+    assert item.data
+
+
+def test_parse_normal_aspect_image_with_text_keeps_image():
+    """普通比例的图片 + 多行文本 → 仍是图片（细长才是表格渲染的特征）。"""
+    pb = _set_png_and_text(_png_bytes(), "第一行\n第二行")
+    item = ClipboardWatcher._parse(pb)
+    assert item is not None
+    assert item.type == "image"
+
+
 def test_parse_priority_url_over_text():
     """同时存在 URL 与普通文本时（部分应用会双写），URL 优先。"""
     pb = NSPasteboard.generalPasteboard()
