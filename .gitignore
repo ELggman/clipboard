@@ -28,7 +28,7 @@ config/settings.yaml
 # Claude Code 本地会话配置（机器相关，不入库）
 .claude/
 
-demo_v.py
-新增.md
-Snippet模块开发功能需求文档.md
-Skills-lock.json
+.demo_v.py
+.新增.md
+.Snippet模块开发功能需求文档.md
+.Skills-lock.json
