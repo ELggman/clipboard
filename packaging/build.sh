@@ -47,12 +47,30 @@ if ! security find-certificate -c "$CERT_NAME" &>/dev/null; then
 fi
 
 if [ -d "$APP_BUNDLE" ]; then
-    codesign --force --deep --sign "$CERT_NAME" \
-        --entitlements "$PACKAGING_DIR/entitlements.plist" \
-        --options runtime \
-        --timestamp=none \
-        "$APP_BUNDLE"
-    echo "  ✅ 签名完成"
+    # `--deep` 在 PySide6 这种上万文件的 bundle 上会**间歇性**报 errSecInternalComponent
+    # （keychain 争用；实测同一 bundle 首次必失败、重试即过，单文件 codesign 却正常）。
+    # 重试 3 次，全部失败才判死。
+    signed=0
+    for attempt in 1 2 3; do
+        if codesign --force --deep --sign "$CERT_NAME" \
+            --entitlements "$PACKAGING_DIR/entitlements.plist" \
+            --options runtime \
+            --timestamp=none \
+            "$APP_BUNDLE"; then
+            signed=1
+            echo "  ✅ 签名完成（第 $attempt 次尝试）"
+            break
+        fi
+        echo "  ⚠️  第 $attempt 次签名失败（errSecInternalComponent 是已知的 --deep 偶发），重试..."
+        sleep 1
+    done
+    if [ "$signed" != 1 ]; then
+        echo "  ❌ 深度签名连续 3 次失败"
+        exit 1
+    fi
+    codesign --verify "$APP_BUNDLE" 2>/dev/null \
+        && echo "  ✅ 签名校验通过" \
+        || { echo "  ❌ 签名校验未通过"; exit 1; }
 fi
 
 # ---- Step 4: 验证 ----

@@ -213,17 +213,27 @@ class HistoryDelegate(QStyledItemDelegate):
         if enter is not None:
             dy, alpha = enter
             painter.setOpacity(alpha)
-            # 裁剪到本行：入场时行内容下移，不越界压到相邻行
+            # 裁剪到本行：入场时行内容下移，不越界压到相邻行。
+            # ⚠️ 入场中的行**不再施加景深/抬升**（见下面 `entering`）——所以这个
+            # 裁剪框保持紧贴行矩形是对的，别为了「让景深也生效」把它放宽：景深的
+            # 向下位移(≤12px)与抬升的环(±4px)都在矩形外，放宽就会让入场中的内容
+            # 溢出到下一行顶上（那是真能看见的串行）。
             painter.setClipRect(option.rect)
             painter.translate(0, dy)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
         rect = QRect(option.rect).adjusted(1, 1, -1, -1)
         # 卡片景深（第 5 项装饰）：整张卡按「离视口中心的距离」缩放 + 向外推 +
-        # 向背景淡出。⚠️ 它是**恒常**的——静止时也生效，和视差/抬升「只在滚动中
-        # 非零」不一样（demo_v.py 就是这么写的）。关掉时 `depth` 为 None，连
-        # 一次 save/restore 都不做，完全走原路径。
-        depth = self._depth(option.rect)
+        # 向背景淡出。⚠️ **不是恒常的**：`depth_for` 在方向闸门为 0 时（静止 /
+        # 往回翻 / 该装饰关掉）返回 None，这里连一次 save/restore 都不做、完全走
+        # 原路径——「静止帧与无装饰逐像素一致」这条不变量对它同样成立。demo_v.py
+        # 里是常驻的，我们**故意**偏离（见 ui/scroll_fx.py 顶部的两处说明）。
+        # ⚠️ 入场中的行**不施加**景深/抬升：入场是「裁剪到本行 + 下移 + 半透明」，
+        # 而景深要把卡片推出矩形(≤12px)、抬升要在矩形外画阴影环——两者叠在一起
+        # 就会被上面那条裁剪切掉（底边切平、阴影整个消失），而同屏上已入场的行
+        # 两者都在，一帧之内同一屏两种样子。让入场中的行只播入场，落位后装饰接管。
+        entering = enter is not None
+        depth = None if entering else self._depth(option.rect)
         if depth is not None:
             scale, push, _dim = depth
             painter.translate(0, push)
@@ -237,7 +247,8 @@ class HistoryDelegate(QStyledItemDelegate):
         hovered = bool(option.state & QStyle.StateFlag.State_MouseOver)
         hover_alpha = (self.animator.alpha(index.row())
                        if self.animator else (1.0 if hovered else 0.0))
-        self._draw_background(painter, rect, option, selected, hover_alpha)
+        self._draw_background(painter, rect, option, selected, hover_alpha,
+                              entering)
 
         if item is None:
             self._draw_depth_dim(painter, rect, depth)
@@ -325,8 +336,11 @@ class HistoryDelegate(QStyledItemDelegate):
         return self._TYPE_ICONS.get(item.type, "text")
 
     def _draw_background(self, painter, rect, option, selected,
-                         hover_alpha) -> None:
-        self._draw_lift(painter, rect, option)
+                         hover_alpha, entering: bool = False) -> None:
+        # 入场中的行不画抬升阴影：阴影环在矩形外，会被入场裁剪整个切掉（只剩
+        # 半个环更难看），且与同屏已入场的行不一致——见 paint 里 `entering` 的说明。
+        if not entering:
+            self._draw_lift(painter, rect, option)
         path = QPainterPath()
         path.addRoundedRect(rect, self._s(_RADIUS), self._s(_RADIUS))
         if selected:

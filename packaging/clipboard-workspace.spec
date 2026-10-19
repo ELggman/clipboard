@@ -54,7 +54,10 @@ coll = COLLECT(
 
 app = BUNDLE(
     coll,
-    name=APP_NAME,
+    # ★ PyInstaller 6.x 起 BUNDLE 不再自动补 `.app` 后缀（osx.py 里 `self.name` 直接用
+    #   name 原样拼接 distpath），漏了后缀会产出 dist/Clipboard Workspace（无扩展名）
+    #   —— 不是 .app bundle，Finder/open/LaunchServices/TCC 都不认。必须显式带后缀。
+    name=APP_NAME + ".app",
     icon="../resources/icon.icns",  # 由 packaging/gen_icons.py 从 icon.svg 生成
     bundle_identifier=BUNDLE_ID,
     info_plist={

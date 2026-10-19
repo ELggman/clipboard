@@ -12,6 +12,7 @@
 - 动画可中断：QPropertyAnimation 新动画自动打断旧的（滚动缓动自算进度、同理可打断）
 """
 import logging
+import math
 import time
 
 from PySide6.QtCore import (
@@ -30,6 +31,10 @@ logger = logging.getLogger(__name__)
 _FADE_MS = 160    # 弹层：快（响应优先，apple-design §1 kill latency）
 _PAGE_MS = 140    # 页面切换：更快
 _OFFSET = 8       # 弹层初始偏移（从触发方向生长）
+# hover 背景淡入淡出的时间常数（毫秒）。取 56 是为了**与旧实现等价**：旧版按帧
+# 吃余量（`* 0.25` / 帧），16ms 一帧时 exp(-16/τ)=0.75 → τ≈56ms。换成 τ 之后
+# 时长不再随屏幕刷新率变（见 `HoverAnimator._tick`）。
+_HOVER_TAU_MS = 56.0
 
 
 def reduce_motion_enabled() -> bool:
@@ -114,13 +119,15 @@ def fade_in_widget(widget: QWidget) -> None:
 
 
 class HoverAnimator(QObject):
-    """delegate 行 hover 背景过渡（QTimer 步进逼近，≈180ms 完成）。
+    """delegate 行 hover 背景过渡（QTimer 步进指数逼近，与刷新率无关）。
 
     用法：`anim = HoverAnimator(listview, delegate)`；delegate.paint 里用
     `anim.alpha(index.row())` 取 0.0-1.0 当前值（非当前行返回 0）。
 
     - 尊重系统「减少动效」：直接跳到目标（0/1），无过渡
     - 不吞事件（eventFilter 返回 False）：列表键盘/右键等逻辑不受影响
+    - 时长：τ = `_HOVER_TAU_MS`，视觉上约 130ms 到位、**260ms** 完全收尾
+      （停在 1% 余量的阈值上，见 `_tick`）
     """
 
     def __init__(self, view, delegate):
@@ -130,12 +137,22 @@ class HoverAnimator(QObject):
         self._row = -1
         self._alpha = 0.0
         self._target = 0.0
+        self._pos = None      # 视口内**最后已知**的指针位置（None = 指针不在列表上）
         view.viewport().setMouseTracking(True)
         view.viewport().installEventFilter(self)
         self._timer = QTimer(view)
         self._timer.setInterval(16)
         self._timer.timeout.connect(self._tick)
         self._instant = reduce_motion_enabled()
+        # 模型结构一变（后台捕获插一行 / 切类型标签 / 搜索刷新整表重建），`_row`
+        # 记的行号就**失效**了：那一行现在是别的条目，高亮胶囊会画到指针上面一行；
+        # 而且 `_alpha` 已经到目标、定时器也停了，它**不会自己淡出**，要等鼠标动
+        # 一下才纠正（回归）。所以按最后已知的指针位置重解析一次。
+        model = view.model()
+        if model is not None:
+            for signal in (model.rowsInserted, model.rowsRemoved,
+                           model.modelReset, model.layoutChanged):
+                signal.connect(self._sync_row)
 
     def eventFilter(self, obj, event) -> bool:
         try:
@@ -144,11 +161,26 @@ class HoverAnimator(QObject):
             return False
         if obj is vp:
             if event.type() == QEvent.Type.MouseMove:
-                self._set_target(self._view.indexAt(
-                    event.position().toPoint()).row())
+                self._pos = event.position().toPoint()
+                self._set_target(self._view.indexAt(self._pos).row())
             elif event.type() == QEvent.Type.Leave:
+                self._pos = None
                 self._set_target(-1)
         return False  # 放行所有事件
+
+    def _sync_row(self, *_args) -> None:
+        """模型结构变了 → 按最后已知的指针位置重解析悬停行（见 `__init__`）。
+
+        ⚠️ 用「最后已知的指针位置」而不是现读 `QCursor.pos()`：离屏测试、窗口失焦、
+        或指针根本没进过列表时，全局光标位置都不可靠（可能落在控件外或算出假行号）。
+        """
+        try:
+            self._view.viewport()
+        except RuntimeError:
+            return
+        if self._pos is None:
+            return                    # 指针不在列表上，没有要纠正的
+        self._set_target(self._view.indexAt(self._pos).row())
 
     def _set_target(self, row: int) -> None:
         if row == self._row and self._alpha == self._target:
@@ -172,8 +204,15 @@ class HoverAnimator(QObject):
         except RuntimeError:
             self._timer.stop()
             return
-        # 指数逼近（每次 25% 余量）≈ 180ms 完成，非线性更接近原生
-        self._alpha += (self._target - self._alpha) * 0.25
+        # ⚠️ **按毫秒**逼近，不是按帧数（改过一版，别改回去）：原来写的是
+        # `alpha += diff * 0.25`（每帧吃掉 25% 余量），而 `apply_frame_rate` 会把
+        # 间隔按屏幕刷新率刷成 8ms（120Hz ProMotion）——那样 hover 只用一半时间
+        # 走完，同一台机器接高刷屏就明显更急。这个文件里其它动画都是按单调时钟/
+        # 毫秒算的，只有它按帧数，是唯一的例外。
+        # `_HOVER_TAU_MS` 由旧版在 60Hz 的等效值反推：exp(-16/τ) = 0.75。
+        step = self._timer.interval()
+        self._alpha += (self._target - self._alpha) * (
+            1.0 - math.exp(-step / _HOVER_TAU_MS))
         if abs(self._alpha - self._target) < 0.01:
             self._alpha = self._target
             self._timer.stop()
@@ -289,6 +328,13 @@ class ListEnterAnimator(QObject):
         elif t == QEvent.Type.KeyPress and event.key() in self._SCROLL_KEYS:
             self._on_scrolled()      # 列表是 StrongFocus，方向键/翻页键也能滚
         return False
+
+    def on_user_scroll(self) -> None:
+        """用户**真的**滚了：滚轮/按键由 `eventFilter` 认，**拖动滚动条**由
+        `ScrollFx.user_scrolled` 通知到这里（拖条走 `setValue`，没有 Wheel 事件，
+        自己看不到）。两条路都落到 `_on_scrolled`。
+        """
+        self._on_scrolled()
 
     def _on_scrolled(self, _value: int = 0) -> None:
         """滚动一旦发生，首次填充的瀑布就此结束：之后露面的行一律静止。"""

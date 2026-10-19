@@ -43,10 +43,11 @@ def _settle(fx, ticks: int = 40) -> None:
     pytest_app.processEvents()
 
 
-def _wheel(dy: int = -120) -> QWheelEvent:
+def _wheel(dy: int = -120, dx: int = 0) -> QWheelEvent:
+    """纵向滚轮事件（`dx != 0` 模拟横向双指滑动：只有 x 分量）。"""
     return QWheelEvent(
         QPointF(10, 10), QPointF(10, 10),
-        QPoint(0, dy * 8), QPoint(0, dy),
+        QPoint(dx * 8, dy * 8), QPoint(dx, dy),
         Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
         Qt.ScrollPhase.NoScrollPhase, False)
 
@@ -563,3 +564,100 @@ def test_frame_identical_after_scroll_settles():
     pytest_app.processEvents()
     assert lst.viewport().grab().toImage() == before
     view.close()
+
+
+# ---- 审查回归（2026-10-14 代码审查）----
+
+def test_horizontal_swipe_does_not_light_decorations():
+    """回归：横滑（历史页切类型标签）不该点亮抬升/视差/景深。
+
+    `ScrollFx.eventFilter` 原来对**任何** Wheel 都 `_mark_active()`，不判方向。
+    横向双指滑动也是 Wheel 事件、只是只有 x 分量，这个列表一动都不动——却会把
+    装饰点亮一下（`_down` 还留着上次向下的值，闸门直接就是开的）。
+    判据必须与 `ListEnterAnimator` / `SmoothWheelScroller` 一致：纵向分量非零
+    且不弱于横向。
+    """
+    view = _view()
+    lst = view._list
+    fx = lst._scroll_fx
+    fx._timer.stop()
+    try:
+        fx._down = 1.0                      # 上一次是往下翻的
+        fx._activity = fx._depth_activity = 0.0
+        QApplication.sendEvent(lst.viewport(), _wheel(dy=0, dx=-60))   # 纯横滑
+        assert fx.activity() == 0.0, "横滑不该点亮装饰"
+        QApplication.sendEvent(lst.viewport(), _wheel(dy=-120))        # 真·纵向滚
+        assert fx.activity() == 1.0, "纵向滚动仍要生效"
+    finally:
+        view.close()
+
+
+def test_wheel_on_non_scrollable_list_does_not_light_decorations():
+    """短列表（无滚动范围）上滚一下，列表纹丝不动 → 不该闪一次卡片阴影。"""
+    view = _view(rows=3)
+    lst = view._list
+    fx = lst._scroll_fx
+    fx._timer.stop()
+    try:
+        bar = lst.verticalScrollBar()
+        assert bar.maximum() == bar.minimum(), "前提：这个列表没有滚动范围"
+        fx._down = 1.0
+        fx._activity = fx._depth_activity = 0.0
+        QApplication.sendEvent(lst.viewport(), _wheel(dy=-120))
+        assert fx.activity() == 0.0, "没得滚就不该有滚动装饰"
+    finally:
+        view.close()
+
+
+def test_depth_for_survives_zero_height_viewport():
+    """回归：视口高为 0 时 `depth_for` 不能抛除零。
+
+    它跑在 `delegate.paint` 里——一条 ZeroDivisionError 能把整个列表的绘制打断。
+    `parallax_for` 一直有 `max(1.0, vp.height()/2)` 守卫，`depth_for` 漏了。
+    """
+    view = _view()
+    lst = view._list
+    fx = lst._scroll_fx
+    fx._timer.stop()
+    try:
+        fx._down = 1.0
+        fx._depth_activity = 1.0
+        lst.viewport().resize(400, 0)       # 布局还没铺开 / 离屏重绘
+        assert lst.viewport().rect().height() == 0, "前提：视口高为 0"
+        assert fx.depth_for(QRect(0, 0, 400, 64)) is not None, "不该抛异常"
+    finally:
+        view.close()
+
+
+def test_entering_rows_skip_depth_and_lift():
+    """回归：入场中的行不施加景深/抬升。
+
+    入场是「裁剪到本行 + 下移 + 半透明」，而景深要把卡片推出矩形(≤12px)、抬升要
+    在矩形外画阴影环(±4px)——两者叠上去就被那条裁剪切掉：底边切平、阴影整个消失，
+    而同屏上已入场的行两者都在，一帧之内同一屏两种样子。
+    """
+    view = _view()
+    fx = view._list._scroll_fx
+    d = view._delegate
+    asked, lifted = [], []
+    real_depth, real_lift = d._depth, d._draw_lift
+    try:
+        d._depth = lambda rect: (asked.append(rect), real_depth(rect))[1]
+        d._draw_lift = lambda p, r, o: lifted.append(r)
+        d.enter_animator.play(view._model.rowCount())   # 整表处于入场中
+        fx._timer.stop()
+        fx._down = 1.0
+        fx._activity = fx._depth_activity = 1.0         # 装饰推满
+        view._list.viewport().repaint()
+        pytest_app.processEvents()
+        assert asked == [], "入场中的行不该去问景深"
+        assert lifted == [], "入场中的行不该画抬升阴影"
+
+        d.enter_animator.stop()                         # 入场结束 → 装饰接管
+        view._list.viewport().repaint()
+        pytest_app.processEvents()
+        assert asked, "入场结束后景深要生效"
+        assert lifted, "入场结束后抬升要生效"
+    finally:
+        d._depth, d._draw_lift = real_depth, real_lift
+        view.close()

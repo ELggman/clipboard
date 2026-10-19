@@ -41,6 +41,7 @@ from PySide6.QtCore import (
     QRectF,
     Qt,
     QTimer,
+    Signal,
 )
 from PySide6.QtGui import QColor, QLinearGradient, QPainter, QPainterPath
 from PySide6.QtWidgets import QWidget
@@ -311,6 +312,13 @@ class EdgeFade(QWidget):
 class ScrollFx(QObject):
     """一个滚动区的装饰集合（见模块文档）。`enable_scroll_fx(area)` 装配。"""
 
+    # 「用户**真的**滚了」（拖动滚动条 / 按滚动键）——只覆盖**滚轮以外**的输入：
+    # 滚轮由各动画器自己的 eventFilter 认（那边必须比吃滚轮的 `SmoothWheelScroller`
+    # 早装，见 `ListEnterAnimator.__init__`）。订阅者：`ListEnterAnimator`——它据此
+    # 让首次填充的瀑布收摊，否则**拖**条期间露面的行还会按最多 500ms 错峰排队、
+    # 晚半秒才淡出来（走 `setValue` 没有 Wheel 事件，它自己看不到）。
+    user_scrolled = Signal()
+
     def __init__(self, area, delegate=None):
         super().__init__(area)
         self._area = area
@@ -343,6 +351,10 @@ class ScrollFx(QObject):
         self._timer.timeout.connect(self._tick)
 
         self._bar.valueChanged.connect(self._mark_active)
+        # 拖**原生**滚动条（悬浮条关掉时用系统那条）也是「人滚了」——`sliderPressed`
+        # 只在用户真的按住滑块时发，程序化 `setValue` 不发，所以不会像 `valueChanged`
+        # 那样被整表重建误触发（见 `ListEnterAnimator.__init__` 那段回归说明）。
+        self._bar.sliderPressed.connect(self.user_scrolled.emit)
         self._vp.installEventFilter(self)
         if delegate is not None:
             delegate.scroll_fx = self
@@ -455,10 +467,13 @@ class ScrollFx(QObject):
         if gate <= 0.004:
             return None
         vp = self._vp.rect()
+        # ⚠️ 除零守卫：与 `parallax_for` 的 `max(1.0, vp.height()/2)` 对称。视口高
+        # 为 0 时（布局还没铺开 / 离屏重绘）这里会抛 ZeroDivisionError，而它跑在
+        # `delegate.paint` 里——一条除零能把整个列表的绘制打断。
+        span = max(1.0, vp.height() * _DEPTH_MAX_DIST)
         # 只看中心以下：上半屏直接返回 None（不是返回恒等值）——这样 delegate 对
         # 顶部每一行都走**完全原始**的绘制路径，连一次 translate 都没有
-        below = ((rect.center().y() - vp.center().y())
-                 / (vp.height() * _DEPTH_MAX_DIST))
+        below = (rect.center().y() - vp.center().y()) / span
         if below <= 0.0:
             return None
         below = min(1.0, below)
@@ -487,6 +502,8 @@ class ScrollFx(QObject):
 
     def set_drag(self, on: bool) -> None:
         self._drag = on
+        if on:
+            self.user_scrolled.emit()   # 开始拖条 = 人滚了（见 user_scrolled）
         self._ensure_timer()
 
     # ---- 驱动 ----
@@ -501,7 +518,19 @@ class ScrollFx(QObject):
             if t == QEvent.Type.Resize:
                 self._place()
             elif t == QEvent.Type.Wheel:
-                self._mark_active()
+                # ⚠️ 必须**判方向**，判据与 `ListEnterAnimator.eventFilter` /
+                # `SmoothWheelScroller` 一致（纵向分量非零且不弱于横向）。
+                # 回归：历史页「双指横滑切类型标签」（§4.0）也是 Wheel 事件，只是
+                # 只有 x 分量、这个列表一动都不动；不判方向就会把抬升/视差/景深
+                # 点亮一下（`_down` 还留着上次向下的值，闸门直接就是开的）。
+                angle = event.angleDelta()
+                dy, dx = ((angle.y(), angle.x()) if (angle.y() or angle.x())
+                          else (event.pixelDelta().y(), event.pixelDelta().x()))
+                # 再要求**确实有得滚**：短列表（无滚动范围）上滚一下，列表纹丝不动，
+                # 却会闪一次卡片阴影——那更没道理。
+                if (dy and abs(dy) >= abs(dx)
+                        and self._bar.maximum() > self._bar.minimum()):
+                    self._mark_active()
             elif t == QEvent.Type.Enter:
                 self.set_hover(True)
             elif t == QEvent.Type.Leave:
@@ -587,7 +616,21 @@ def enable_scroll_fx(area, delegate=None) -> ScrollFx:
     if existing is not None:
         if delegate is not None:
             existing.attach_delegate(delegate)
+            _hook_user_scroll(existing, delegate)
         return existing
     fx = ScrollFx(area, delegate)
     area._scroll_fx = fx
+    _hook_user_scroll(fx, delegate)
     return fx
+
+
+def _hook_user_scroll(fx: ScrollFx, delegate) -> None:
+    """把「人滚了」接到入场动画器上——**拖动滚动条**也要让首次填充的瀑布收摊。
+
+    ⚠️ 装配顺序有要求：调用方得**先**建好 `delegate.enter_animator`（历史页正是
+    这个顺序：先 ListEnterAnimator，再 enable_scroll_fx）。没装动画器的滚动区
+    （时间线 / 收藏夹 / 模板页）没有可收摊的瀑布，跳过即可。
+    """
+    anim = getattr(delegate, "enter_animator", None)
+    if anim is not None:
+        fx.user_scrolled.connect(anim.on_user_scroll)

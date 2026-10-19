@@ -879,6 +879,8 @@ CREATE INDEX ix_items_session ON clipboard_items (session_id);
 | `security import` MAC verification failed | openssl 3.x PBES2 不兼容 | `openssl pkcs12 -export -legacy` |
 | Actions 运行时加载失败 | PyInstaller 静态分析收集不到 | spec `collect_submodules` / 外部插件目录 |
 | 构建 `rm -rf dist` 失败 | 旧实例占用 | build.sh 先 pkill |
+| 产出 `dist/Clipboard Workspace`（**无 `.app`**，Finder/`open`/LaunchServices 都不认） | PyInstaller **6.x 起 BUNDLE 不再自动补 `.app`**（`osx.py` 把 name 原样拼进 distpath） | spec 里 `BUNDLE(name=APP_NAME + ".app")` 显式带后缀 |
+| 深度签名间歇报 `errSecInternalComponent`（同一 bundle **首次必失败、重试即过**，单文件 codesign 却正常） | `--deep` 在 PySide6 万级文件 bundle 上 keychain 争用 | build.sh 对 codesign **重试 3 次**（§6.2） |
 | 清理数据把用户原文档删了 | FILE 条目 file_path 指向用户文档，删除无条件 unlink | `is_managed` 守卫只删 images/ 内文件（§3.5） |
 | 收藏夹图片粘贴失效 | 删除历史清理了被收藏引用的图片文件 | 删除前查 `is_file_path_referenced`（§3.5） |
 | 历史/收藏全部无缩略图，重启恢复 | `@lru_cache` 缓存了失败 None（文件缺失毒化） | 失败抛异常不缓存，`_thumbnail_cached` 只缓存成功（§3.5） |
